@@ -142,6 +142,10 @@
 
 #include "context/contextmodule.h"
 
+#ifdef MUE_BUILD_EDITUDE_MODULE
+#include "editude/editudemodule.h"
+#endif
+
 #ifdef MUE_BUILD_CONVERTER_MODULE
 #include "converter/convertermodule.h"
 #endif
@@ -508,6 +512,9 @@ static void addConsoleModules(std::shared_ptr<ConsoleApp> app)
     app->addModule(new mu::notation::NotationModule());
     app->addModule(new mu::playback::PlaybackModule());
     app->addModule(new mu::project::ProjectModule());
+#ifdef MUE_BUILD_EDITUDE_MODULE
+    app->addModule(new mu::editude::EditudeModule());
+#endif
     app->addModule(new muse::extensions::ExtensionsModule());
     app->addModule(new mu::notation::NotationSceneModule());
 }
