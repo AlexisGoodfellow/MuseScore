@@ -23,6 +23,8 @@ set(MODULE_TEST editude_tests)
 set(MODULE_TEST_SRC
     ${CMAKE_CURRENT_LIST_DIR}/environment.cpp
     ${CMAKE_CURRENT_LIST_DIR}/scoreapplicator_tests.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/operationtranslator_tests.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/editudeservice_reconnect_tests.cpp
     ${PROJECT_SOURCE_DIR}/src/engraving/tests/utils/scorerw.cpp
     ${PROJECT_SOURCE_DIR}/src/engraving/tests/utils/scorerw.h
     ${PROJECT_SOURCE_DIR}/src/engraving/tests/mocks/engravingconfigurationmock.h

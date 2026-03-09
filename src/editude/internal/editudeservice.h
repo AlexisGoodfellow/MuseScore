@@ -23,15 +23,18 @@
 
 #include <memory>
 
+#include <QJsonArray>
 #include <QNetworkAccessManager>
 #include <QObject>
 #include <QString>
+#include <QTimer>
 #include <QWebSocket>
 
 #include "global/modularity/ioc.h"
 #include "global/async/asyncable.h"
 #include "engraving/dom/score.h"
 #include "notation/inotation.h"
+#include "project/iprojectfilescontroller.h"
 
 #include "operationtranslator.h"
 #include "scoreapplicator.h"
@@ -48,19 +51,40 @@ public:
     void onNotationChanged(mu::notation::INotationPtr notation);
 
 private:
-    enum class State { Disconnected, Authenticating, Joining, Live };
+    enum class State { Disconnected, Authenticating, Joining, Live, Reconnecting };
 
     void onConnected();
     void onServerMessage(const QString& msg);
     void onScoreChanges(const mu::engraving::ScoreChanges& changes);
+    void openScoreForSession();
+    void applyPendingOps();
+    void scheduleTokenRefresh();
+    void onTokenRefreshTimer();
+    void onDisconnected();
+    void onReconnectTimer();
+    void _openWebSocket();
+
+    muse::ContextInject<mu::project::IProjectFilesController> m_projectFiles{ iocContext() };
 
     QWebSocket* m_socket = nullptr;
     QNetworkAccessManager m_nam;
     State m_state = State::Disconnected;
     QString m_token;
+    QString m_sessionUrl;
     QString m_websocketUrl;
     QString m_projectId;
+    QString m_snapshotPath;
     int m_clientSeq = 0;
+    int m_snapshotRevision = 0;
+    int m_serverRevision = 0;
+    QJsonArray m_pendingOps;
+    bool m_bootstrapReady = false;
+    QTimer* m_tokenRefreshTimer = nullptr;
+    qint64 m_tokenExpiry = 0;
+    QTimer* m_reconnectTimer = nullptr;
+    int m_reconnectAttempt = 0;
+    bool m_wsEverConnected = false;
+    QJsonArray m_bufferedOps;
 
     mu::notation::INotationPtr m_currentNotation;
     mu::engraving::Score* m_score = nullptr;
