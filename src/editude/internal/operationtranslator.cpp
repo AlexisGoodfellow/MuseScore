@@ -33,15 +33,30 @@ using namespace mu::engraving;
 std::optional<QJsonObject> OperationTranslator::translate(
     EngravingObject* obj,
     const std::unordered_set<CommandType>& cmds,
-    const QString& partId)
+    const QString& partId,
+    const QHash<EngravingObject*, QString>& elementToUuid)
 {
-    if (cmds.find(CommandType::AddElement) == cmds.end()) {
-        return std::nullopt;
+    // ── AddElement ────────────────────────────────────────────────────────────
+    if (cmds.find(CommandType::AddElement) != cmds.end()) {
+        if (obj && obj->type() == ElementType::NOTE) {
+            return buildInsertNote(static_cast<Note*>(obj), partId);
+        }
     }
-    if (!obj || obj->type() != ElementType::NOTE) {
-        return std::nullopt;
+
+    // ── RemoveElement ─────────────────────────────────────────────────────────
+    if (cmds.find(CommandType::RemoveElement) != cmds.end()) {
+        if (obj && obj->type() == ElementType::NOTE) {
+            // Only emit DeleteEvent for notes that were originally inserted via
+            // a remote op — those are tracked in the elementToUuid map.
+            const QString uuid = elementToUuid.value(obj);
+            if (!uuid.isEmpty()) {
+                return buildDeleteEvent(uuid);
+            }
+            // Local-origin notes don't have a UUID yet; ignore.
+        }
     }
-    return buildInsertNote(static_cast<Note*>(obj), partId);
+
+    return std::nullopt;
 }
 
 QJsonObject OperationTranslator::buildInsertNote(Note* note, const QString& partId)
@@ -51,21 +66,32 @@ QJsonObject OperationTranslator::buildInsertNote(Note* note, const QString& part
     beat["numerator"] = tick.numerator();
     beat["denominator"] = tick.denominator();
 
-    const DurationType dt = note->chord()->durationType().type();
-    const int dots = note->chord()->dots();
+    const DurationType dt   = note->chord()->durationType().type();
+    const int          dots = note->chord()->dots();
+
+    // Duration format: {"type": "quarter", "dots": 0} — matches ADR spec.
+    QJsonObject duration;
+    duration["type"] = durationTypeName(dt);
+    duration["dots"] = dots;
 
     QJsonObject payload;
-    payload["type"] = "InsertNote";
-    payload["part_id"] = partId;
-    payload["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    payload["beat"] = beat;
-    payload["duration"] = durationTypeName(dt);
-    if (dots > 0) {
-        payload["dots"] = dots;
-    }
-    payload["track"] = static_cast<int>(note->track());
-    payload["pitch"] = pitchJson(note->tpc1(), note->octave());
+    payload["type"]     = "InsertNote";
+    payload["part_id"]  = partId;
+    payload["id"]       = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    payload["beat"]     = beat;
+    payload["duration"] = duration;
+    payload["track"]    = static_cast<int>(note->track());
+    payload["pitch"]    = pitchJson(note->tpc1(), note->octave());
+    payload["tie"]      = QJsonValue::Null;
 
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildDeleteEvent(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"]     = "DeleteEvent";
+    payload["event_id"] = uuid;
     return payload;
 }
 
@@ -86,12 +112,14 @@ QJsonObject OperationTranslator::pitchJson(int tpc, int octave)
     const int accOffset = (tpc - kNaturalTpc[stepIndex]) / 7; // range: -2..+2
 
     QJsonObject pitch;
-    pitch["step"] = kSteps[stepIndex];
+    pitch["step"]   = kSteps[stepIndex];
     pitch["octave"] = octave;
 
     const int accIdx = accOffset + 2; // map -2..+2 → 0..4
     if (accIdx >= 0 && accIdx <= 4 && kAccidentals[accIdx]) {
         pitch["accidental"] = kAccidentals[accIdx];
+    } else {
+        pitch["accidental"] = QJsonValue::Null;
     }
 
     return pitch;

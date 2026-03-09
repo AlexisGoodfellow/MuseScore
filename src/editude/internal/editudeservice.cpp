@@ -152,7 +152,8 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
     }
 
     for (const auto& [obj, cmds] : changes.changedObjects) {
-        std::optional<QJsonObject> payload = m_translator.translate(obj, cmds, m_projectId);
+        std::optional<QJsonObject> payload = m_translator.translate(
+            obj, cmds, m_projectId, m_applicator.elementToUuid());
         if (!payload.has_value()) {
             continue;
         }

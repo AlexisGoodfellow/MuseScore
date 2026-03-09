@@ -24,6 +24,7 @@
 #include <optional>
 #include <unordered_set>
 
+#include <QHash>
 #include <QJsonObject>
 #include <QString>
 
@@ -36,14 +37,20 @@ namespace mu::editude::internal {
 class OperationTranslator
 {
 public:
+    // Translates a local MuseScore change into an OT op payload.
     // Returns nullopt if this change type is not (yet) handled.
+    //
+    // elementToUuid: the reverse map from ScoreApplicator, used to find the
+    // UUID of elements that were originally inserted via a remote op.
     std::optional<QJsonObject> translate(
         mu::engraving::EngravingObject* obj,
         const std::unordered_set<mu::engraving::CommandType>& cmds,
-        const QString& partId);
+        const QString& partId,
+        const QHash<mu::engraving::EngravingObject*, QString>& elementToUuid);
 
 private:
     QJsonObject buildInsertNote(mu::engraving::Note* note, const QString& partId);
+    static QJsonObject buildDeleteEvent(const QString& uuid);
     static QJsonObject pitchJson(int tpc, int octave);
     static QString durationTypeName(mu::engraving::DurationType dt);
 };

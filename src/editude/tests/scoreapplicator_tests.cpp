@@ -22,6 +22,7 @@
 
 #include <gtest/gtest.h>
 #include <QJsonObject>
+#include <QUuid>
 
 #include "editude/internal/scoreapplicator.h"
 #include "engraving/dom/chord.h"
@@ -40,13 +41,15 @@ class Editude_ScoreApplicatorTests : public ::testing::Test {};
 
 // ---------------------------------------------------------------------------
 // Helper: build a fully-populated InsertNote JSON payload.
+// Duration is the ADR object format: {"type": "quarter", "dots": 0}.
 // Callers override only the fields they care about.
 // ---------------------------------------------------------------------------
 static QJsonObject makePayload(
     const QString& step = "C", int octave = 4,
     const QString& acc = "",
-    const QString& dur = "quarter",
-    int beatN = 0, int beatD = 4, int track = 0)
+    const QString& durType = "quarter", int dots = 0,
+    int beatN = 0, int beatD = 4, int track = 0,
+    const QString& noteId = "")
 {
     QJsonObject pitch;
     pitch["step"]   = step;
@@ -59,12 +62,19 @@ static QJsonObject makePayload(
     beat["numerator"]   = beatN;
     beat["denominator"] = beatD;
 
+    QJsonObject duration;
+    duration["type"] = durType;
+    duration["dots"] = dots;
+
     QJsonObject op;
     op["type"]     = "InsertNote";
     op["pitch"]    = pitch;
-    op["duration"] = dur;
+    op["duration"] = duration;
     op["beat"]     = beat;
     op["track"]    = track;
+    if (!noteId.isEmpty()) {
+        op["id"] = noteId;
+    }
     return op;
 }
 
@@ -76,7 +86,7 @@ TEST_F(Editude_ScoreApplicatorTests, unrecognizedType_returnsFalse)
 {
     ScoreApplicator applicator;
     QJsonObject payload = makePayload();
-    payload["type"] = "DeleteNote";
+    payload["type"] = "UnknownOp";
     EXPECT_FALSE(applicator.apply(nullptr, payload));
 }
 
@@ -112,7 +122,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyInsertNote_C4_quarter_succeeds)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
-    QJsonObject payload = makePayload("C", 4, "", "quarter", 0, 4, 0);
+    QJsonObject payload = makePayload("C", 4, "", "quarter", 0, 0, 4, 0);
     EXPECT_TRUE(applicator.apply(score, payload));
 
     Segment* seg = score->tick2segment(Fraction(0, 4), false, SegmentType::ChordRest);
@@ -135,7 +145,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyInsertNote_BbFlat4_half_succeeds)
 
     ScoreApplicator applicator;
     // pitchToMidi("B", 4, "flat") = (4+1)*12 + 11 - 1 = 70
-    QJsonObject payload = makePayload("B", 4, "flat", "half", 0, 4, 0);
+    QJsonObject payload = makePayload("B", 4, "flat", "half", 0, 0, 4, 0);
     EXPECT_TRUE(applicator.apply(score, payload));
 
     Segment* seg = score->tick2segment(Fraction(0, 4), false, SegmentType::ChordRest);
@@ -158,7 +168,53 @@ TEST_F(Editude_ScoreApplicatorTests, noSegmentAtTick_returnsFalse)
 
     ScoreApplicator applicator;
     // Tick 99/4 is well beyond the single 4/4 measure
-    QJsonObject payload = makePayload("C", 4, "", "quarter", 99, 4, 0);
+    QJsonObject payload = makePayload("C", 4, "", "quarter", 0, 99, 4, 0);
+    EXPECT_FALSE(applicator.apply(score, payload));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 3 — UUID tracking: DeleteEvent removes a previously inserted note
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applyDeleteEvent_removesInsertedNote)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+    ScoreApplicator applicator;
+
+    // Insert with explicit UUID so we can reference it in DeleteEvent.
+    QJsonObject insertPayload = makePayload("C", 4, "", "quarter", 0, 0, 4, 0, uuid);
+    ASSERT_TRUE(applicator.apply(score, insertPayload));
+
+    // The UUID map should now contain the note.
+    EXPECT_FALSE(applicator.elementToUuid().isEmpty());
+
+    // Delete the note via its UUID.
+    QJsonObject deletePayload;
+    deletePayload["type"]     = "DeleteEvent";
+    deletePayload["event_id"] = uuid;
+    EXPECT_TRUE(applicator.apply(score, deletePayload));
+
+    // After deletion the UUID map entry must be removed.
+    EXPECT_TRUE(applicator.elementToUuid().isEmpty());
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyDeleteEvent_unknownUuid_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+    QJsonObject payload;
+    payload["type"]     = "DeleteEvent";
+    payload["event_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
     EXPECT_FALSE(applicator.apply(score, payload));
 
     delete score;
