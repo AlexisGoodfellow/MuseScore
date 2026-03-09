@@ -92,6 +92,10 @@ if (MUE_BUILD_PROJECT_MODULE)
     add_subdirectory(project)
 endif()
 
+if (MUE_BUILD_EDITUDE_MODULE)
+    add_subdirectory(editude)
+endif()
+
 if (MUE_BUILD_APPSHELL_MODULE)
     if (MUE_CONFIGURATION_IS_APPWEB)
         add_subdirectory(web/appshell)

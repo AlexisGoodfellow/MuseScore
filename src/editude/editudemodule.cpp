@@ -1,0 +1,64 @@
+/*
+ * SPDX-License-Identifier: GPL-3.0-only
+ * MuseScore-Studio-CLA-applies
+ *
+ * MuseScore Studio
+ * Music Composition & Notation
+ *
+ * Copyright (C) 2026 MuseScore Limited
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+#include "editudemodule.h"
+
+#include "internal/editudeservice.h"
+#include "log.h"
+
+using namespace mu::editude;
+using namespace muse::modularity;
+
+static const std::string mname("editude");
+
+std::string EditudeModule::moduleName() const
+{
+    return mname;
+}
+
+IContextSetup* EditudeModule::newContext(const ContextPtr& ctx) const
+{
+    return new EditudeModuleContext(ctx);
+}
+
+void EditudeModuleContext::registerExports()
+{
+    m_service = std::make_shared<internal::EditudeService>(iocContext());
+}
+
+void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
+{
+    if (mode != muse::IApplication::RunMode::GuiApp) {
+        return;
+    }
+
+    m_service->start();
+
+    m_globalContext()->currentNotationChanged().onNotify(this, [this]() {
+        m_service->onNotationChanged(m_globalContext()->currentNotation());
+    });
+}
+
+void EditudeModuleContext::onDeinit()
+{
+    m_globalContext()->currentNotationChanged().disconnect(this);
+    m_service.reset();
+}
