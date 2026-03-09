@@ -83,6 +83,12 @@ void EditudeService::start()
         // WebSocket open is deferred until the score finishes loading
         openScoreForSession();
     });
+
+    m_playbackController()->isPlayingChanged().onNotify(
+        this,
+        [this]() {
+            onPlaybackStateChanged();
+        });
 }
 
 void EditudeService::openScoreForSession()
@@ -162,6 +168,10 @@ void EditudeService::onServerMessage(const QString& text)
                << "revision=" << revision;
 
     } else if (type == "op") {
+        if (m_playbackActive) {
+            // Discard remote ops during playback — they will be replayed on catch-up.
+            return;
+        }
         const int revision = msg.value("revision").toInt();
         if (revision > m_serverRevision) {
             m_serverRevision = revision;
@@ -354,7 +364,10 @@ void EditudeService::onDisconnected()
     m_state = State::Reconnecting;
     m_socket->deleteLater();
     m_socket = nullptr;
-    const int delay = std::min(1000 * (1 << std::min(m_reconnectAttempt, 6)), 60000);
+    const int delay = m_immediateReconnect
+        ? 0
+        : std::min(1000 * (1 << std::min(m_reconnectAttempt, 6)), 60000);
+    m_immediateReconnect = false;
     m_reconnectTimer->start(delay);
 }
 
@@ -378,4 +391,28 @@ void EditudeService::onReconnectTimer()
         scheduleTokenRefresh();
         _openWebSocket();
     });
+}
+
+void EditudeService::onPlaybackStateChanged()
+{
+    if (!m_playbackController()) {
+        return;
+    }
+    const bool playing = m_playbackController()->isPlaying();
+    if (playing) {
+        m_playbackActive = true;
+        LOGD() << "[editude] playback started; pausing remote op application at revision"
+               << m_serverRevision;
+    } else {
+        m_playbackActive = false;
+        LOGD() << "[editude] playback stopped; reconnecting for catch-up from revision"
+               << m_serverRevision;
+        // Treat playback end as a soft disconnect: close the WS and let the reconnect
+        // logic replay ops since m_serverRevision via the standard join/sync path.
+        // m_immediateReconnect bypasses exponential backoff for this intentional reconnect.
+        if (m_socket && m_state == State::Live) {
+            m_immediateReconnect = true;
+            m_socket->close();
+        }
+    }
 }

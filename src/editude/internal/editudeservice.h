@@ -35,6 +35,7 @@
 #include "engraving/dom/score.h"
 #include "notation/inotation.h"
 #include "project/iprojectfilescontroller.h"
+#include "playback/iplaybackcontroller.h"
 
 #include "operationtranslator.h"
 #include "scoreapplicator.h"
@@ -63,8 +64,10 @@ private:
     void onDisconnected();
     void onReconnectTimer();
     void _openWebSocket();
+    void onPlaybackStateChanged();
 
     muse::ContextInject<mu::project::IProjectFilesController> m_projectFiles{ iocContext() };
+    muse::ContextInject<mu::playback::IPlaybackController> m_playbackController{ iocContext() };
 
     QWebSocket* m_socket = nullptr;
     QNetworkAccessManager m_nam;
@@ -89,6 +92,8 @@ private:
     mu::notation::INotationPtr m_currentNotation;
     mu::engraving::Score* m_score = nullptr;
     bool m_applyingRemote = false;
+    bool m_playbackActive = false;
+    bool m_immediateReconnect = false;
     OperationTranslator m_translator;
     ScoreApplicator m_applicator;
 };
