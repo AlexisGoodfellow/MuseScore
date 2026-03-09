@@ -141,10 +141,12 @@ void EditudeService::onServerMessage(const QString& text)
         // Flush ops buffered during reconnect
         if (!m_bufferedOps.isEmpty()) {
             for (const QJsonValue& v : m_bufferedOps) {
+                const QJsonObject entry = v.toObject();
                 QJsonObject out;
-                out["type"]       = "op";
-                out["client_seq"] = ++m_clientSeq;
-                out["payload"]    = v.toObject().value("payload").toObject();
+                out["type"]          = "op";
+                out["client_seq"]    = ++m_clientSeq;
+                out["base_revision"] = entry.value("base_revision").toInt(0);
+                out["payload"]       = entry.value("payload").toObject();
                 m_socket->sendTextMessage(QJsonDocument(out).toJson(QJsonDocument::Compact));
             }
             LOGD() << "[editude] flushed" << m_bufferedOps.size() << "buffered ops";
@@ -152,10 +154,18 @@ void EditudeService::onServerMessage(const QString& text)
         }
 
     } else if (type == "op_ack") {
+        const int revision = msg.value("revision").toInt();
+        if (revision > m_serverRevision) {
+            m_serverRevision = revision;
+        }
         LOGD() << "[editude] op_ack op_id=" << msg.value("op_id").toString()
-               << "revision=" << msg.value("revision").toInt();
+               << "revision=" << revision;
 
     } else if (type == "op") {
+        const int revision = msg.value("revision").toInt();
+        if (revision > m_serverRevision) {
+            m_serverRevision = revision;
+        }
         if (!m_score) {
             LOGW() << "[editude] received remote op but score not ready";
             return;
@@ -236,10 +246,12 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
             changes.changedPropertyIdSet,
             m_projectId,
             m_applicator.elementToUuid());
+        const int baseRevision = m_serverRevision;
         for (const QJsonObject& payload : ops) {
             if (m_bufferedOps.size() < 100) {
                 QJsonObject entry;
-                entry["payload"] = payload;
+                entry["payload"]       = payload;
+                entry["base_revision"] = baseRevision;
                 m_bufferedOps.append(entry);
             }
         }
@@ -256,11 +268,15 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
         m_projectId,
         m_applicator.elementToUuid());
 
+    // Snapshot m_serverRevision once for this batch: all ops in one change
+    // event share the same base so the server can OT-transform them correctly.
+    const int baseRevision = m_serverRevision;
     for (const QJsonObject& payload : ops) {
         QJsonObject msg;
-        msg["type"]       = "op";
-        msg["client_seq"] = ++m_clientSeq;
-        msg["payload"]    = payload;
+        msg["type"]          = "op";
+        msg["client_seq"]    = ++m_clientSeq;
+        msg["base_revision"] = baseRevision;
+        msg["payload"]       = payload;
         m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
     }
 }

@@ -108,11 +108,13 @@ TEST(EditudeServiceReconnect, ReconnectBackoffSchedule)
 }
 
 // ---------------------------------------------------------------------------
-// 3. Buffered ops are flushed on sync; buffer cleared afterwards
+// 3. Buffered ops are flushed on sync; base_revision and payload preserved
 // ---------------------------------------------------------------------------
 TEST(EditudeServiceReconnect, BufferedOpsFlushedOnSync)
 {
-    // Simulate accumulating ops in the buffer (cap = 100)
+    const int capturedRevision = 42;
+
+    // Simulate accumulating ops in the buffer with base_revision captured
     QJsonArray bufferedOps;
     const int opCount = 3;
     for (int i = 0; i < opCount; ++i) {
@@ -120,7 +122,8 @@ TEST(EditudeServiceReconnect, BufferedOpsFlushedOnSync)
         QJsonObject payload;
         payload["type"] = "InsertNote";
         payload["seq"]  = i;
-        entry["payload"] = payload;
+        entry["payload"]       = payload;
+        entry["base_revision"] = capturedRevision;
         if (bufferedOps.size() < 100) {
             bufferedOps.append(entry);
         }
@@ -128,22 +131,24 @@ TEST(EditudeServiceReconnect, BufferedOpsFlushedOnSync)
     ASSERT_EQ(bufferedOps.size(), opCount);
 
     // Simulate the flush that happens in onServerMessage when type == "sync"
-    QJsonArray flushedPayloads;
+    QJsonArray flushedOps;
     for (const QJsonValue& v : bufferedOps) {
+        const QJsonObject entry = v.toObject();
         QJsonObject out;
-        out["type"]    = "op";
-        out["payload"] = v.toObject().value("payload").toObject();
-        flushedPayloads.append(out);
+        out["type"]          = "op";
+        out["base_revision"] = entry.value("base_revision").toInt(0);
+        out["payload"]       = entry.value("payload").toObject();
+        flushedOps.append(out);
     }
     bufferedOps = QJsonArray(); // cleared after flush
 
-    EXPECT_EQ(flushedPayloads.size(), opCount);
+    EXPECT_EQ(flushedOps.size(), opCount);
     EXPECT_TRUE(bufferedOps.isEmpty());
 
-    // Verify each flushed op carries the correct payload
     for (int i = 0; i < opCount; ++i) {
-        const QJsonObject out = flushedPayloads[i].toObject();
+        const QJsonObject out = flushedOps[i].toObject();
         EXPECT_EQ(out["type"].toString(), "op");
+        EXPECT_EQ(out["base_revision"].toInt(), capturedRevision);
         EXPECT_EQ(out["payload"].toObject()["seq"].toInt(), i);
     }
 }
@@ -156,10 +161,107 @@ TEST(EditudeServiceReconnect, BufferCapAt100)
     QJsonArray bufferedOps;
     for (int i = 0; i < 150; ++i) {
         QJsonObject entry;
-        entry["payload"] = QJsonObject{ { "seq", i } };
+        entry["payload"]       = QJsonObject{ { "seq", i } };
+        entry["base_revision"] = 5;
         if (bufferedOps.size() < 100) {
             bufferedOps.append(entry);
         }
     }
     EXPECT_EQ(bufferedOps.size(), 100);
+}
+
+// ---------------------------------------------------------------------------
+// 5. serverRevision advances from op_ack
+// ---------------------------------------------------------------------------
+TEST(EditudeServiceReconnect, ServerRevisionAdvancesFromOpAck)
+{
+    // Simulate the op_ack handler logic:
+    //   if (revision > m_serverRevision) m_serverRevision = revision;
+    int serverRevision = 10;
+
+    // op_ack with higher revision → advances
+    {
+        int ackRevision = 11;
+        if (ackRevision > serverRevision) serverRevision = ackRevision;
+    }
+    EXPECT_EQ(serverRevision, 11);
+
+    // op_ack with lower revision (stale/reordered) → does not regress
+    {
+        int ackRevision = 9;
+        if (ackRevision > serverRevision) serverRevision = ackRevision;
+    }
+    EXPECT_EQ(serverRevision, 11);
+
+    // op_ack with equal revision → no change
+    {
+        int ackRevision = 11;
+        if (ackRevision > serverRevision) serverRevision = ackRevision;
+    }
+    EXPECT_EQ(serverRevision, 11);
+}
+
+// ---------------------------------------------------------------------------
+// 6. serverRevision advances from broadcast op (same monotonic logic)
+// ---------------------------------------------------------------------------
+TEST(EditudeServiceReconnect, ServerRevisionAdvancesFromBroadcast)
+{
+    int serverRevision = 20;
+
+    // Broadcast ops arrive in order: 21, 22, 23
+    for (int incoming : { 21, 22, 23 }) {
+        if (incoming > serverRevision) serverRevision = incoming;
+    }
+    EXPECT_EQ(serverRevision, 23);
+
+    // A late/duplicate broadcast at 21 must not regress the revision
+    {
+        int incoming = 21;
+        if (incoming > serverRevision) serverRevision = incoming;
+    }
+    EXPECT_EQ(serverRevision, 23);
+}
+
+// ---------------------------------------------------------------------------
+// 7. Live op includes base_revision equal to m_serverRevision at send time
+// ---------------------------------------------------------------------------
+TEST(EditudeServiceReconnect, LiveOpCarriesBaseRevision)
+{
+    // Simulate the onScoreChanges() live-send path:
+    //   const int baseRevision = m_serverRevision;
+    //   msg["base_revision"] = baseRevision;
+    int serverRevision = 17;
+
+    QJsonArray sentOps;
+    const int baseRevision = serverRevision;  // snapshot at send time
+
+    // Two ops from the same change event share the same base_revision
+    for (int i = 0; i < 2; ++i) {
+        QJsonObject msg;
+        msg["type"]          = "op";
+        msg["base_revision"] = baseRevision;
+        msg["payload"]       = QJsonObject{ { "type", "SetPitch" }, { "seq", i } };
+        sentOps.append(msg);
+    }
+
+    ASSERT_EQ(sentOps.size(), 2);
+    for (const QJsonValue& v : sentOps) {
+        EXPECT_EQ(v.toObject()["base_revision"].toInt(), 17);
+    }
+
+    // After op_ack arrives at revision 18, the next batch uses 18
+    {
+        const int ackRevision = 18;
+        if (ackRevision > serverRevision) serverRevision = ackRevision;
+    }
+
+    QJsonArray nextBatch;
+    const int nextBase = serverRevision;
+    QJsonObject msg;
+    msg["type"]          = "op";
+    msg["base_revision"] = nextBase;
+    msg["payload"]       = QJsonObject{ { "type", "InsertNote" } };
+    nextBatch.append(msg);
+
+    EXPECT_EQ(nextBatch[0].toObject()["base_revision"].toInt(), 18);
 }
