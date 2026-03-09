@@ -26,6 +26,7 @@
 #include <QString>
 
 #include "engraving/dom/engravingobject.h"
+#include "engraving/dom/part.h"
 #include "engraving/dom/score.h"
 #include "engraving/types/types.h"
 
@@ -43,10 +44,27 @@ public:
     }
 
 private:
+    // Tier 1 — stream event operations
     bool applyInsertNote(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyInsertRest(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyInsertChord(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyDeleteEvent(mu::engraving::Score* score, const QJsonObject& payload);
     bool applySetPitch(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyAddChordNote(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveChordNote(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetDuration(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetTie(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetTrack(mu::engraving::Score* score, const QJsonObject& payload);
+
+    // Tier 2 — score directive operations
+    bool applySetTimeSignature(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetTempo(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetKeySignature(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetClef(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetPartName(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetStaffCount(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyAddPart(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemovePart(mu::engraving::Score* score, const QJsonObject& payload);
 
     static int pitchToMidi(const QString& step, int octave, const QString& accidental);
     static mu::engraving::DurationType parseDurationType(const QString& name);
@@ -55,5 +73,9 @@ private:
     // Keyed by the "id" field present in Insert* ops (and echoed in op_ack.payload).
     QHash<QString, mu::engraving::EngravingObject*> m_uuidToElement;
     QHash<mu::engraving::EngravingObject*, QString> m_elementToUuid;
+
+    // Part UUID map, populated by AddPart once that handler is implemented.
+    // Reserved for SetKeySignature / SetClef / SetPartName / SetStaffCount / RemovePart.
+    QHash<QString, mu::engraving::Part*> m_partUuidToPart;
 };
 } // namespace mu::editude::internal

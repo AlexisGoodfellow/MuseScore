@@ -22,6 +22,7 @@
 #include "editudemodule.h"
 
 #include "internal/editudeservice.h"
+#include "internal/editudepresencemodel.h"
 #include "log.h"
 
 using namespace mu::editude;
@@ -50,6 +51,8 @@ void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
         return;
     }
 
+    m_presenceModel = std::make_shared<internal::EditudePresenceModel>();
+    m_service->setPresenceModel(m_presenceModel.get());
     m_service->start();
 
     m_globalContext()->currentNotationChanged().onNotify(this, [this]() {

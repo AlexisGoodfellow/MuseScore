@@ -29,6 +29,10 @@ target_sources(editude PRIVATE
     internal/operationtranslator.cpp
     internal/scoreapplicator.h
     internal/scoreapplicator.cpp
+    internal/presenceoverlay.h
+    internal/presenceoverlay.cpp
+    internal/editudepresencemodel.h
+    internal/editudepresencemodel.cpp
 )
 
 target_link_libraries(editude PRIVATE

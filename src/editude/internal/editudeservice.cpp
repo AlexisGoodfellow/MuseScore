@@ -35,6 +35,7 @@
 
 #include "notation/internal/igetscore.h"
 #include "log.h"
+#include "editudepresencemodel.h"
 
 using namespace mu::editude::internal;
 
@@ -42,6 +43,11 @@ EditudeService::EditudeService(const muse::modularity::ContextPtr& iocCtx, QObje
     : QObject(parent)
     , Contextable(iocCtx)
 {
+}
+
+void EditudeService::setPresenceModel(EditudePresenceModel* model)
+{
+    m_presenceModel = model;
 }
 
 void EditudeService::start()
@@ -184,6 +190,22 @@ void EditudeService::onServerMessage(const QString& text)
         m_applicator.apply(m_score, msg.value("payload").toObject());
         m_applyingRemote = false;
 
+    } else if (type == "presence") {
+        const QString cid = msg.value("contributor_id").toString();
+        const QJsonObject sel = msg.value("selection").toObject();
+        if (!cid.isEmpty()) {
+            m_presenceOverlay.updateCursor(cid, sel);
+            refreshPresenceModel();
+        }
+
+    } else if (type == "op_error") {
+        const QString code = msg.value("code").toString();
+        LOGD() << "[editude] op_error code=" << code;
+        if (code == "op_superseded" && m_presenceModel) {
+            m_presenceModel->showToast(
+                "Your edit conflicted with a concurrent change and was not applied.");
+        }
+
     } else if (type == "auth_error" || type == "error") {
         LOGW() << "[editude] server error:" << msg.value("detail").toString();
         if (m_state == State::Authenticating) {
@@ -195,6 +217,11 @@ void EditudeService::onServerMessage(const QString& text)
 
 void EditudeService::onNotationChanged(mu::notation::INotationPtr notation)
 {
+    m_presenceOverlay.clear();
+    if (m_presenceModel) {
+        m_presenceModel->setCanvasData({});
+    }
+
     if (m_currentNotation) {
         m_currentNotation->undoStack()->changesChannel().disconnect(this);
     }
@@ -241,6 +268,12 @@ void EditudeService::onNotationChanged(mu::notation::INotationPtr notation)
         this,
         [this](const mu::engraving::ScoreChanges& changes) {
             onScoreChanges(changes);
+        });
+
+    notation->interaction()->selectionChanged().onNotify(
+        this,
+        [this]() {
+            onSelectionChanged();
         });
 }
 
@@ -415,4 +448,103 @@ void EditudeService::onPlaybackStateChanged()
             m_socket->close();
         }
     }
+}
+
+void EditudeService::onSelectionChanged()
+{
+    if (m_applyingRemote || m_state != State::Live || !m_socket) {
+        return;
+    }
+    if (!m_presenceThrottle) {
+        m_presenceThrottle = new QTimer(this);
+        m_presenceThrottle->setSingleShot(true);
+        m_presenceThrottle->setInterval(80);
+        connect(m_presenceThrottle, &QTimer::timeout, this, [this]() {
+            if (!m_currentNotation || m_state != State::Live || !m_socket) {
+                return;
+            }
+            const auto sel = m_currentNotation->interaction()->selection();
+            QJsonObject msg;
+            msg["type"]      = "presence";
+            msg["selection"] = buildSelectionPayload(sel);
+            m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
+        });
+    }
+    m_presenceThrottle->start();
+}
+
+QJsonObject EditudeService::buildSelectionPayload(const mu::notation::INotationSelectionPtr& sel)
+{
+    QJsonObject obj;
+    obj["element_ids"] = QJsonArray();
+    obj["start_staff"] = 0;
+    obj["end_staff"]   = 0;
+    obj["start_tick"]  = 0;
+    obj["end_tick"]    = 0;
+
+    if (!sel || sel->isNone()) {
+        obj["state"] = "none";
+        return obj;
+    }
+
+    if (sel->isRange()) {
+        obj["state"] = "range";
+        const auto range = sel->range();
+        if (range) {
+            obj["start_staff"] = static_cast<int>(range->startStaffIndex());
+            obj["end_staff"]   = static_cast<int>(range->endStaffIndex());
+            obj["start_tick"]  = range->startTick().ticks();
+            obj["end_tick"]    = range->endTick().ticks();
+        }
+        return obj;
+    }
+
+    obj["state"] = "single";
+    const auto& uuidMap = m_applicator.elementToUuid();
+    QJsonArray ids;
+    for (const auto* elem : sel->elements()) {
+        auto it = uuidMap.find(const_cast<mu::engraving::EngravingItem*>(elem));
+        if (it != uuidMap.end()) {
+            ids.append(it.value());
+        }
+    }
+    obj["element_ids"] = ids;
+    return obj;
+}
+
+void EditudeService::refreshPresenceModel()
+{
+    if (!m_presenceModel || !m_score) {
+        return;
+    }
+
+    QVector<QPair<QColor, QVector<muse::RectF>>> data;
+
+    for (const auto& cursor : m_presenceOverlay.cursors()) {
+        if (cursor.state == "none" || cursor.state.isEmpty()) {
+            continue;
+        }
+
+        QVector<muse::RectF> rects;
+
+        if (cursor.state == "range") {
+            rects = PresenceOverlay::reprojectRange(m_score, cursor);
+        } else if (cursor.state == "single") {
+            const auto& uuidMap = m_applicator.elementToUuid();
+            for (auto it = uuidMap.begin(); it != uuidMap.end(); ++it) {
+                if (cursor.elementIds.contains(it.value())) {
+                    const auto* elem = it.key();
+                    if (elem) {
+                        rects.append(elem->canvasBoundingRect());
+                    }
+                }
+            }
+        }
+
+        if (!rects.isEmpty()) {
+            data.append({ cursor.color, rects });
+        }
+    }
+
+    m_presenceModel->setCanvasData(data);
 }

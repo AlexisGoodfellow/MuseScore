@@ -28,6 +28,7 @@
 #include "global/modularity/ioc.h"
 #include "global/async/asyncable.h"
 #include "context/iglobalcontext.h"
+#include "internal/editudepresencemodel.h"
 
 namespace mu::editude {
 namespace internal { class EditudeService; }
@@ -53,6 +54,7 @@ public:
 
 private:
     std::shared_ptr<internal::EditudeService> m_service;
+    std::shared_ptr<internal::EditudePresenceModel> m_presenceModel;
 };
 }
 

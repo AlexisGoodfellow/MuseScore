@@ -39,8 +39,12 @@
 
 #include "operationtranslator.h"
 #include "scoreapplicator.h"
+#include "presenceoverlay.h"
 
 namespace mu::editude::internal {
+
+class EditudePresenceModel;
+
 class EditudeService : public QObject, public muse::Contextable, public muse::async::Asyncable
 {
     Q_OBJECT
@@ -50,6 +54,7 @@ public:
 
     void start();
     void onNotationChanged(mu::notation::INotationPtr notation);
+    void setPresenceModel(EditudePresenceModel* model);
 
 private:
     enum class State { Disconnected, Authenticating, Joining, Live, Reconnecting };
@@ -65,6 +70,9 @@ private:
     void onReconnectTimer();
     void _openWebSocket();
     void onPlaybackStateChanged();
+    void onSelectionChanged();
+    QJsonObject buildSelectionPayload(const mu::notation::INotationSelectionPtr& sel);
+    void refreshPresenceModel();
 
     muse::ContextInject<mu::project::IProjectFilesController> m_projectFiles{ iocContext() };
     muse::ContextInject<mu::playback::IPlaybackController> m_playbackController{ iocContext() };
@@ -96,5 +104,8 @@ private:
     bool m_immediateReconnect = false;
     OperationTranslator m_translator;
     ScoreApplicator m_applicator;
+    EditudePresenceModel* m_presenceModel = nullptr;
+    PresenceOverlay m_presenceOverlay;
+    QTimer* m_presenceThrottle = nullptr;
 };
 }

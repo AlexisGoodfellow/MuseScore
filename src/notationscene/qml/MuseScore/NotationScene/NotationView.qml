@@ -31,6 +31,7 @@ import Muse.UiComponents
 import MuseScore.NotationScene
 import MuseScore.Braille
 import MuseScore.Playback
+import Editude 1.0
 
 import "internal"
 
@@ -223,6 +224,54 @@ FocusScope {
                     NotationRegionsBeingProcessedView {
                         notationViewRect: Qt.rect(notationView.x, notationView.y, notationView.width, notationView.height)
                         notationViewMatrix: notationView.matrix
+                    }
+                }
+
+                Item {
+                    anchors.fill: notationView
+                    enabled: false
+
+                    Component.onCompleted: {
+                        EditudePresenceModel.setNotationViewMatrix(notationView.matrix)
+                    }
+
+                    Connections {
+                        target: notationView
+                        function onMatrixChanged() {
+                            EditudePresenceModel.setNotationViewMatrix(notationView.matrix)
+                        }
+                    }
+
+                    Repeater {
+                        model: EditudePresenceModel
+                        delegate: Rectangle {
+                            x: model.screenRect.x
+                            y: model.screenRect.y
+                            width: model.screenRect.width
+                            height: model.screenRect.height
+                            color: model.rectColor
+                            enabled: false
+                        }
+                    }
+
+                    Rectangle {
+                        visible: EditudePresenceModel.toastText !== ""
+                        anchors.top: parent.top
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.topMargin: 16
+                        color: "#cc1a1a1a"
+                        radius: 6
+                        width: toastLabel.implicitWidth + 24
+                        height: toastLabel.implicitHeight + 12
+                        enabled: false
+
+                        Text {
+                            id: toastLabel
+                            anchors.centerIn: parent
+                            text: EditudePresenceModel.toastText
+                            color: "#ffffff"
+                            font.pixelSize: 13
+                        }
                     }
                 }
 
