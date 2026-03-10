@@ -87,6 +87,48 @@ private:
     static QJsonObject buildSetTimeSignature(mu::engraving::TimeSig* ts);
     static QJsonObject buildSetTempo(mu::engraving::TempoText* tt);
 
+    // Tier 3 builders — articulations.
+    QJsonObject buildAddArticulation(mu::engraving::EngravingObject* art,
+                                     const QString& uuid, const QString& partId,
+                                     const QString& eventUuid);
+    static QJsonObject buildRemoveArticulation(const QString& uuid);
+
+    // Tier 3 builders — dynamics.
+    QJsonObject buildAddDynamic(mu::engraving::EngravingObject* dyn,
+                                const QString& uuid, const QString& partId);
+    static QJsonObject buildSetDynamic(const QString& uuid, const QString& kind);
+    static QJsonObject buildRemoveDynamic(const QString& uuid);
+
+    // Tier 3 builders — slurs.
+    QJsonObject buildAddSlur(mu::engraving::EngravingObject* slur,
+                             const QString& uuid, const QString& partId,
+                             const QString& startEventUuid, const QString& endEventUuid);
+    static QJsonObject buildRemoveSlur(const QString& uuid);
+
+    // Tier 3 builders — hairpins.
+    QJsonObject buildAddHairpin(mu::engraving::EngravingObject* hp,
+                                const QString& uuid, const QString& partId,
+                                const mu::engraving::Fraction& startTick,
+                                const mu::engraving::Fraction& endTick,
+                                bool isCrescendo);
+    static QJsonObject buildRemoveHairpin(const QString& uuid);
+
+    // Tier 3 builders — tuplets.
+    QJsonObject buildAddTuplet(mu::engraving::EngravingObject* tup,
+                               const QString& uuid, const QString& partId,
+                               const QVector<QString>& memberUuids,
+                               int actualNotes, int normalNotes);
+    static QJsonObject buildRemoveTuplet(const QString& uuid);
+
+    // Tier 3 builders — lyrics.
+    QJsonObject buildAddLyric(mu::engraving::EngravingObject* lyr,
+                              const QString& uuid, const QString& partId,
+                              const QString& eventUuid, int verse,
+                              const QString& syllabic, const QString& text);
+    static QJsonObject buildSetLyric(const QString& uuid,
+                                     const QString& text, const QString& syllabic);
+    static QJsonObject buildRemoveLyric(const QString& uuid);
+
     // Shared helpers.
     static QJsonObject pitchJson(int tpc, int octave);
     static QJsonObject beatJson(const mu::engraving::Fraction& tick);

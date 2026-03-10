@@ -66,10 +66,36 @@ private:
     bool applyAddPart(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemovePart(mu::engraving::Score* score, const QJsonObject& payload);
 
+    // Tier 3 — articulations
+    bool applyAddArticulation(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveArticulation(mu::engraving::Score* score, const QJsonObject& payload);
+
+    // Tier 3 — dynamics
+    bool applyAddDynamic(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetDynamic(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveDynamic(mu::engraving::Score* score, const QJsonObject& payload);
+
+    // Tier 3 — slurs
+    bool applyAddSlur(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveSlur(mu::engraving::Score* score, const QJsonObject& payload);
+
+    // Tier 3 — hairpins
+    bool applyAddHairpin(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveHairpin(mu::engraving::Score* score, const QJsonObject& payload);
+
+    // Tier 3 — tuplets
+    bool applyAddTuplet(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveTuplet(mu::engraving::Score* score, const QJsonObject& payload);
+
+    // Tier 3 — lyrics
+    bool applyAddLyric(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetLyric(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveLyric(mu::engraving::Score* score, const QJsonObject& payload);
+
     static int pitchToMidi(const QString& step, int octave, const QString& accidental);
     static mu::engraving::DurationType parseDurationType(const QString& name);
 
-    // UUID ↔ element maps, maintained across all apply* calls.
+    // Tier 1+2 UUID ↔ element maps, maintained across all apply* calls.
     // Keyed by the "id" field present in Insert* ops (and echoed in op_ack.payload).
     QHash<QString, mu::engraving::EngravingObject*> m_uuidToElement;
     QHash<mu::engraving::EngravingObject*, QString> m_elementToUuid;
@@ -77,5 +103,10 @@ private:
     // Part UUID map, populated by AddPart once that handler is implemented.
     // Reserved for SetKeySignature / SetClef / SetPartName / SetStaffCount / RemovePart.
     QHash<QString, mu::engraving::Part*> m_partUuidToPart;
+
+    // Tier 3 UUID ↔ element maps.
+    // Keyed by the "id" field in AddArticulation / AddDynamic / AddSlur / etc.
+    QHash<QString, mu::engraving::EngravingObject*> m_tier3UuidToElement;
+    QHash<mu::engraving::EngravingObject*, QString> m_tier3ElementToUuid;
 };
 } // namespace mu::editude::internal

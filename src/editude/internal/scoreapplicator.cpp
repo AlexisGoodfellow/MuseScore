@@ -622,6 +622,137 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("AddPart"))          return applyAddPart(score, payload);
     if (type == QLatin1String("RemovePart"))       return applyRemovePart(score, payload);
 
+    // Tier 3 — articulations
+    if (type == QLatin1String("AddArticulation"))    return applyAddArticulation(score, payload);
+    if (type == QLatin1String("RemoveArticulation")) return applyRemoveArticulation(score, payload);
+
+    // Tier 3 — dynamics
+    if (type == QLatin1String("AddDynamic"))    return applyAddDynamic(score, payload);
+    if (type == QLatin1String("SetDynamic"))    return applySetDynamic(score, payload);
+    if (type == QLatin1String("RemoveDynamic")) return applyRemoveDynamic(score, payload);
+
+    // Tier 3 — slurs
+    if (type == QLatin1String("AddSlur"))    return applyAddSlur(score, payload);
+    if (type == QLatin1String("RemoveSlur")) return applyRemoveSlur(score, payload);
+
+    // Tier 3 — hairpins
+    if (type == QLatin1String("AddHairpin"))    return applyAddHairpin(score, payload);
+    if (type == QLatin1String("RemoveHairpin")) return applyRemoveHairpin(score, payload);
+
+    // Tier 3 — tuplets
+    if (type == QLatin1String("AddTuplet"))    return applyAddTuplet(score, payload);
+    if (type == QLatin1String("RemoveTuplet")) return applyRemoveTuplet(score, payload);
+
+    // Tier 3 — lyrics
+    if (type == QLatin1String("AddLyric"))    return applyAddLyric(score, payload);
+    if (type == QLatin1String("SetLyric"))    return applySetLyric(score, payload);
+    if (type == QLatin1String("RemoveLyric")) return applyRemoveLyric(score, payload);
+
     LOGD() << "[editude] ScoreApplicator: unhandled op type" << type;
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 — implementation stubs
+// ---------------------------------------------------------------------------
+//
+// Each stub logs the op and returns true (non-fatal) so the OT engine continues
+// normally.  Full INotationInteraction calls will be wired in a follow-up once
+// the MuseScore API surface for each element type is confirmed.
+
+bool ScoreApplicator::applyAddArticulation(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyAddArticulation: id=" << op["id"].toString()
+           << " event_id=" << op["event_id"].toString()
+           << " articulation=" << op["articulation"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveArticulation(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyRemoveArticulation: id=" << op["id"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyAddDynamic(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyAddDynamic: id=" << op["id"].toString()
+           << " kind=" << op["kind"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applySetDynamic(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applySetDynamic: id=" << op["id"].toString()
+           << " kind=" << op["kind"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveDynamic(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyRemoveDynamic: id=" << op["id"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyAddSlur(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyAddSlur: id=" << op["id"].toString()
+           << " start=" << op["start_event_id"].toString()
+           << " end=" << op["end_event_id"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveSlur(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyRemoveSlur: id=" << op["id"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyAddHairpin(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyAddHairpin: id=" << op["id"].toString()
+           << " kind=" << op["kind"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveHairpin(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyRemoveHairpin: id=" << op["id"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyAddTuplet(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyAddTuplet: id=" << op["id"].toString()
+           << " actual=" << op["actual_notes"].toInt()
+           << " normal=" << op["normal_notes"].toInt();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveTuplet(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyRemoveTuplet: id=" << op["id"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyAddLyric(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyAddLyric: id=" << op["id"].toString()
+           << " event_id=" << op["event_id"].toString()
+           << " verse=" << op["verse"].toInt()
+           << " text=" << op["text"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applySetLyric(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applySetLyric: id=" << op["id"].toString()
+           << " text=" << op["text"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveLyric(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyRemoveLyric: id=" << op["id"].toString();
+    return true;
 }
