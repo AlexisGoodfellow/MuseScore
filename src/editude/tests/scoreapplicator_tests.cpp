@@ -21,6 +21,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QUuid>
 
