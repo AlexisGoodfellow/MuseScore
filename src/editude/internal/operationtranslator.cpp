@@ -92,7 +92,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
 
     // ── Pass 2: InsertNote / InsertChord ──────────────────────────────────
     QSet<EngravingObject*> handledNotes;
-    for (auto& [chord, notes] : newChordNotes) {
+    for (auto& [chord, notes] : newChordNotes.asKeyValueRange()) {
         const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
         if (notes.size() == 1) {
             // Single-note chord: UUID lives on the Note* (mirrors applyInsertNote).

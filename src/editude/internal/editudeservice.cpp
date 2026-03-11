@@ -33,6 +33,7 @@
 #include <QWebSocketProtocol>
 #include "project/types/projecttypes.h"
 
+#include "engraving/dom/engravingitem.h"
 #include "notation/internal/igetscore.h"
 #include "log.h"
 #include "qml/Editude/editudeannotationmodel.h"
@@ -66,7 +67,7 @@ void EditudeService::start()
         return;
     }
 
-    QNetworkRequest req(QUrl(m_sessionUrl));
+    QNetworkRequest req{QUrl{m_sessionUrl}};
     QNetworkReply* reply = m_nam.get(req);
 
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -382,7 +383,7 @@ void EditudeService::onTokenRefreshTimer()
     if (m_sessionUrl.isEmpty()) {
         return;
     }
-    QNetworkRequest req(QUrl(m_sessionUrl));
+    QNetworkRequest req{QUrl{m_sessionUrl}};
     QNetworkReply* reply = m_nam.get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
@@ -426,7 +427,7 @@ void EditudeService::onReconnectTimer()
     if (m_sessionUrl.isEmpty()) {
         return;
     }
-    QNetworkRequest req(QUrl(m_sessionUrl));
+    QNetworkRequest req{QUrl{m_sessionUrl}};
     QNetworkReply* reply = m_nam.get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
@@ -584,9 +585,9 @@ void EditudeService::refreshPresenceModel()
             const auto& uuidMap = m_applicator.elementToUuid();
             for (auto it = uuidMap.begin(); it != uuidMap.end(); ++it) {
                 if (cursor.elementIds.contains(it.value())) {
-                    const auto* elem = it.key();
-                    if (elem) {
-                        rects.append(elem->canvasBoundingRect());
+                    const auto* engItem = dynamic_cast<const mu::engraving::EngravingItem*>(it.key());
+                    if (engItem) {
+                        rects.append(engItem->canvasBoundingRect());
                     }
                 }
             }

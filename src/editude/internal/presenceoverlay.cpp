@@ -26,7 +26,7 @@
 #include "engraving/dom/segment.h"
 #include "engraving/types/fraction.h"
 #include "notation/utilities/scorerangeutilities.h"
-#include "types/geometry.h"
+#include "draw/types/geometry.h"
 
 using namespace mu::editude::internal;
 using namespace mu::engraving;
