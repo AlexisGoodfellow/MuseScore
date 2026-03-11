@@ -648,6 +648,11 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("SetLyric"))    return applySetLyric(score, payload);
     if (type == QLatin1String("RemoveLyric")) return applyRemoveLyric(score, payload);
 
+    // Tier 3 — chord symbols (score-global)
+    if (type == QLatin1String("AddChordSymbol"))    return applyAddChordSymbol(score, payload);
+    if (type == QLatin1String("SetChordSymbol"))    return applySetChordSymbol(score, payload);
+    if (type == QLatin1String("RemoveChordSymbol")) return applyRemoveChordSymbol(score, payload);
+
     LOGD() << "[editude] ScoreApplicator: unhandled op type" << type;
     return false;
 }
@@ -754,5 +759,27 @@ bool ScoreApplicator::applySetLyric(Score* /*score*/, const QJsonObject& op)
 bool ScoreApplicator::applyRemoveLyric(Score* /*score*/, const QJsonObject& op)
 {
     LOGD() << "[editude] applyRemoveLyric: id=" << op["id"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyAddChordSymbol(Score* /*score*/, const QJsonObject& op)
+{
+    // Chord symbols are score-global (no part_id). Full rendering via MuseScore
+    // Harmony API is deferred; log and continue.
+    LOGD() << "[editude] applyAddChordSymbol: id=" << op["id"].toString()
+           << " name=" << op["name"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applySetChordSymbol(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applySetChordSymbol: id=" << op["id"].toString()
+           << " name=" << op["name"].toString();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveChordSymbol(Score* /*score*/, const QJsonObject& op)
+{
+    LOGD() << "[editude] applyRemoveChordSymbol: id=" << op["id"].toString();
     return true;
 }

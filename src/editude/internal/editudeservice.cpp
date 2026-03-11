@@ -35,6 +35,7 @@
 
 #include "notation/internal/igetscore.h"
 #include "log.h"
+#include "editudeannotationmodel.h"
 #include "editudepresencemodel.h"
 
 using namespace mu::editude::internal;
@@ -48,6 +49,11 @@ EditudeService::EditudeService(const muse::modularity::ContextPtr& iocCtx, QObje
 void EditudeService::setPresenceModel(EditudePresenceModel* model)
 {
     m_presenceModel = model;
+}
+
+void EditudeService::setAnnotationModel(EditudeAnnotationModel* model)
+{
+    m_annotationModel = model;
 }
 
 void EditudeService::start()
@@ -149,6 +155,7 @@ void EditudeService::onServerMessage(const QString& text)
         m_reconnectAttempt = 0;
         LOGD() << "[editude] joined/rejoined project" << m_projectId
                << "at revision" << m_serverRevision;
+        fetchAnnotations();
 
         // Flush ops buffered during reconnect
         if (!m_bufferedOps.isEmpty()) {
@@ -196,6 +203,16 @@ void EditudeService::onServerMessage(const QString& text)
         if (!cid.isEmpty()) {
             m_presenceOverlay.updateCursor(cid, sel);
             refreshPresenceModel();
+        }
+
+    } else if (type == "annotation_created") {
+        if (m_annotationModel) {
+            m_annotationModel->addAnnotation(msg.value("annotation").toObject());
+        }
+
+    } else if (type == "annotation_reply_created") {
+        if (m_annotationModel) {
+            m_annotationModel->incrementReplyCount(msg.value("annotation_id").toString());
         }
 
     } else if (type == "op_error") {
@@ -510,6 +527,40 @@ QJsonObject EditudeService::buildSelectionPayload(const mu::notation::INotationS
     }
     obj["element_ids"] = ids;
     return obj;
+}
+
+void EditudeService::fetchAnnotations()
+{
+    if (m_sessionUrl.isEmpty() || m_projectId.isEmpty() || !m_annotationModel) {
+        return;
+    }
+
+    // Derive the annotations REST URL from the session URL base.
+    // EDITUDE_SESSION_URL is expected to be something like
+    //   http://host:port/projects/{pid}/session-bootstrap?token=...
+    // Strip query + trailing path segment to get the project base URL.
+    QUrl sessionUrl(m_sessionUrl);
+    // Build: http://host:port/projects/{pid}/annotations
+    QUrl annotationsUrl;
+    annotationsUrl.setScheme(sessionUrl.scheme());
+    annotationsUrl.setHost(sessionUrl.host());
+    annotationsUrl.setPort(sessionUrl.port());
+    annotationsUrl.setPath(QString("/projects/%1/annotations").arg(m_projectId));
+
+    QNetworkRequest req(annotationsUrl);
+    req.setRawHeader("Authorization", QString("Bearer %1").arg(m_token).toUtf8());
+
+    QNetworkReply* reply = m_nam.get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            LOGW() << "[editude] annotations fetch failed:" << reply->errorString();
+            return;
+        }
+        const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).array();
+        m_annotationModel->loadFromJson(arr);
+        LOGD() << "[editude] loaded" << arr.size() << "annotations";
+    });
 }
 
 void EditudeService::refreshPresenceModel()

@@ -120,6 +120,12 @@ private:
                                int actualNotes, int normalNotes);
     static QJsonObject buildRemoveTuplet(const QString& uuid);
 
+    // Tier 3 builders — chord symbols (score-global, no part_id).
+    static QJsonObject buildAddChordSymbol(const QString& uuid, int beatNum, int beatDen,
+                                           const QString& name);
+    static QJsonObject buildSetChordSymbol(const QString& uuid, const QString& name);
+    static QJsonObject buildRemoveChordSymbol(const QString& uuid);
+
     // Tier 3 builders — lyrics.
     QJsonObject buildAddLyric(mu::engraving::EngravingObject* lyr,
                               const QString& uuid, const QString& partId,

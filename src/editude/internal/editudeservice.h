@@ -43,6 +43,7 @@
 
 namespace mu::editude::internal {
 
+class EditudeAnnotationModel;
 class EditudePresenceModel;
 
 class EditudeService : public QObject, public muse::Contextable, public muse::async::Asyncable
@@ -55,6 +56,7 @@ public:
     void start();
     void onNotationChanged(mu::notation::INotationPtr notation);
     void setPresenceModel(EditudePresenceModel* model);
+    void setAnnotationModel(EditudeAnnotationModel* model);
 
 private:
     enum class State { Disconnected, Authenticating, Joining, Live, Reconnecting };
@@ -73,6 +75,7 @@ private:
     void onSelectionChanged();
     QJsonObject buildSelectionPayload(const mu::notation::INotationSelectionPtr& sel);
     void refreshPresenceModel();
+    void fetchAnnotations();
 
     muse::ContextInject<mu::project::IProjectFilesController> m_projectFiles{ iocContext() };
     muse::ContextInject<mu::playback::IPlaybackController> m_playbackController{ iocContext() };
@@ -105,6 +108,7 @@ private:
     OperationTranslator m_translator;
     ScoreApplicator m_applicator;
     EditudePresenceModel* m_presenceModel = nullptr;
+    EditudeAnnotationModel* m_annotationModel = nullptr;
     PresenceOverlay m_presenceOverlay;
     QTimer* m_presenceThrottle = nullptr;
 };

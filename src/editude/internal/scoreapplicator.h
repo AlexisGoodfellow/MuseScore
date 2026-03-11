@@ -92,6 +92,11 @@ private:
     bool applySetLyric(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveLyric(mu::engraving::Score* score, const QJsonObject& payload);
 
+    // Tier 3 — chord symbols (score-global, no part_id)
+    bool applyAddChordSymbol(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetChordSymbol(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveChordSymbol(mu::engraving::Score* score, const QJsonObject& payload);
+
     static int pitchToMidi(const QString& step, int octave, const QString& accidental);
     static mu::engraving::DurationType parseDurationType(const QString& name);
 
