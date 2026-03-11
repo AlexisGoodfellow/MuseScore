@@ -18,6 +18,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+find_package(Qt6 REQUIRED COMPONENTS WebSockets)
+
 muse_create_module(editude)
 
 target_sources(editude PRIVATE
@@ -31,9 +33,11 @@ target_sources(editude PRIVATE
     internal/scoreapplicator.cpp
     internal/presenceoverlay.h
     internal/presenceoverlay.cpp
-    internal/editudepresencemodel.h
-    internal/editudepresencemodel.cpp
 )
+
+# Model headers live in the QML module directory; expose them to editude
+# so editudemodule.h and editudeservice.cpp can include them by short name.
+target_include_directories(editude PRIVATE qml/Editude)
 
 target_link_libraries(editude PRIVATE
     Qt::WebSockets
@@ -42,6 +46,9 @@ target_link_libraries(editude PRIVATE
     notation
     engraving
 )
+
+# QML module: registers Editude types and QML files (import Editude 1.0).
+add_subdirectory(qml/Editude)
 
 if (MUE_BUILD_EDITUDE_TESTS)
     add_subdirectory(tests)
