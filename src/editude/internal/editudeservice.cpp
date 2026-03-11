@@ -35,8 +35,8 @@
 
 #include "notation/internal/igetscore.h"
 #include "log.h"
-#include "editudeannotationmodel.h"
-#include "editudepresencemodel.h"
+#include "qml/Editude/editudeannotationmodel.h"
+#include "qml/Editude/editudepresencemodel.h"
 
 using namespace mu::editude::internal;
 
