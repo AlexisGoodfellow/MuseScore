@@ -32,7 +32,7 @@
 #include <QPair>
 #include <QtQml/qqml.h>
 
-#include "types/geometry.h"
+#include "draw/types/geometry.h"
 
 namespace mu::editude::internal {
 

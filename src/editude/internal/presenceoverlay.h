@@ -27,10 +27,9 @@
 #include <QString>
 #include <QVector>
 
+#include "draw/types/geometry.h"
 #include "engraving/dom/score.h"
 #include "types/ret.h"
-
-namespace muse { struct RectF; }
 
 namespace mu::editude::internal {
 
