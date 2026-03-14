@@ -109,6 +109,14 @@ private:
     bool applySetChordSymbol(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveChordSymbol(mu::engraving::Score* score, const QJsonObject& payload);
 
+    // Tier 4 — navigation marks
+    bool applyInsertVolta(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveVolta(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyInsertMarker(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveMarker(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyInsertJump(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveJump(mu::engraving::Score* score, const QJsonObject& payload);
+
     // Tier 1+2 UUID ↔ element maps, maintained across all apply* calls.
     // Keyed by the "id" field present in Insert* ops (and echoed in op_ack.payload).
     QHash<QString, mu::engraving::EngravingObject*> m_uuidToElement;

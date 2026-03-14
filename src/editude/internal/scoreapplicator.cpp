@@ -44,9 +44,12 @@
 #include "engraving/dom/harmony.h"
 #include "engraving/dom/navigate.h"
 #include "engraving/dom/tuplet.h"
+#include "engraving/dom/jump.h"
+#include "engraving/dom/marker.h"
 #include "engraving/dom/slur.h"
 #include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
+#include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
 #include "engraving/types/typesconv.h"
@@ -919,6 +922,14 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("SetChordSymbol"))    return applySetChordSymbol(score, payload);
     if (type == QLatin1String("RemoveChordSymbol")) return applyRemoveChordSymbol(score, payload);
 
+    // Tier 4 — navigation marks
+    if (type == QLatin1String("InsertVolta"))  return applyInsertVolta(score, payload);
+    if (type == QLatin1String("RemoveVolta"))  return applyRemoveVolta(score, payload);
+    if (type == QLatin1String("InsertMarker")) return applyInsertMarker(score, payload);
+    if (type == QLatin1String("RemoveMarker")) return applyRemoveMarker(score, payload);
+    if (type == QLatin1String("InsertJump"))   return applyInsertJump(score, payload);
+    if (type == QLatin1String("RemoveJump"))   return applyRemoveJump(score, payload);
+
     LOGD() << "[editude] ScoreApplicator: unhandled op type" << type;
     return false;
 }
@@ -1566,6 +1577,216 @@ bool ScoreApplicator::applyRemoveChordSymbol(Score* score, const QJsonObject& op
 
     score->startCmd(TranslatableString("undoableAction", "Remove chord symbol"));
     score->undoRemoveElement(harmony);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 4 — navigation marks
+// ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applyInsertVolta(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty()) {
+        LOGW() << "[editude] applyInsertVolta: missing id";
+        return false;
+    }
+
+    const QJsonObject startBeatObj = op["start_beat"].toObject();
+    const QJsonObject endBeatObj   = op["end_beat"].toObject();
+    const Fraction startTick(startBeatObj["numerator"].toInt(),
+                             startBeatObj["denominator"].toInt());
+    const Fraction endTick(endBeatObj["numerator"].toInt(),
+                           endBeatObj["denominator"].toInt());
+
+    Measure* startMeasure = score->tick2measure(startTick);
+    Measure* endMeasure   = score->tick2measure(endTick);
+    if (!startMeasure || !endMeasure) {
+        LOGW() << "[editude] applyInsertVolta: measure not found for tick range";
+        return false;
+    }
+
+    // Build endings vector from JSON array.
+    std::vector<int> endings;
+    const QJsonArray numbersArr = op["numbers"].toArray();
+    for (const auto& v : numbersArr) {
+        endings.push_back(v.toInt());
+    }
+    const bool openEnd = op["open_end"].toBool(false);
+
+    score->startCmd(TranslatableString("undoableAction", "Insert volta"));
+    Volta* volta = Factory::createVolta(score->dummy());
+    volta->setTrack(0);
+    volta->setTick(startMeasure->tick());
+    volta->setTick2(endMeasure->endTick());
+    volta->setEndings(endings);
+    volta->setVoltaType(openEnd ? Volta::Type::OPEN : Volta::Type::CLOSED);
+    score->undoAddElement(volta);
+    score->endCmd();
+
+    m_uuidToElement[id] = volta;
+    m_elementToUuid[volta] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveVolta(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveVolta: unknown id" << id;
+        return false;
+    }
+
+    Volta* volta = dynamic_cast<Volta*>(m_uuidToElement.value(id));
+    if (!volta) {
+        LOGW() << "[editude] applyRemoveVolta: element is not Volta" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(volta);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove volta"));
+    score->undoRemoveElement(volta);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyInsertMarker(Score* score, const QJsonObject& op)
+{
+    const QString id   = op["id"].toString();
+    const QString kind = op["kind"].toString();
+    if (id.isEmpty() || kind.isEmpty()) {
+        LOGW() << "[editude] applyInsertMarker: missing id or kind";
+        return false;
+    }
+
+    const QJsonObject beatObj = op["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyInsertMarker: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    // Map Python MarkerKind → MuseScore MarkerType.
+    static const QHash<QString, MarkerType> s_markerKindMap = {
+        { "segno",     MarkerType::SEGNO   },
+        { "coda",      MarkerType::CODA    },
+        { "fine",      MarkerType::FINE    },
+        { "to_coda",   MarkerType::TOCODA  },
+        { "segno_var", MarkerType::VARSEGNO },
+    };
+    MarkerType markerType = s_markerKindMap.value(kind, MarkerType::SEGNO);
+
+    const QString label = op["label"].toString();
+
+    score->startCmd(TranslatableString("undoableAction", "Insert marker"));
+    Marker* marker = Factory::createMarker(measure);
+    marker->setParent(measure);
+    marker->setTrack(0);
+    marker->setMarkerType(markerType);
+    if (!label.isEmpty()) {
+        marker->setLabel(String(label));
+    }
+    score->undoAddElement(marker);
+    score->endCmd();
+
+    m_uuidToElement[id] = marker;
+    m_elementToUuid[marker] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveMarker(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveMarker: unknown id" << id;
+        return false;
+    }
+
+    Marker* marker = dynamic_cast<Marker*>(m_uuidToElement.value(id));
+    if (!marker) {
+        LOGW() << "[editude] applyRemoveMarker: element is not Marker" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(marker);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove marker"));
+    score->undoRemoveElement(marker);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyInsertJump(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty()) {
+        LOGW() << "[editude] applyInsertJump: missing id";
+        return false;
+    }
+
+    const QJsonObject beatObj = op["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyInsertJump: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    const QString jumpTo     = op["jump_to"].toString();
+    const QString playUntil  = op["play_until"].toString();
+    const QString continueAt = op["continue_at"].toString();
+    const QString text       = op["text"].toString();
+
+    score->startCmd(TranslatableString("undoableAction", "Insert jump"));
+    Jump* jump = Factory::createJump(measure);
+    jump->setParent(measure);
+    jump->setTrack(0);
+    if (!jumpTo.isEmpty()) {
+        jump->setJumpTo(String(jumpTo));
+    }
+    if (!playUntil.isEmpty()) {
+        jump->setPlayUntil(String(playUntil));
+    }
+    if (!continueAt.isEmpty()) {
+        jump->setContinueAt(String(continueAt));
+    }
+    if (!text.isEmpty()) {
+        jump->setPlainText(String(text));
+    }
+    score->undoAddElement(jump);
+    score->endCmd();
+
+    m_uuidToElement[id] = jump;
+    m_elementToUuid[jump] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveJump(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveJump: unknown id" << id;
+        return false;
+    }
+
+    Jump* jump = dynamic_cast<Jump*>(m_uuidToElement.value(id));
+    if (!jump) {
+        LOGW() << "[editude] applyRemoveJump: element is not Jump" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(jump);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove jump"));
+    score->undoRemoveElement(jump);
     score->endCmd();
     return true;
 }
