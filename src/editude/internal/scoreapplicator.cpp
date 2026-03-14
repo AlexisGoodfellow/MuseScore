@@ -40,7 +40,9 @@
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/keysig.h"
 #include "engraving/dom/lyrics.h"
+#include "engraving/dom/hairpin.h"
 #include "engraving/dom/navigate.h"
+#include "engraving/dom/slur.h"
 #include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
 #include "engraving/types/bps.h"
@@ -1137,30 +1139,135 @@ bool ScoreApplicator::applyRemoveDynamic(Score* score, const QJsonObject& op)
     return true;
 }
 
-bool ScoreApplicator::applyAddSlur(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyAddSlur(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applyAddSlur: id=" << op["id"].toString()
-           << " start=" << op["start_event_id"].toString()
-           << " end=" << op["end_event_id"].toString();
+    const QString id           = op["id"].toString();
+    const QString startEventId = op["start_event_id"].toString();
+    const QString endEventId   = op["end_event_id"].toString();
+
+    if (id.isEmpty() || startEventId.isEmpty() || endEventId.isEmpty()) {
+        LOGW() << "[editude] applyAddSlur: missing id, start_event_id, or end_event_id";
+        return false;
+    }
+
+    EngravingObject* startObj = m_uuidToElement.value(startEventId);
+    EngravingObject* endObj   = m_uuidToElement.value(endEventId);
+    if (!startObj || !endObj) {
+        LOGW() << "[editude] applyAddSlur: unknown start or end event_id";
+        return false;
+    }
+
+    auto toCR = [](EngravingObject* obj) -> ChordRest* {
+        if (!obj) return nullptr;
+        if (obj->isNote()) return toNote(static_cast<EngravingItem*>(obj))->chord();
+        if (obj->isChordRest()) return toChordRest(static_cast<EngravingItem*>(obj));
+        return nullptr;
+    };
+
+    ChordRest* startCR = toCR(startObj);
+    ChordRest* endCR   = toCR(endObj);
+    if (!startCR || !endCR) {
+        LOGW() << "[editude] applyAddSlur: start or end is not a note/chordrest";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add slur"));
+    Slur* slur = Factory::createSlur(score->dummy());
+    slur->setScore(score);
+    slur->setTick(startCR->tick());
+    slur->setTick2(endCR->tick());
+    slur->setTrack(startCR->track());
+    slur->setTrack2(endCR->track());
+    slur->setStartElement(startCR);
+    slur->setEndElement(endCR);
+    score->undoAddElement(slur);
+    score->endCmd();
+
+    m_uuidToElement[id] = slur;
+    m_elementToUuid[slur] = id;
     return true;
 }
 
-bool ScoreApplicator::applyRemoveSlur(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyRemoveSlur(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applyRemoveSlur: id=" << op["id"].toString();
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveSlur: unknown id" << id;
+        return false;
+    }
+
+    Slur* slur = dynamic_cast<Slur*>(m_uuidToElement.value(id));
+    if (!slur) {
+        LOGW() << "[editude] applyRemoveSlur: element is not a Slur" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(slur);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove slur"));
+    score->undoRemoveElement(slur);
+    score->endCmd();
     return true;
 }
 
-bool ScoreApplicator::applyAddHairpin(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyAddHairpin(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applyAddHairpin: id=" << op["id"].toString()
-           << " kind=" << op["kind"].toString();
+    const QString id       = op["id"].toString();
+    const QString partId   = op["part_id"].toString();
+    const QString kind     = op["kind"].toString();
+    const QJsonObject sb   = op["start_beat"].toObject();
+    const QJsonObject eb   = op["end_beat"].toObject();
+
+    if (id.isEmpty() || partId.isEmpty()) {
+        LOGW() << "[editude] applyAddHairpin: missing id or part_id";
+        return false;
+    }
+
+    if (!m_partUuidToPart.contains(partId)) {
+        LOGW() << "[editude] applyAddHairpin: unknown part_id" << partId;
+        return false;
+    }
+
+    const HairpinType hpType = (kind == QStringLiteral("crescendo"))
+                               ? HairpinType::CRESC_HAIRPIN
+                               : HairpinType::DIM_HAIRPIN;
+
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const track_idx_t track = m_partUuidToPart.value(partId)->startTrack();
+
+    score->startCmd(TranslatableString("undoableAction", "Add hairpin"));
+    Hairpin* hp = score->addHairpin(hpType, startTick, endTick, track);
+    score->endCmd();
+
+    if (hp) {
+        m_uuidToElement[id] = hp;
+        m_elementToUuid[hp] = id;
+    }
     return true;
 }
 
-bool ScoreApplicator::applyRemoveHairpin(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyRemoveHairpin(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applyRemoveHairpin: id=" << op["id"].toString();
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveHairpin: unknown id" << id;
+        return false;
+    }
+
+    Hairpin* hp = dynamic_cast<Hairpin*>(m_uuidToElement.value(id));
+    if (!hp) {
+        LOGW() << "[editude] applyRemoveHairpin: element is not a Hairpin" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(hp);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove hairpin"));
+    score->undoRemoveElement(hp);
+    score->endCmd();
     return true;
 }
 
