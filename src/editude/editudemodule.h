@@ -31,6 +31,10 @@
 #include "qml/Editude/editudeannotationmodel.h"
 #include "qml/Editude/editudepresencemodel.h"
 
+#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+#include "testing/editudetestserver.h"
+#endif
+
 namespace mu::editude {
 namespace internal { class EditudeService; }
 
@@ -57,6 +61,9 @@ private:
     std::shared_ptr<internal::EditudeService> m_service;
     std::shared_ptr<internal::EditudePresenceModel> m_presenceModel;
     std::shared_ptr<internal::EditudeAnnotationModel> m_annotationModel;
+#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+    std::unique_ptr<internal::EditudeTestServer> m_testServer;
+#endif
 };
 }
 

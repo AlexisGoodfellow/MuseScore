@@ -61,6 +61,11 @@ public:
         const QString& partId,
         const QHash<mu::engraving::EngravingObject*, QString>& remoteElementToUuid);
 
+    const QHash<mu::engraving::EngravingObject*, QString>& localElementToUuid() const
+    {
+        return m_localElementToUuid;
+    }
+
 private:
     // UUID lookup across both local and remote maps.
     QString uuidForElement(

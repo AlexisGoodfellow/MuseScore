@@ -58,6 +58,21 @@ void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
     m_service->setAnnotationModel(m_annotationModel.get());
     m_service->start();
 
+#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+    {
+        const QByteArray portEnv = qgetenv("EDITUDE_TEST_PORT");
+        if (!portEnv.isEmpty()) {
+            bool ok = false;
+            const quint16 port = static_cast<quint16>(portEnv.toUShort(&ok));
+            if (ok) {
+                m_testServer = std::make_unique<internal::EditudeTestServer>(
+                    m_service.get(), port);
+                m_testServer->start();
+            }
+        }
+    }
+#endif
+
     m_globalContext()->currentNotationChanged().onNotify(this, [this]() {
         m_service->onNotationChanged(m_globalContext()->currentNotation());
     });

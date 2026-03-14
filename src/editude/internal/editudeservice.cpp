@@ -564,6 +564,119 @@ void EditudeService::fetchAnnotations()
     });
 }
 
+#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+
+void EditudeService::connectToSession(const QString& sessionUrl)
+{
+    // Abort any existing socket connection
+    if (m_socket) {
+        m_socket->abort();
+        m_socket->deleteLater();
+        m_socket = nullptr;
+    }
+
+    // Stop any pending timers
+    if (m_reconnectTimer) {
+        m_reconnectTimer->stop();
+    }
+    if (m_tokenRefreshTimer) {
+        m_tokenRefreshTimer->stop();
+    }
+
+    // Reset all state to match a fresh start()
+    m_state = State::Disconnected;
+    m_serverRevision = 0;
+    m_clientSeq = 0;
+    m_bootstrapReady = false;
+    m_pendingOps = QJsonArray();
+    m_bufferedOps = QJsonArray();
+    m_reconnectAttempt = 0;
+    m_wsEverConnected = false;
+    m_immediateReconnect = false;
+    m_token.clear();
+    m_websocketUrl.clear();
+    m_projectId.clear();
+    m_snapshotRevision = 0;
+    m_tokenExpiry = 0;
+
+    // Set new session URL and trigger the bootstrap fetch — same logic as start()
+    m_sessionUrl = sessionUrl;
+
+    QNetworkRequest req{QUrl{m_sessionUrl}};
+    QNetworkReply* reply = m_nam.get(req);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+
+        if (reply->error() != QNetworkReply::NoError) {
+            LOGW() << "[editude] connectToSession fetch failed:" << reply->errorString();
+            return;
+        }
+
+        const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
+        m_token = obj.value("token").toString();
+        m_websocketUrl = obj.value("websocket_url").toString();
+        m_projectId = obj.value("project_id").toString();
+
+        if (m_token.isEmpty() || m_websocketUrl.isEmpty() || m_projectId.isEmpty()) {
+            LOGW() << "[editude] connectToSession response missing required fields";
+            return;
+        }
+
+        m_snapshotRevision = obj.value("snapshot_revision").toInt(0);
+        m_serverRevision   = obj.value("server_revision").toInt(0);
+        m_pendingOps       = obj.value("snapshot_ops").toArray();
+        m_bootstrapReady   = true;
+
+        // Ensure timers are created (they may have been nil if start() was never called)
+        if (!m_tokenRefreshTimer) {
+            m_tokenRefreshTimer = new QTimer(this);
+            m_tokenRefreshTimer->setSingleShot(true);
+            connect(m_tokenRefreshTimer, &QTimer::timeout,
+                    this, &EditudeService::onTokenRefreshTimer);
+        }
+        if (!m_reconnectTimer) {
+            m_reconnectTimer = new QTimer(this);
+            m_reconnectTimer->setSingleShot(true);
+            connect(m_reconnectTimer, &QTimer::timeout,
+                    this, &EditudeService::onReconnectTimer);
+        }
+
+        // If a score is already loaded, apply bootstrap ops and open the WS immediately.
+        // If not, onNotationChanged() will handle it when the score becomes available.
+        if (m_score && !m_pendingOps.isEmpty()) {
+            m_applyingRemote = true;
+            applyPendingOps();
+            m_applyingRemote = false;
+            m_pendingOps = QJsonArray();
+        }
+
+        if (!m_websocketUrl.isEmpty() && !m_wsEverConnected) {
+            m_wsEverConnected = true;
+            scheduleTokenRefresh();
+            _openWebSocket();
+        } else {
+            // Score not loaded yet — openScoreForSession() + onNotationChanged() will
+            // complete the WS open sequence, just as in the original start() flow.
+            openScoreForSession();
+        }
+    });
+}
+
+QString EditudeService::stateForTest() const
+{
+    switch (m_state) {
+    case State::Disconnected:   return QStringLiteral("disconnected");
+    case State::Authenticating: return QStringLiteral("authenticating");
+    case State::Joining:        return QStringLiteral("joining");
+    case State::Live:           return QStringLiteral("live");
+    case State::Reconnecting:   return QStringLiteral("reconnecting");
+    default:                    return QStringLiteral("unknown");
+    }
+}
+
+#endif // MUE_BUILD_EDITUDE_TEST_SERVER
+
 void EditudeService::refreshPresenceModel()
 {
     if (!m_presenceModel || !m_score) {

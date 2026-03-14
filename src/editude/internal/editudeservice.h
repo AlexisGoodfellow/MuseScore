@@ -54,6 +54,22 @@ public:
     explicit EditudeService(const muse::modularity::ContextPtr& iocCtx, QObject* parent = nullptr);
 
     void start();
+
+#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+    mu::engraving::Score* scoreForTest() const { return m_score; }
+    int serverRevisionForTest() const { return m_serverRevision; }
+    mu::notation::INotationPtr currentNotationForTest() const { return m_currentNotation; }
+    const QHash<mu::engraving::EngravingObject*, QString>& applicatorElementToUuid() const
+    {
+        return m_applicator.elementToUuid();
+    }
+    const QHash<mu::engraving::EngravingObject*, QString>& translatorLocalElementToUuid() const
+    {
+        return m_translator.localElementToUuid();
+    }
+    void connectToSession(const QString& sessionUrl);
+    QString stateForTest() const;
+#endif
     void onNotationChanged(mu::notation::INotationPtr notation);
     void setPresenceModel(EditudePresenceModel* model);
     void setAnnotationModel(EditudeAnnotationModel* model);

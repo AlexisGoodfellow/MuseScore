@@ -43,6 +43,10 @@ public:
         return m_elementToUuid;
     }
 
+    // Shared static helpers — also used by EditudeTestServer.
+    static int pitchToMidi(const QString& step, int octave, const QString& accidental);
+    static mu::engraving::DurationType parseDurationType(const QString& name);
+
 private:
     // Tier 1 — stream event operations
     bool applyInsertNote(mu::engraving::Score* score, const QJsonObject& payload);
@@ -96,9 +100,6 @@ private:
     bool applyAddChordSymbol(mu::engraving::Score* score, const QJsonObject& payload);
     bool applySetChordSymbol(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveChordSymbol(mu::engraving::Score* score, const QJsonObject& payload);
-
-    static int pitchToMidi(const QString& step, int octave, const QString& accidental);
-    static mu::engraving::DurationType parseDurationType(const QString& name);
 
     // Tier 1+2 UUID ↔ element maps, maintained across all apply* calls.
     // Keyed by the "id" field present in Insert* ops (and echoed in op_ack.payload).
