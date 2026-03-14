@@ -75,6 +75,29 @@ QString OperationTranslator::uuidForElement(
     return remoteElementToUuid.value(obj);
 }
 
+// UUID lookup for a ChordRest: checks the ChordRest pointer directly (works for
+// InsertChord / InsertRest which store UUID on Chord* / Rest*), then falls back to
+// checking the single Note* inside a single-note chord (InsertNote stores UUID on Note*).
+// Without this fallback, articulation/slur/lyric ops on single-note events would be
+// silently dropped because the Chord* is never in either UUID map.
+QString OperationTranslator::uuidForChordRest(
+    ChordRest* cr,
+    const QHash<EngravingObject*, QString>& remoteElementToUuid) const
+{
+    const QString direct = uuidForElement(cr, remoteElementToUuid);
+    if (!direct.isEmpty()) {
+        return direct;
+    }
+    // Fall back: single-note Chord whose UUID was assigned via InsertNote.
+    if (cr && cr->isChord()) {
+        const std::vector<Note*>& notes = toChord(static_cast<EngravingItem*>(cr))->notes();
+        if (notes.size() == 1) {
+            return uuidForElement(notes.front(), remoteElementToUuid);
+        }
+    }
+    return {};
+}
+
 // ---------------------------------------------------------------------------
 // translateAll — main dispatch
 // ---------------------------------------------------------------------------
@@ -404,7 +427,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (cmds.count(CommandType::AddElement)) {
             ChordRest* cr = art->chordRest();
             if (!cr) continue;
-            const QString eventUuid = uuidForElement(cr, remoteElementToUuid);
+            const QString eventUuid = uuidForChordRest(cr, remoteElementToUuid);
             if (eventUuid.isEmpty()) {
                 LOGD() << "[editude] translateAll: AddArticulation: parent UUID unknown, skipping";
                 continue;
@@ -468,8 +491,8 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             ChordRest* endCr   = (endEl && endEl->isChordRest())
                                  ? toChordRest(endEl)   : nullptr;
             if (!startCr || !endCr) continue;
-            const QString startUuid = uuidForElement(startCr, remoteElementToUuid);
-            const QString endUuid   = uuidForElement(endCr,   remoteElementToUuid);
+            const QString startUuid = uuidForChordRest(startCr, remoteElementToUuid);
+            const QString endUuid   = uuidForChordRest(endCr,   remoteElementToUuid);
             if (startUuid.isEmpty() || endUuid.isEmpty()) {
                 LOGD() << "[editude] translateAll: AddSlur: start/end UUID unknown, skipping";
                 continue;
@@ -568,7 +591,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (cmds.count(CommandType::AddElement)) {
             ChordRest* cr = lyr->chordRest();
             if (!cr) continue;
-            const QString eventUuid = uuidForElement(cr, remoteElementToUuid);
+            const QString eventUuid = uuidForChordRest(cr, remoteElementToUuid);
             if (eventUuid.isEmpty()) {
                 LOGD() << "[editude] translateAll: AddLyric: parent UUID unknown, skipping";
                 continue;
