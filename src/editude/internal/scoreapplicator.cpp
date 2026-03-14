@@ -930,6 +930,11 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("InsertJump"))   return applyInsertJump(score, payload);
     if (type == QLatin1String("RemoveJump"))   return applyRemoveJump(score, payload);
 
+    // Structural ops
+    if (type == QLatin1String("SetScoreMetadata")) return applySetScoreMetadata(score, payload);
+    if (type == QLatin1String("InsertBeats"))       return applyInsertBeats(score, payload);
+    if (type == QLatin1String("DeleteBeats"))       return applyDeleteBeats(score, payload);
+
     LOGD() << "[editude] ScoreApplicator: unhandled op type" << type;
     return false;
 }
@@ -1787,6 +1792,140 @@ bool ScoreApplicator::applyRemoveJump(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Remove jump"));
     score->undoRemoveElement(jump);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Structural ops
+// ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applySetScoreMetadata(Score* score, const QJsonObject& op)
+{
+    const QString field = op["field"].toString();
+    const QString value = op["value"].toString();
+
+    if (field.isEmpty()) {
+        LOGW() << "[editude] applySetScoreMetadata: missing field";
+        return false;
+    }
+
+    // Map Python field names to MuseScore meta tag names.
+    static const QHash<QString, QString> s_fieldMap = {
+        { "title",           "workTitle"       },
+        { "subtitle",        "subtitle"        },
+        { "composer",        "composer"        },
+        { "arranger",        "arranger"        },
+        { "lyricist",        "lyricist"        },
+        { "copyright",       "copyright"       },
+        { "work_number",     "workNumber"      },
+        { "movement_number", "movementNumber"  },
+        { "movement_title",  "movementTitle"   },
+    };
+
+    const QString tag = s_fieldMap.value(field, field);
+
+    score->startCmd(TranslatableString("undoableAction", "Set score metadata"));
+    score->setMetaTag(String(tag), String(value));
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyInsertBeats(Score* score, const QJsonObject& op)
+{
+    const QJsonObject atObj  = op["at_beat"].toObject();
+    const QJsonObject durObj = op["duration"].toObject();
+
+    const Fraction atTick(atObj["numerator"].toInt(), atObj["denominator"].toInt());
+    const Fraction duration(durObj["numerator"].toInt(), durObj["denominator"].toInt());
+
+    if (duration <= Fraction(0)) {
+        LOGW() << "[editude] applyInsertBeats: non-positive duration";
+        return false;
+    }
+
+    Measure* targetMeasure = score->tick2measure(atTick);
+    if (!targetMeasure) {
+        LOGW() << "[editude] applyInsertBeats: no measure at tick" << atTick.toString();
+        return false;
+    }
+
+    // Insert one measure at a time until we have filled `duration` of time.
+    // Each new measure inherits the time signature of the target position.
+    score->startCmd(TranslatableString("undoableAction", "Insert beats"));
+
+    Fraction remaining = duration;
+    while (remaining > Fraction(0)) {
+        // Re-resolve target each iteration because prior inserts shift ticks.
+        Measure* m = score->tick2measure(atTick);
+        if (!m) {
+            break;
+        }
+        const Fraction measureLen = m->ticks();
+
+        Score::InsertMeasureOptions opts;
+        opts.createMeasureRests = true;
+        opts.needDeselectAll = false;
+        score->insertMeasure(ElementType::MEASURE, m, opts);
+
+        remaining -= measureLen;
+    }
+
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyDeleteBeats(Score* score, const QJsonObject& op)
+{
+    const QJsonObject atObj  = op["at_beat"].toObject();
+    const QJsonObject durObj = op["duration"].toObject();
+
+    const Fraction atTick(atObj["numerator"].toInt(), atObj["denominator"].toInt());
+    const Fraction duration(durObj["numerator"].toInt(), durObj["denominator"].toInt());
+
+    if (duration <= Fraction(0)) {
+        LOGW() << "[editude] applyDeleteBeats: non-positive duration";
+        return false;
+    }
+
+    const Fraction endTick = atTick + duration;
+
+    Measure* firstMeasure = score->tick2measure(atTick);
+    if (!firstMeasure) {
+        LOGW() << "[editude] applyDeleteBeats: no measure at tick" << atTick.toString();
+        return false;
+    }
+
+    // Collect all measures whose tick falls strictly before endTick.
+    Measure* lastMeasure = nullptr;
+    for (Measure* m = firstMeasure; m; m = m->nextMeasure()) {
+        if (m->tick() >= endTick) {
+            break;
+        }
+        lastMeasure = m;
+    }
+    if (!lastMeasure) {
+        LOGW() << "[editude] applyDeleteBeats: no measures in range";
+        return false;
+    }
+
+    // Purge UUID maps for any element inside the deleted range so stale
+    // pointers do not outlive the undo stack.
+    const Fraction actualEndTick = lastMeasure->tick() + lastMeasure->ticks();
+    QList<QString> keysToRemove;
+    for (auto it = m_uuidToElement.constBegin(); it != m_uuidToElement.constEnd(); ++it) {
+        auto* item = dynamic_cast<EngravingItem*>(it.value());
+        if (item && item->tick() >= atTick && item->tick() < actualEndTick) {
+            m_elementToUuid.remove(it.value());
+            keysToRemove.append(it.key());
+        }
+    }
+    for (const QString& k : keysToRemove) {
+        m_uuidToElement.remove(k);
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Delete beats"));
+    score->deleteMeasures(firstMeasure, lastMeasure);
     score->endCmd();
     return true;
 }

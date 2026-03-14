@@ -117,6 +117,11 @@ private:
     bool applyInsertJump(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveJump(mu::engraving::Score* score, const QJsonObject& payload);
 
+    // Structural ops
+    bool applySetScoreMetadata(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyInsertBeats(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyDeleteBeats(mu::engraving::Score* score, const QJsonObject& payload);
+
     // Tier 1+2 UUID ↔ element maps, maintained across all apply* calls.
     // Keyed by the "id" field present in Insert* ops (and echoed in op_ack.payload).
     QHash<QString, mu::engraving::EngravingObject*> m_uuidToElement;
