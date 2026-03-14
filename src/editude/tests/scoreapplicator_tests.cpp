@@ -751,3 +751,709 @@ TEST_F(Editude_ScoreApplicatorTests, applySetClef_unknownClefName_returnsFalse)
 
     delete score;
 }
+
+// ===========================================================================
+// Group 8 — Tier 3: Articulations
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddArticulation_staccato_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString artUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
+
+    QJsonObject op;
+    op["type"]         = "AddArticulation";
+    op["id"]           = artUuid;
+    op["event_id"]     = noteUuid;
+    op["articulation"] = "staccato";
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddArticulation_unknownEventId_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+    QJsonObject op;
+    op["type"]         = "AddArticulation";
+    op["id"]           = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    op["event_id"]     = "no-such-event";
+    op["articulation"] = "staccato";
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveArticulation_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString artUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
+
+    QJsonObject addOp;
+    addOp["type"]         = "AddArticulation";
+    addOp["id"]           = artUuid;
+    addOp["event_id"]     = noteUuid;
+    addOp["articulation"] = "accent";
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject removeOp;
+    removeOp["type"] = "RemoveArticulation";
+    removeOp["id"]   = artUuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 9 — Tier 3: Dynamics
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddDynamic_mf_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString partUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString dynUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+
+    QJsonObject beat;
+    beat["numerator"]   = 0;
+    beat["denominator"] = 1;
+    QJsonObject op;
+    op["type"]    = "AddDynamic";
+    op["id"]      = dynUuid;
+    op["part_id"] = partUuid;
+    op["kind"]    = "mf";
+    op["beat"]    = beat;
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddDynamic_unknownPartId_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+    QJsonObject beat;
+    beat["numerator"]   = 0;
+    beat["denominator"] = 1;
+    QJsonObject op;
+    op["type"]    = "AddDynamic";
+    op["id"]      = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    op["part_id"] = "no-such-part";
+    op["kind"]    = "f";
+    op["beat"]    = beat;
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applySetDynamic_changesKind)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString partUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString dynUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+
+    QJsonObject beat;
+    beat["numerator"]   = 0;
+    beat["denominator"] = 1;
+    QJsonObject addOp;
+    addOp["type"]    = "AddDynamic";
+    addOp["id"]      = dynUuid;
+    addOp["part_id"] = partUuid;
+    addOp["kind"]    = "p";
+    addOp["beat"]    = beat;
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject setOp;
+    setOp["type"] = "SetDynamic";
+    setOp["id"]   = dynUuid;
+    setOp["kind"] = "ff";
+    EXPECT_TRUE(applicator.apply(score, setOp));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveDynamic_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString partUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString dynUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+
+    QJsonObject beat;
+    beat["numerator"]   = 0;
+    beat["denominator"] = 1;
+    QJsonObject addOp;
+    addOp["type"]    = "AddDynamic";
+    addOp["id"]      = dynUuid;
+    addOp["part_id"] = partUuid;
+    addOp["kind"]    = "pp";
+    addOp["beat"]    = beat;
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject removeOp;
+    removeOp["type"] = "RemoveDynamic";
+    removeOp["id"]   = dynUuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 10 — Tier 3: Slurs
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddSlur_twoNotes_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString uuid1    = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString uuid2    = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString slurUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    // Two quarter notes at beats 0/4 and 1/4.
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, uuid1)));
+    ASSERT_TRUE(applicator.apply(score, makePayload("G", 4, "", "quarter", 0, 1, 4, 0, uuid2)));
+
+    QJsonObject op;
+    op["type"]           = "AddSlur";
+    op["id"]             = slurUuid;
+    op["start_event_id"] = uuid1;
+    op["end_event_id"]   = uuid2;
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddSlur_unknownEventId_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+    QJsonObject op;
+    op["type"]           = "AddSlur";
+    op["id"]             = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    op["start_event_id"] = "no-such-start";
+    op["end_event_id"]   = "no-such-end";
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveSlur_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString uuid1    = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString uuid2    = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString slurUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, uuid1)));
+    ASSERT_TRUE(applicator.apply(score, makePayload("G", 4, "", "quarter", 0, 1, 4, 0, uuid2)));
+
+    QJsonObject addOp;
+    addOp["type"]           = "AddSlur";
+    addOp["id"]             = slurUuid;
+    addOp["start_event_id"] = uuid1;
+    addOp["end_event_id"]   = uuid2;
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject removeOp;
+    removeOp["type"] = "RemoveSlur";
+    removeOp["id"]   = slurUuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 11 — Tier 3: Hairpins
+// ===========================================================================
+
+static QJsonObject makeBeatObj(int n, int d)
+{
+    QJsonObject b;
+    b["numerator"]   = n;
+    b["denominator"] = d;
+    return b;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddHairpin_crescendo_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString partUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString hpUuid   = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+
+    QJsonObject op;
+    op["type"]       = "AddHairpin";
+    op["id"]         = hpUuid;
+    op["part_id"]    = partUuid;
+    op["kind"]       = "crescendo";
+    op["start_beat"] = makeBeatObj(0, 4);
+    op["end_beat"]   = makeBeatObj(2, 4);
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddHairpin_unknownPartId_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+    QJsonObject op;
+    op["type"]       = "AddHairpin";
+    op["id"]         = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    op["part_id"]    = "no-such-part";
+    op["kind"]       = "diminuendo";
+    op["start_beat"] = makeBeatObj(0, 4);
+    op["end_beat"]   = makeBeatObj(2, 4);
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveHairpin_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString partUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString hpUuid   = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+
+    QJsonObject addOp;
+    addOp["type"]       = "AddHairpin";
+    addOp["id"]         = hpUuid;
+    addOp["part_id"]    = partUuid;
+    addOp["kind"]       = "crescendo";
+    addOp["start_beat"] = makeBeatObj(0, 4);
+    addOp["end_beat"]   = makeBeatObj(2, 4);
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject removeOp;
+    removeOp["type"] = "RemoveHairpin";
+    removeOp["id"]   = hpUuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 12 — Tier 3: Chord symbols
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddChordSymbol_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString csUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    QJsonObject op;
+    op["type"] = "AddChordSymbol";
+    op["id"]   = csUuid;
+    op["name"] = "Cmaj7";
+    op["beat"] = makeBeatObj(0, 1);
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applySetChordSymbol_changesName)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString csUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    QJsonObject addOp;
+    addOp["type"] = "AddChordSymbol";
+    addOp["id"]   = csUuid;
+    addOp["name"] = "Am";
+    addOp["beat"] = makeBeatObj(0, 1);
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject setOp;
+    setOp["type"] = "SetChordSymbol";
+    setOp["id"]   = csUuid;
+    setOp["name"] = "Am7";
+    EXPECT_TRUE(applicator.apply(score, setOp));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveChordSymbol_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString csUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    QJsonObject addOp;
+    addOp["type"] = "AddChordSymbol";
+    addOp["id"]   = csUuid;
+    addOp["name"] = "G7";
+    addOp["beat"] = makeBeatObj(0, 1);
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject removeOp;
+    removeOp["type"] = "RemoveChordSymbol";
+    removeOp["id"]   = csUuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 13 — Tier 3: Lyrics
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddLyric_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString lyrUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
+
+    QJsonObject op;
+    op["type"]     = "AddLyric";
+    op["id"]       = lyrUuid;
+    op["event_id"] = noteUuid;
+    op["verse"]    = 0;
+    op["syllabic"] = "single";
+    op["text"]     = "la";
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applySetLyric_changesText)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString lyrUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
+
+    QJsonObject addOp;
+    addOp["type"]     = "AddLyric";
+    addOp["id"]       = lyrUuid;
+    addOp["event_id"] = noteUuid;
+    addOp["verse"]    = 0;
+    addOp["syllabic"] = "begin";
+    addOp["text"]     = "hel-";
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject setOp;
+    setOp["type"]     = "SetLyric";
+    setOp["id"]       = lyrUuid;
+    setOp["text"]     = "lo-";
+    setOp["syllabic"] = "begin";
+    EXPECT_TRUE(applicator.apply(score, setOp));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveLyric_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString lyrUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
+
+    QJsonObject addOp;
+    addOp["type"]     = "AddLyric";
+    addOp["id"]       = lyrUuid;
+    addOp["event_id"] = noteUuid;
+    addOp["verse"]    = 0;
+    addOp["syllabic"] = "single";
+    addOp["text"]     = "la";
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject removeOp;
+    removeOp["type"] = "RemoveLyric";
+    removeOp["id"]   = lyrUuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 14 — Tier 4: Voltas
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applyInsertVolta_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString voltaUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    QJsonArray numbers;
+    numbers.append(1);
+
+    QJsonObject op;
+    op["type"]       = "InsertVolta";
+    op["id"]         = voltaUuid;
+    op["start_beat"] = makeBeatObj(0, 1);
+    op["end_beat"]   = makeBeatObj(0, 1);
+    op["numbers"]    = numbers;
+    op["open_end"]   = false;
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveVolta_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString voltaUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    QJsonArray numbers;
+    numbers.append(1);
+
+    QJsonObject addOp;
+    addOp["type"]       = "InsertVolta";
+    addOp["id"]         = voltaUuid;
+    addOp["start_beat"] = makeBeatObj(0, 1);
+    addOp["end_beat"]   = makeBeatObj(0, 1);
+    addOp["numbers"]    = numbers;
+    addOp["open_end"]   = false;
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject removeOp;
+    removeOp["type"] = "RemoveVolta";
+    removeOp["id"]   = voltaUuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 15 — Tier 4: Markers
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applyInsertMarker_segno_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString markerUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    QJsonObject op;
+    op["type"] = "InsertMarker";
+    op["id"]   = markerUuid;
+    op["beat"] = makeBeatObj(0, 1);
+    op["kind"] = "segno";
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveMarker_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString markerUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    QJsonObject addOp;
+    addOp["type"] = "InsertMarker";
+    addOp["id"]   = markerUuid;
+    addOp["beat"] = makeBeatObj(0, 1);
+    addOp["kind"] = "coda";
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject removeOp;
+    removeOp["type"] = "RemoveMarker";
+    removeOp["id"]   = markerUuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 16 — Tier 4: Jumps
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applyInsertJump_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString jumpUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    QJsonObject op;
+    op["type"]    = "InsertJump";
+    op["id"]      = jumpUuid;
+    op["beat"]    = makeBeatObj(0, 1);
+    op["jump_to"] = "start";
+    op["text"]    = "D.C.";
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveJump_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString jumpUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    QJsonObject addOp;
+    addOp["type"]    = "InsertJump";
+    addOp["id"]      = jumpUuid;
+    addOp["beat"]    = makeBeatObj(0, 1);
+    addOp["jump_to"] = "start";
+    ASSERT_TRUE(applicator.apply(score, addOp));
+
+    QJsonObject removeOp;
+    removeOp["type"] = "RemoveJump";
+    removeOp["id"]   = jumpUuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 17 — Structural: SetScoreMetadata
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applySetScoreMetadata_title_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+    QJsonObject op;
+    op["type"]  = "SetScoreMetadata";
+    op["field"] = "title";
+    op["value"] = "My Symphony";
+    EXPECT_TRUE(applicator.apply(score, op));
+    EXPECT_EQ(score->metaTag(u"workTitle"), u"My Symphony");
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applySetScoreMetadata_composer_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+    QJsonObject op;
+    op["type"]  = "SetScoreMetadata";
+    op["field"] = "composer";
+    op["value"] = "J.S. Bach";
+    EXPECT_TRUE(applicator.apply(score, op));
+    EXPECT_EQ(score->metaTag(u"composer"), u"J.S. Bach");
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 18 — Structural: InsertBeats / DeleteBeats
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applyInsertBeats_addsMeasures)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const size_t measBefore = score->nmeasures();
+    ScoreApplicator applicator;
+
+    QJsonObject op;
+    op["type"]     = "InsertBeats";
+    op["at_beat"]  = makeBeatObj(0, 1);
+    op["duration"] = makeBeatObj(1, 1);
+    EXPECT_TRUE(applicator.apply(score, op));
+    EXPECT_GT(score->nmeasures(), measBefore);
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyDeleteBeats_removesMeasure)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+
+    // Use InsertBeats to add a second measure, giving us two to work with.
+    QJsonObject insertOp;
+    insertOp["type"]     = "InsertBeats";
+    insertOp["at_beat"]  = makeBeatObj(0, 1);
+    insertOp["duration"] = makeBeatObj(1, 1);
+    ASSERT_TRUE(applicator.apply(score, insertOp));
+    ASSERT_EQ(score->nmeasures(), static_cast<size_t>(2));
+
+    // Delete the first measure.
+    QJsonObject op;
+    op["type"]     = "DeleteBeats";
+    op["at_beat"]  = makeBeatObj(0, 1);
+    op["duration"] = makeBeatObj(1, 1);
+    EXPECT_TRUE(applicator.apply(score, op));
+    EXPECT_EQ(score->nmeasures(), static_cast<size_t>(1));
+
+    delete score;
+}
