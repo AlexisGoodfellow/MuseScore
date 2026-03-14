@@ -26,16 +26,27 @@
 #include <QSet>
 #include <QUuid>
 
+#include "engraving/dom/articulation.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/clef.h"
+#include "engraving/dom/dynamic.h"
 #include "engraving/dom/engravingitem.h"
+#include "engraving/dom/harmony.h"
+#include "engraving/dom/hairpin.h"
+#include "engraving/dom/jump.h"
 #include "engraving/dom/keysig.h"
+#include "engraving/dom/lyrics.h"
+#include "engraving/dom/marker.h"
+#include "engraving/dom/measure.h"
 #include "engraving/dom/part.h"
-#include "engraving/dom/tie.h"
-#include "engraving/dom/rest.h"
+#include "engraving/dom/slur.h"
 #include "engraving/dom/tempotext.h"
+#include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
+#include "engraving/dom/tuplet.h"
+#include "engraving/dom/volta.h"
+#include "engraving/dom/rest.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
 
@@ -43,6 +54,12 @@
 
 using namespace mu::editude::internal;
 using namespace mu::engraving;
+
+// Forward declarations for file-scope helpers used by translateAll.
+static QString articulationNameFromSymId(SymId id);
+static QString dynamicKindName(DynamicType dt);
+static QString lyricSyllabicName(LyricsSyllabic s);
+static QString markerKindName(MarkerType mt);
 
 // ---------------------------------------------------------------------------
 // Private helper: UUID lookup (local map first, then remote map).
@@ -65,7 +82,8 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     const std::map<EngravingObject*, std::unordered_set<CommandType>>& changedObjects,
     const PropertyIdSet& changedPropertyIdSet,
     const QString& partId,
-    const QHash<EngravingObject*, QString>& remoteElementToUuid)
+    const QHash<EngravingObject*, QString>& remoteElementToUuid,
+    const QMap<QString, QString>& changedMetaTags)
 {
     QVector<QJsonObject> ops;
 
@@ -323,6 +341,34 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
+    // ── Pass 12: ChordSymbol ──────────────────────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::HARMONY) {
+            continue;
+        }
+        auto* harmony = static_cast<Harmony*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[harmony]  = uuid;
+            m_localUuidToElement[uuid]     = harmony;
+            const Fraction tick = harmony->tick();
+            ops.append(buildAddChordSymbol(uuid, tick.numerator(), tick.denominator(),
+                                           harmony->harmonyName().toQString()));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(harmony, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveChordSymbol(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(harmony);
+            }
+        } else if (cmds.count(CommandType::ChangeProperty)) {
+            const QString uuid = uuidForElement(harmony, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildSetChordSymbol(uuid, harmony->harmonyName().toQString()));
+            }
+        }
+    }
+
     // ── Pass 13: SetKeySignature & SetClef ───────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || !cmds.count(CommandType::AddElement)) {
@@ -346,6 +392,348 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             const staff_idx_t firstStaff  = part->startTrack() / VOICES;
             const int staffIdx = static_cast<int>(globalStaff - firstStaff);
             ops.append(buildSetClef(clef, partUuid, staffIdx));
+        }
+    }
+
+    // ── Pass 14: Articulations ───────────────────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::ARTICULATION) {
+            continue;
+        }
+        auto* art = static_cast<Articulation*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            ChordRest* cr = art->chordRest();
+            if (!cr) continue;
+            const QString eventUuid = uuidForElement(cr, remoteElementToUuid);
+            if (eventUuid.isEmpty()) {
+                LOGD() << "[editude] translateAll: AddArticulation: parent UUID unknown, skipping";
+                continue;
+            }
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[art]  = uuid;
+            m_localUuidToElement[uuid] = art;
+            ops.append(buildAddArticulation(art, uuid, partId, eventUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(art, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveArticulation(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(art);
+            }
+        }
+    }
+
+    // ── Pass 15: Dynamics ────────────────────────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::DYNAMIC) {
+            continue;
+        }
+        auto* dyn = static_cast<Dynamic*>(obj);
+        Part* dynPart = static_cast<EngravingItem*>(dyn)->part();
+        if (!dynPart) continue;
+        const QString dynPartUuid = m_knownPartUuids.value(dynPart);
+        if (dynPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[dyn]  = uuid;
+            m_localUuidToElement[uuid] = dyn;
+            ops.append(buildAddDynamic(dyn, uuid, dynPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(dyn, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveDynamic(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(dyn);
+            }
+        } else if (cmds.count(CommandType::ChangeProperty)) {
+            const QString uuid = uuidForElement(dyn, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildSetDynamic(uuid, dynamicKindName(dyn->dynamicType())));
+            }
+        }
+    }
+
+    // ── Pass 16: Slurs ───────────────────────────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::SLUR) {
+            continue;
+        }
+        auto* slur = static_cast<Slur*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            EngravingItem* startEl = slur->startElement();
+            EngravingItem* endEl   = slur->endElement();
+            ChordRest* startCr = (startEl && startEl->isChordRest())
+                                 ? toChordRest(startEl) : nullptr;
+            ChordRest* endCr   = (endEl && endEl->isChordRest())
+                                 ? toChordRest(endEl)   : nullptr;
+            if (!startCr || !endCr) continue;
+            const QString startUuid = uuidForElement(startCr, remoteElementToUuid);
+            const QString endUuid   = uuidForElement(endCr,   remoteElementToUuid);
+            if (startUuid.isEmpty() || endUuid.isEmpty()) {
+                LOGD() << "[editude] translateAll: AddSlur: start/end UUID unknown, skipping";
+                continue;
+            }
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[slur]  = uuid;
+            m_localUuidToElement[uuid]  = slur;
+            ops.append(buildAddSlur(slur, uuid, partId, startUuid, endUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(slur, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveSlur(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(slur);
+            }
+        }
+    }
+
+    // ── Pass 17: Hairpins ────────────────────────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::HAIRPIN) {
+            continue;
+        }
+        auto* hp = static_cast<Hairpin*>(obj);
+        Part* hpPart = static_cast<EngravingItem*>(hp)->part();
+        if (!hpPart) continue;
+        const QString hpPartUuid = m_knownPartUuids.value(hpPart);
+        if (hpPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[hp]   = uuid;
+            m_localUuidToElement[uuid] = hp;
+            ops.append(buildAddHairpin(hp, uuid, hpPartUuid,
+                                       hp->tick(), hp->tick2(),
+                                       hp->isCrescendo()));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(hp, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveHairpin(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(hp);
+            }
+        }
+    }
+
+    // ── Pass 18: Tuplets ─────────────────────────────────────────────────
+    // Must run after Passes 2/3 so member UUIDs are already registered.
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::TUPLET) {
+            continue;
+        }
+        auto* tup = static_cast<Tuplet*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            Part* tupPart = static_cast<EngravingItem*>(tup)->part();
+            if (!tupPart) continue;
+            const QString tupPartUuid = m_knownPartUuids.value(tupPart);
+            if (tupPartUuid.isEmpty()) continue;
+
+            // Collect member UUIDs (members must already be registered from Pass 2/3).
+            QVector<QString> memberUuids;
+            for (DurationElement* elem : tup->elements()) {
+                const QString memberUuid = uuidForElement(elem, remoteElementToUuid);
+                memberUuids.append(memberUuid); // may be empty if not tracked
+            }
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[tup]  = uuid;
+            m_localUuidToElement[uuid] = tup;
+            ops.append(buildAddTuplet(tup, uuid, tupPartUuid, memberUuids,
+                                      tup->ratio().numerator(),
+                                      tup->ratio().denominator()));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(tup, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                // Unregister members before emitting RemoveTuplet.
+                for (DurationElement* elem : tup->elements()) {
+                    const QString memberUuid = uuidForElement(elem, remoteElementToUuid);
+                    if (!memberUuid.isEmpty()) {
+                        m_localUuidToElement.remove(memberUuid);
+                        m_localElementToUuid.remove(elem);
+                    }
+                }
+                ops.append(buildRemoveTuplet(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(tup);
+            }
+        }
+    }
+
+    // ── Pass 19: Lyrics ──────────────────────────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::LYRICS) {
+            continue;
+        }
+        auto* lyr = static_cast<Lyrics*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            ChordRest* cr = lyr->chordRest();
+            if (!cr) continue;
+            const QString eventUuid = uuidForElement(cr, remoteElementToUuid);
+            if (eventUuid.isEmpty()) {
+                LOGD() << "[editude] translateAll: AddLyric: parent UUID unknown, skipping";
+                continue;
+            }
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[lyr]  = uuid;
+            m_localUuidToElement[uuid] = lyr;
+            ops.append(buildAddLyric(lyr, uuid, partId, eventUuid,
+                                     lyr->verse(),
+                                     lyricSyllabicName(lyr->syllabic()),
+                                     lyr->plainText().toQString()));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(lyr, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveLyric(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(lyr);
+            }
+        } else if (cmds.count(CommandType::ChangeProperty)) {
+            const QString uuid = uuidForElement(lyr, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildSetLyric(uuid,
+                                         lyr->plainText().toQString(),
+                                         lyricSyllabicName(lyr->syllabic())));
+            }
+        }
+    }
+
+    // ── Pass 20: InsertBeats / DeleteBeats ───────────────────────────────
+    // Collect MEASURE objects by their command type, sort by tick, then emit
+    // a single InsertBeats or DeleteBeats covering the contiguous range.
+    {
+        QVector<Measure*> insertedMeasures;
+        QVector<Measure*> removedMeasures;
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || obj->type() != ElementType::MEASURE) {
+                continue;
+            }
+            auto* m = static_cast<Measure*>(obj);
+            if (cmds.count(CommandType::InsertMeasures)) {
+                insertedMeasures.append(m);
+            } else if (cmds.count(CommandType::RemoveMeasures)) {
+                removedMeasures.append(m);
+            }
+        }
+
+        auto sortByTick = [](Measure* a, Measure* b) {
+            return a->tick() < b->tick();
+        };
+
+        if (!insertedMeasures.isEmpty()) {
+            std::sort(insertedMeasures.begin(), insertedMeasures.end(), sortByTick);
+            const Fraction atBeat = insertedMeasures.first()->tick();
+            Fraction totalDur;
+            for (Measure* m : insertedMeasures) {
+                totalDur += m->ticks();
+            }
+            QJsonObject op;
+            op["type"]     = QStringLiteral("InsertBeats");
+            op["at_beat"]  = beatJson(atBeat);
+            op["duration"] = beatJson(totalDur);
+            ops.append(op);
+        }
+
+        if (!removedMeasures.isEmpty()) {
+            std::sort(removedMeasures.begin(), removedMeasures.end(), sortByTick);
+            const Fraction atBeat = removedMeasures.first()->tick();
+            Fraction totalDur;
+            for (Measure* m : removedMeasures) {
+                totalDur += m->ticks();
+            }
+            QJsonObject op;
+            op["type"]     = QStringLiteral("DeleteBeats");
+            op["at_beat"]  = beatJson(atBeat);
+            op["duration"] = beatJson(totalDur);
+            ops.append(op);
+        }
+    }
+
+    // ── Pass 21: InsertVolta / RemoveVolta ───────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::VOLTA) {
+            continue;
+        }
+        auto* volta = static_cast<Volta*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[volta]  = uuid;
+            m_localUuidToElement[uuid]   = volta;
+            ops.append(buildInsertVolta(volta, uuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(volta, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveVolta(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(volta);
+            }
+        }
+    }
+
+    // ── Pass 22: InsertMarker / RemoveMarker ─────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::MARKER) {
+            continue;
+        }
+        auto* marker = static_cast<Marker*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[marker]  = uuid;
+            m_localUuidToElement[uuid]    = marker;
+            ops.append(buildInsertMarker(marker, uuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(marker, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveMarker(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(marker);
+            }
+        }
+    }
+
+    // ── Pass 23: InsertJump / RemoveJump ─────────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::JUMP) {
+            continue;
+        }
+        auto* jump = static_cast<Jump*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[jump]  = uuid;
+            m_localUuidToElement[uuid]  = jump;
+            ops.append(buildInsertJump(jump, uuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(jump, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveJump(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(jump);
+            }
+        }
+    }
+
+    // ── Pass 24: SetScoreMetadata ─────────────────────────────────────────
+    // changedMetaTags contains only the tags that changed in this transaction
+    // (pre/post diff performed in EditudeService::onScoreChanges).
+    if (!changedMetaTags.isEmpty()) {
+        // Reverse map: MuseScore tag name → Python field name.
+        static const QHash<QString, QString> s_reverseFieldMap = {
+            { "workTitle",       "title"           },
+            { "subtitle",        "subtitle"        },
+            { "composer",        "composer"        },
+            { "arranger",        "arranger"        },
+            { "lyricist",        "lyricist"        },
+            { "copyright",       "copyright"       },
+            { "workNumber",      "work_number"     },
+            { "movementNumber",  "movement_number" },
+            { "movementTitle",   "movement_title"  },
+        };
+        for (auto it = changedMetaTags.begin(); it != changedMetaTags.end(); ++it) {
+            const QString field = s_reverseFieldMap.value(it.key(), it.key());
+            QJsonObject op;
+            op["type"]  = QStringLiteral("SetScoreMetadata");
+            op["field"] = field;
+            op["value"] = it.value();
+            ops.append(op);
         }
     }
 
@@ -680,5 +1068,387 @@ QJsonObject OperationTranslator::buildSetTie(const QString& noteUuid, bool tieSt
     } else {
         payload["tie"] = QJsonValue::Null;
     }
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — articulations
+// ---------------------------------------------------------------------------
+
+// Reverse of the articulationSymId() map in scoreapplicator.cpp.
+static QString articulationNameFromSymId(SymId id)
+{
+    static const QHash<SymId, QString> s_reverseMap = {
+        { SymId::articStaccatoAbove,      QStringLiteral("staccato")      },
+        { SymId::articAccentAbove,        QStringLiteral("accent")        },
+        { SymId::articTenutoAbove,        QStringLiteral("tenuto")        },
+        { SymId::articMarcatoAbove,       QStringLiteral("marcato")       },
+        { SymId::articStaccatissimoAbove, QStringLiteral("staccatissimo") },
+        { SymId::fermataAbove,            QStringLiteral("fermata")       },
+        { SymId::ornamentTrill,           QStringLiteral("trill")         },
+        { SymId::ornamentMordent,         QStringLiteral("mordent")       },
+        { SymId::ornamentTurn,            QStringLiteral("turn")          },
+    };
+    return s_reverseMap.value(id, QStringLiteral("staccato"));
+}
+
+QJsonObject OperationTranslator::buildAddArticulation(EngravingObject* art,
+                                                       const QString& uuid,
+                                                       const QString& /*partId*/,
+                                                       const QString& eventUuid)
+{
+    auto* a = static_cast<Articulation*>(art);
+    QJsonObject payload;
+    payload["type"]         = QStringLiteral("AddArticulation");
+    payload["id"]           = uuid;
+    payload["event_id"]     = eventUuid;
+    payload["articulation"] = articulationNameFromSymId(a->symId());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveArticulation(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveArticulation");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — dynamics
+// ---------------------------------------------------------------------------
+
+// Reverse map: DynamicType → Python kind string.
+static QString dynamicKindName(DynamicType dt)
+{
+    switch (dt) {
+    case DynamicType::PPP: return QStringLiteral("ppp");
+    case DynamicType::PP:  return QStringLiteral("pp");
+    case DynamicType::P:   return QStringLiteral("p");
+    case DynamicType::MP:  return QStringLiteral("mp");
+    case DynamicType::MF:  return QStringLiteral("mf");
+    case DynamicType::F:   return QStringLiteral("f");
+    case DynamicType::FF:  return QStringLiteral("ff");
+    case DynamicType::FFF: return QStringLiteral("fff");
+    case DynamicType::SFZ: return QStringLiteral("sfz");
+    case DynamicType::FP:  return QStringLiteral("fp");
+    case DynamicType::RF:  return QStringLiteral("rf");
+    default:               return QStringLiteral("mf");
+    }
+}
+
+QJsonObject OperationTranslator::buildAddDynamic(EngravingObject* dyn,
+                                                  const QString& uuid,
+                                                  const QString& partId)
+{
+    auto* d = static_cast<Dynamic*>(dyn);
+    QJsonObject payload;
+    payload["type"]    = QStringLiteral("AddDynamic");
+    payload["id"]      = uuid;
+    payload["part_id"] = partId;
+    payload["kind"]    = dynamicKindName(d->dynamicType());
+    payload["beat"]    = beatJson(d->tick());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetDynamic(const QString& uuid, const QString& kind)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("SetDynamic");
+    payload["id"]   = uuid;
+    payload["kind"] = kind;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveDynamic(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveDynamic");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — slurs
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddSlur(EngravingObject* /*slur*/,
+                                               const QString& uuid,
+                                               const QString& /*partId*/,
+                                               const QString& startEventUuid,
+                                               const QString& endEventUuid)
+{
+    QJsonObject payload;
+    payload["type"]           = QStringLiteral("AddSlur");
+    payload["id"]             = uuid;
+    payload["start_event_id"] = startEventUuid;
+    payload["end_event_id"]   = endEventUuid;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveSlur(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveSlur");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — hairpins
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddHairpin(EngravingObject* /*hp*/,
+                                                  const QString& uuid,
+                                                  const QString& partId,
+                                                  const Fraction& startTick,
+                                                  const Fraction& endTick,
+                                                  bool isCrescendo)
+{
+    QJsonObject payload;
+    payload["type"]        = QStringLiteral("AddHairpin");
+    payload["id"]          = uuid;
+    payload["part_id"]     = partId;
+    payload["kind"]        = isCrescendo ? QStringLiteral("crescendo")
+                                         : QStringLiteral("diminuendo");
+    payload["start_beat"]  = beatJson(startTick);
+    payload["end_beat"]    = beatJson(endTick);
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveHairpin(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveHairpin");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — tuplets
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddTuplet(EngravingObject* tup,
+                                                 const QString& uuid,
+                                                 const QString& partId,
+                                                 const QVector<QString>& memberUuids,
+                                                 int actualNotes,
+                                                 int normalNotes)
+{
+    auto* t = static_cast<Tuplet*>(tup);
+
+    QJsonArray members;
+    for (const QString& mid : memberUuids) {
+        QJsonObject m;
+        m["id"] = mid;
+        members.append(m);
+    }
+
+    QJsonObject baseDur;
+    baseDur["type"] = durationTypeName(t->baseLen().type());
+    baseDur["dots"] = t->baseLen().dots();
+
+    QJsonObject payload;
+    payload["type"]          = QStringLiteral("AddTuplet");
+    payload["id"]            = uuid;
+    payload["part_id"]       = partId;
+    payload["actual_notes"]  = actualNotes;
+    payload["normal_notes"]  = normalNotes;
+    payload["base_duration"] = baseDur;
+    payload["beat"]          = beatJson(t->tick());
+    payload["members"]       = members;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveTuplet(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveTuplet");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — chord symbols
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddChordSymbol(const QString& uuid,
+                                                      int beatNum, int beatDen,
+                                                      const QString& name)
+{
+    QJsonObject beat;
+    beat["numerator"]   = beatNum;
+    beat["denominator"] = beatDen;
+
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("AddChordSymbol");
+    payload["id"]   = uuid;
+    payload["name"] = name;
+    payload["beat"] = beat;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetChordSymbol(const QString& uuid, const QString& name)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("SetChordSymbol");
+    payload["id"]   = uuid;
+    payload["name"] = name;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveChordSymbol(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveChordSymbol");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — lyrics
+// ---------------------------------------------------------------------------
+
+// Maps LyricsSyllabic enum → Python syllabic name string.
+static QString lyricSyllabicName(LyricsSyllabic s)
+{
+    switch (s) {
+    case LyricsSyllabic::SINGLE: return QStringLiteral("single");
+    case LyricsSyllabic::BEGIN:  return QStringLiteral("begin");
+    case LyricsSyllabic::MIDDLE: return QStringLiteral("middle");
+    case LyricsSyllabic::END:    return QStringLiteral("end");
+    default:                     return QStringLiteral("single");
+    }
+}
+
+QJsonObject OperationTranslator::buildAddLyric(EngravingObject* /*lyr*/,
+                                                const QString& uuid,
+                                                const QString& /*partId*/,
+                                                const QString& eventUuid,
+                                                int verse,
+                                                const QString& syllabic,
+                                                const QString& text)
+{
+    QJsonObject payload;
+    payload["type"]     = QStringLiteral("AddLyric");
+    payload["id"]       = uuid;
+    payload["event_id"] = eventUuid;
+    payload["verse"]    = verse;
+    payload["syllabic"] = syllabic;
+    payload["text"]     = text;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetLyric(const QString& uuid,
+                                                const QString& text,
+                                                const QString& syllabic)
+{
+    QJsonObject payload;
+    payload["type"]     = QStringLiteral("SetLyric");
+    payload["id"]       = uuid;
+    payload["text"]     = text;
+    payload["syllabic"] = syllabic;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveLyric(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveLyric");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 4 builders — volta
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildInsertVolta(EngravingObject* volta, const QString& uuid)
+{
+    auto* v = static_cast<Volta*>(volta);
+    QJsonArray numbers;
+    for (int n : v->endings()) {
+        numbers.append(n);
+    }
+    const bool openEnd = (v->voltaType() == Volta::Type::OPEN);
+
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("InsertVolta");
+    payload["id"]         = uuid;
+    payload["start_beat"] = beatJson(v->tick());
+    payload["end_beat"]   = beatJson(v->tick2());
+    payload["numbers"]    = numbers;
+    payload["open_end"]   = openEnd;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveVolta(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveVolta");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 4 builders — markers
+// ---------------------------------------------------------------------------
+
+// Reverse of s_markerKindMap in applyInsertMarker (scoreapplicator.cpp).
+static QString markerKindName(MarkerType mt)
+{
+    switch (mt) {
+    case MarkerType::SEGNO:    return QStringLiteral("segno");
+    case MarkerType::CODA:     return QStringLiteral("coda");
+    case MarkerType::FINE:     return QStringLiteral("fine");
+    case MarkerType::TOCODA:   return QStringLiteral("to_coda");
+    case MarkerType::VARSEGNO: return QStringLiteral("segno_var");
+    default:                   return QStringLiteral("segno");
+    }
+}
+
+QJsonObject OperationTranslator::buildInsertMarker(EngravingObject* marker, const QString& uuid)
+{
+    auto* m = static_cast<Marker*>(marker);
+    QJsonObject payload;
+    payload["type"]  = QStringLiteral("InsertMarker");
+    payload["id"]    = uuid;
+    payload["beat"]  = beatJson(m->measure() ? m->measure()->tick() : m->tick());
+    payload["kind"]  = markerKindName(m->markerType());
+    payload["label"] = m->label().toQString();
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveMarker(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveMarker");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 4 builders — jumps
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildInsertJump(EngravingObject* jump, const QString& uuid)
+{
+    auto* j = static_cast<Jump*>(jump);
+    QJsonObject payload;
+    payload["type"]        = QStringLiteral("InsertJump");
+    payload["id"]          = uuid;
+    payload["beat"]        = beatJson(j->tick());
+    payload["jump_to"]     = j->jumpTo().toQString();
+    payload["play_until"]  = j->playUntil().toQString();
+    payload["continue_at"] = j->continueAt().toQString();
+    payload["text"]        = j->plainText().toQString();
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveJump(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveJump");
+    payload["id"]   = uuid;
     return payload;
 }

@@ -24,6 +24,7 @@
 #include <memory>
 
 #include <QJsonArray>
+#include <QMap>
 #include <QNetworkAccessManager>
 #include <QUuid>
 #include <QObject>
@@ -128,5 +129,10 @@ private:
     EditudeAnnotationModel* m_annotationModel = nullptr;
     PresenceOverlay m_presenceOverlay;
     QTimer* m_presenceThrottle = nullptr;
+
+    // Last known metaTags snapshot: used to diff against score->metaTags() on
+    // every onScoreChanges() call to detect setMetaTag() mutations that bypass
+    // the undo system and don't appear in changedObjects.
+    QMap<QString, QString> m_lastKnownMetaTags;
 };
 }

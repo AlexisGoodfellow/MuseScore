@@ -1457,3 +1457,188 @@ TEST_F(Editude_ScoreApplicatorTests, applyDeleteBeats_removesMeasure)
 
     delete score;
 }
+
+// ===========================================================================
+// Group 19 — Tier 3: Tuplets
+// ===========================================================================
+
+// Helper: build an AddTuplet payload for a triplet (3:2 quarter notes).
+static QJsonObject makeAddTupletPayload(const QString& partId,
+                                         const QString& tupletId,
+                                         const QJsonArray& memberIds,
+                                         int beatN = 0, int beatD = 1)
+{
+    QJsonObject beat;
+    beat["numerator"]   = beatN;
+    beat["denominator"] = beatD;
+
+    QJsonObject baseDur;
+    baseDur["type"] = "quarter";
+    baseDur["dots"] = 0;
+
+    QJsonObject op;
+    op["type"]          = "AddTuplet";
+    op["id"]            = tupletId;
+    op["part_id"]       = partId;
+    op["actual_notes"]  = 3;
+    op["normal_notes"]  = 2;
+    op["base_duration"] = baseDur;
+    op["beat"]          = beat;
+    op["members"]       = memberIds;
+    return op;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddTuplet_triplet_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString partUuid   = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString tupletUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+
+    // Build 3 member placeholder IDs.
+    QJsonArray members;
+    for (int i = 0; i < 3; ++i) {
+        QJsonObject m;
+        m["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        members.append(m);
+    }
+
+    QJsonObject op = makeAddTupletPayload(partUuid, tupletUuid, members);
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    // The tuplet UUID must be registered.
+    bool found = false;
+    for (auto it = applicator.elementToUuid().begin();
+         it != applicator.elementToUuid().end(); ++it) {
+        if (it.value() == tupletUuid) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found);
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddTuplet_unknownPartId_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+
+    QJsonArray members;
+    QJsonObject op = makeAddTupletPayload("no-such-part",
+                                          QUuid::createUuid().toString(QUuid::WithoutBraces),
+                                          members);
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveTuplet_succeeds)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString partUuid   = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString tupletUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+
+    QJsonArray members;
+    for (int i = 0; i < 3; ++i) {
+        QJsonObject m;
+        m["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        members.append(m);
+    }
+
+    ASSERT_TRUE(applicator.apply(score, makeAddTupletPayload(partUuid, tupletUuid, members)));
+
+    QJsonObject removeOp;
+    removeOp["type"] = "RemoveTuplet";
+    removeOp["id"]   = tupletUuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+
+    // Tuplet UUID must be gone from the map.
+    bool found = false;
+    for (auto it = applicator.elementToUuid().begin();
+         it != applicator.elementToUuid().end(); ++it) {
+        if (it.value() == tupletUuid) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_FALSE(found);
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemoveTuplet_unknownId_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+    QJsonObject op;
+    op["type"] = "RemoveTuplet";
+    op["id"]   = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}
+
+// ===========================================================================
+// Group 20 — SetPartInstrument
+// ===========================================================================
+
+TEST_F(Editude_ScoreApplicatorTests, applySetPartInstrument_updatesNames)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString partUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid, "Violin")));
+
+    QJsonObject instr;
+    instr["musescore_id"] = "flute";
+    instr["name"]         = "Flute";
+    instr["short_name"]   = "Fl.";
+
+    QJsonObject op;
+    op["type"]       = "SetPartInstrument";
+    op["part_id"]    = partUuid;
+    op["instrument"] = instr;
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    // The last part added was our test part — verify name updated.
+    Part* part = score->parts().back();
+    EXPECT_EQ(part->partName(), u"Flute");
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applySetPartInstrument_unknownPartId_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+
+    QJsonObject instr;
+    instr["musescore_id"] = "oboe";
+    instr["name"]         = "Oboe";
+    instr["short_name"]   = "Ob.";
+
+    QJsonObject op;
+    op["type"]       = "SetPartInstrument";
+    op["part_id"]    = "no-such-part";
+    op["instrument"] = instr;
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}

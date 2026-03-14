@@ -27,6 +27,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QMap>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QUrl>
@@ -152,14 +153,34 @@ void EditudeService::onServerMessage(const QString& text)
 
     } else if (type == "sync") {
         m_state = State::Live;
-        m_serverRevision = msg.value("server_revision").toInt(m_serverRevision);
         m_reconnectAttempt = 0;
+
+        // Apply peer ops that arrived while we were disconnected.  These are
+        // the ops since our last known revision; they bring the local score up
+        // to date before we re-submit our buffered offline edits.
+        //
+        // Note: ops we sent and got acked before disconnect are excluded by the
+        // server (since_revision filter), so no double-apply for the normal case.
+        // The narrow window where we sent but didn't receive an ack is accepted
+        // as a v1 limitation — the OT system corrects the server-side state.
+        const QJsonArray syncOps = msg.value("ops").toArray();
+        if (!syncOps.isEmpty() && m_score) {
+            m_applyingRemote = true;
+            for (const QJsonValue& v : syncOps) {
+                m_applicator.apply(m_score, v.toObject().value("payload").toObject());
+            }
+            m_applyingRemote = false;
+            LOGD() << "[editude] applied" << syncOps.size() << "sync ops from peers";
+        }
+
+        m_serverRevision = msg.value("server_revision").toInt(m_serverRevision);
         LOGD() << "[editude] joined/rejoined project" << m_projectId
                << "at revision" << m_serverRevision;
         fetchAnnotations();
 
-        // Flush batches buffered during reconnect — send each batch as-is, adding
-        // a fresh client_seq so the server can correlate acks.
+        // Drain batches buffered during the offline window.  Each batch retains
+        // its original base_revision; the server OT-transforms against any ops
+        // committed since then, including the sync ops applied above.
         if (!m_bufferedOps.isEmpty()) {
             for (const QJsonValue& v : m_bufferedOps) {
                 QJsonObject batch = v.toObject();
@@ -278,6 +299,16 @@ void EditudeService::onNotationChanged(mu::notation::INotationPtr notation)
     auto* gs = dynamic_cast<mu::notation::IGetScore*>(notation.get());
     m_score = gs ? gs->score() : nullptr;
 
+    // Reset the metaTags snapshot for the new score so we don't carry over
+    // stale diffs from a previously-loaded score.
+    m_lastKnownMetaTags.clear();
+    if (m_score) {
+        for (const auto& [k, v] : m_score->metaTags()) {
+            m_lastKnownMetaTags[QString::fromStdU16String(k.toStdU16String())]
+                = QString::fromStdU16String(v.toStdU16String());
+        }
+    }
+
     // Apply bootstrap ops before going live
     if (m_bootstrapReady && !m_pendingOps.isEmpty()) {
         m_applyingRemote = true;
@@ -326,13 +357,36 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
         return;
     }
 
+    // Diff the current metaTags against the last known snapshot to detect
+    // changes made via score->setMetaTag(), which bypasses the undo system
+    // and does not appear in changedObjects or changedPropertyIdSet.
+    QMap<QString, QString> changedMetaTags;
+    if (m_score) {
+        for (const auto& [k, v] : m_score->metaTags()) {
+            const QString qk = QString::fromStdU16String(k.toStdU16String());
+            const QString qv = QString::fromStdU16String(v.toStdU16String());
+            if (m_lastKnownMetaTags.value(qk) != qv) {
+                changedMetaTags[qk] = qv;
+            }
+        }
+        // Update the persistent snapshot so we don't re-emit unchanged tags.
+        if (!changedMetaTags.isEmpty()) {
+            for (auto it = changedMetaTags.begin(); it != changedMetaTags.end(); ++it) {
+                m_lastKnownMetaTags[it.key()] = it.value();
+            }
+        }
+    }
+
     const QVector<QJsonObject> ops = m_translator.translateAll(
         changes.changedObjects,
         changes.changedPropertyIdSet,
         m_projectId,
-        m_applicator.elementToUuid());
+        m_applicator.elementToUuid(),
+        changedMetaTags);
 
-    if (ops.isEmpty()) {
+    QVector<QJsonObject> allOps = ops;
+
+    if (allOps.isEmpty()) {
         return;
     }
 
@@ -340,7 +394,7 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
     // They share base_revision so the server can OT-transform them correctly.
     const int baseRevision = m_serverRevision;
     QJsonArray opsArray;
-    for (const QJsonObject& payload : ops) {
+    for (const QJsonObject& payload : allOps) {
         opsArray.append(payload);
     }
 

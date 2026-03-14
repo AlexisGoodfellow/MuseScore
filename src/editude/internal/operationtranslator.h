@@ -26,6 +26,7 @@
 
 #include <QHash>
 #include <QJsonObject>
+#include <QMap>
 #include <QString>
 #include <QVector>
 
@@ -63,7 +64,8 @@ public:
                        std::unordered_set<mu::engraving::CommandType>>& changedObjects,
         const mu::engraving::PropertyIdSet& changedPropertyIdSet,
         const QString& partId,
-        const QHash<mu::engraving::EngravingObject*, QString>& remoteElementToUuid);
+        const QHash<mu::engraving::EngravingObject*, QString>& remoteElementToUuid,
+        const QMap<QString, QString>& changedMetaTags = {});
 
     const QHash<mu::engraving::EngravingObject*, QString>& localElementToUuid() const
     {
@@ -110,36 +112,37 @@ private:
                                                mu::engraving::Part* part);
 
     // Tier 3 builders — articulations.
-    QJsonObject buildAddArticulation(mu::engraving::EngravingObject* art,
-                                     const QString& uuid, const QString& partId,
-                                     const QString& eventUuid);
+    static QJsonObject buildAddArticulation(mu::engraving::EngravingObject* art,
+                                            const QString& uuid, const QString& partId,
+                                            const QString& eventUuid);
     static QJsonObject buildRemoveArticulation(const QString& uuid);
 
     // Tier 3 builders — dynamics.
-    QJsonObject buildAddDynamic(mu::engraving::EngravingObject* dyn,
-                                const QString& uuid, const QString& partId);
+    static QJsonObject buildAddDynamic(mu::engraving::EngravingObject* dyn,
+                                       const QString& uuid, const QString& partId);
     static QJsonObject buildSetDynamic(const QString& uuid, const QString& kind);
     static QJsonObject buildRemoveDynamic(const QString& uuid);
 
     // Tier 3 builders — slurs.
-    QJsonObject buildAddSlur(mu::engraving::EngravingObject* slur,
-                             const QString& uuid, const QString& partId,
-                             const QString& startEventUuid, const QString& endEventUuid);
+    static QJsonObject buildAddSlur(mu::engraving::EngravingObject* slur,
+                                    const QString& uuid, const QString& partId,
+                                    const QString& startEventUuid,
+                                    const QString& endEventUuid);
     static QJsonObject buildRemoveSlur(const QString& uuid);
 
     // Tier 3 builders — hairpins.
-    QJsonObject buildAddHairpin(mu::engraving::EngravingObject* hp,
-                                const QString& uuid, const QString& partId,
-                                const mu::engraving::Fraction& startTick,
-                                const mu::engraving::Fraction& endTick,
-                                bool isCrescendo);
+    static QJsonObject buildAddHairpin(mu::engraving::EngravingObject* hp,
+                                       const QString& uuid, const QString& partId,
+                                       const mu::engraving::Fraction& startTick,
+                                       const mu::engraving::Fraction& endTick,
+                                       bool isCrescendo);
     static QJsonObject buildRemoveHairpin(const QString& uuid);
 
     // Tier 3 builders — tuplets.
-    QJsonObject buildAddTuplet(mu::engraving::EngravingObject* tup,
-                               const QString& uuid, const QString& partId,
-                               const QVector<QString>& memberUuids,
-                               int actualNotes, int normalNotes);
+    static QJsonObject buildAddTuplet(mu::engraving::EngravingObject* tup,
+                                      const QString& uuid, const QString& partId,
+                                      const QVector<QString>& memberUuids,
+                                      int actualNotes, int normalNotes);
     static QJsonObject buildRemoveTuplet(const QString& uuid);
 
     // Tier 3 builders — chord symbols (score-global, no part_id).
@@ -149,13 +152,28 @@ private:
     static QJsonObject buildRemoveChordSymbol(const QString& uuid);
 
     // Tier 3 builders — lyrics.
-    QJsonObject buildAddLyric(mu::engraving::EngravingObject* lyr,
-                              const QString& uuid, const QString& partId,
-                              const QString& eventUuid, int verse,
-                              const QString& syllabic, const QString& text);
+    static QJsonObject buildAddLyric(mu::engraving::EngravingObject* lyr,
+                                     const QString& uuid, const QString& partId,
+                                     const QString& eventUuid, int verse,
+                                     const QString& syllabic, const QString& text);
     static QJsonObject buildSetLyric(const QString& uuid,
                                      const QString& text, const QString& syllabic);
     static QJsonObject buildRemoveLyric(const QString& uuid);
+
+    // Tier 4 builders — volta.
+    static QJsonObject buildInsertVolta(mu::engraving::EngravingObject* volta,
+                                        const QString& uuid);
+    static QJsonObject buildRemoveVolta(const QString& uuid);
+
+    // Tier 4 builders — markers.
+    static QJsonObject buildInsertMarker(mu::engraving::EngravingObject* marker,
+                                         const QString& uuid);
+    static QJsonObject buildRemoveMarker(const QString& uuid);
+
+    // Tier 4 builders — jumps.
+    static QJsonObject buildInsertJump(mu::engraving::EngravingObject* jump,
+                                       const QString& uuid);
+    static QJsonObject buildRemoveJump(const QString& uuid);
 
     // Shared helpers.
     static QJsonObject pitchJson(int tpc, int octave);
