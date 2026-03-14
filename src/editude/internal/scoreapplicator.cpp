@@ -36,6 +36,8 @@
 #include "engraving/dom/staff.h"
 #include "engraving/dom/clef.h"
 #include "engraving/dom/keysig.h"
+#include "engraving/dom/navigate.h"
+#include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
@@ -462,11 +464,63 @@ bool ScoreApplicator::applySetDuration(Score* score, const QJsonObject& op)
     return true;
 }
 
-bool ScoreApplicator::applySetTie(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applySetTie(Score* score, const QJsonObject& op)
 {
-    // TODO: implement tie setting (requires next-note lookup).
-    LOGD() << "[editude] applySetTie: event_id=" << op["event_id"].toString()
-           << " (not yet implemented; ties are ignored)";
+    const QString uuid = op["event_id"].toString();
+    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
+        LOGW() << "[editude] applySetTie: unknown event_id" << uuid;
+        return false;
+    }
+
+    Note* note = dynamic_cast<Note*>(m_uuidToElement.value(uuid));
+    if (!note) {
+        LOGW() << "[editude] applySetTie: element is not a note" << uuid;
+        return false;
+    }
+
+    const QJsonValue tieVal = op["tie"];
+    const bool wantTie = !tieVal.isNull() && !tieVal.isUndefined()
+                         && tieVal.toString() != QStringLiteral("stop");
+
+    score->startCmd(TranslatableString("undoableAction", "Set tie"));
+
+    if (wantTie) {
+        // "start" or "continue": ensure a forward tie exists.
+        if (!note->tieFor()) {
+            // Find the next chord/rest in the same track.
+            ChordRest* nextCR = nextChordRest(note->chord());
+            Note* endNote = nullptr;
+            if (nextCR && nextCR->isChord()) {
+                Chord* nextChord = toChord(nextCR);
+                for (Note* n : nextChord->notes()) {
+                    if (n->pitch() == note->pitch()) {
+                        endNote = n;
+                        break;
+                    }
+                }
+            }
+            Tie* tie = Factory::createTie(note);
+            tie->setStartNote(note);
+            tie->setTrack(note->track());
+            tie->setTick(note->chord()->segment()->tick());
+            if (endNote) {
+                if (endNote->tieBack()) {
+                    score->undoRemoveElement(endNote->tieBack());
+                }
+                tie->setEndNote(endNote);
+                tie->setTicks(endNote->chord()->segment()->tick()
+                              - note->chord()->segment()->tick());
+            }
+            score->undoAddElement(tie);
+        }
+    } else {
+        // null or "stop": remove the forward tie from this note.
+        if (note->tieFor()) {
+            score->undoRemoveElement(note->tieFor());
+        }
+    }
+
+    score->endCmd();
     return true;
 }
 

@@ -32,6 +32,7 @@
 #include "engraving/dom/engravingitem.h"
 #include "engraving/dom/keysig.h"
 #include "engraving/dom/part.h"
+#include "engraving/dom/tie.h"
 #include "engraving/dom/rest.h"
 #include "engraving/dom/tempotext.h"
 #include "engraving/dom/timesig.h"
@@ -303,7 +304,26 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 11: SetKeySignature & SetClef ───────────────────────────────
+    // ── Pass 11: SetTie ───────────────────────────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::TIE) {
+            continue;
+        }
+        auto* tie = static_cast<Tie*>(obj);
+        Note* startNote = tie->startNote();
+        if (!startNote) continue;
+
+        const QString noteUuid = uuidForElement(startNote, remoteElementToUuid);
+        if (noteUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            ops.append(buildSetTie(noteUuid, /*tieStart=*/true));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            ops.append(buildSetTie(noteUuid, /*tieStart=*/false));
+        }
+    }
+
+    // ── Pass 13: SetKeySignature & SetClef ───────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || !cmds.count(CommandType::AddElement)) {
             continue;
@@ -647,5 +667,18 @@ QJsonObject OperationTranslator::buildSetClef(Clef* clef, const QString& partUui
     payload["beat"]    = beatJson(clef->tick());
     payload["staff"]   = staffIdx;
     payload["clef"]    = clefObj;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetTie(const QString& noteUuid, bool tieStart)
+{
+    QJsonObject payload;
+    payload["type"]     = QStringLiteral("SetTie");
+    payload["event_id"] = noteUuid;
+    if (tieStart) {
+        payload["tie"] = QStringLiteral("start");
+    } else {
+        payload["tie"] = QJsonValue::Null;
+    }
     return payload;
 }

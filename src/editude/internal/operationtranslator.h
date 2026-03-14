@@ -42,6 +42,7 @@ class KeySig;
 class Part;
 class Rest;
 class TempoText;
+class Tie;
 class TimeSig;
 }
 
@@ -97,6 +98,7 @@ private:
     static QJsonObject buildSetKeySignature(mu::engraving::KeySig* ks, const QString& partUuid);
     static QJsonObject buildSetClef(mu::engraving::Clef* clef, const QString& partUuid,
                                     int staffIdx);
+    static QJsonObject buildSetTie(const QString& noteUuid, bool tieStart);
 
     // Part/staff directive builders (Pass 9+10).
     static QJsonObject buildAddPart(mu::engraving::Part* part,
