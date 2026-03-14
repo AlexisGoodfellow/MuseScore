@@ -46,7 +46,46 @@ private:
     QHttpServerResponse actionRemovePart(const QJsonObject& body);
     QHttpServerResponse actionSetPartName(const QJsonObject& body);
     QHttpServerResponse actionSetStaffCount(const QJsonObject& body);
+    QHttpServerResponse actionSetPartInstrument(const QJsonObject& body);
 
+    // Tier 3 — articulations
+    QHttpServerResponse actionAddArticulation(const QJsonObject& body);
+    QHttpServerResponse actionRemoveArticulation(const QJsonObject& body);
+
+    // Tier 3 — dynamics
+    QHttpServerResponse actionAddDynamic(const QJsonObject& body);
+    QHttpServerResponse actionSetDynamic(const QJsonObject& body);
+    QHttpServerResponse actionRemoveDynamic(const QJsonObject& body);
+
+    // Tier 3 — slurs
+    QHttpServerResponse actionAddSlur(const QJsonObject& body);
+    QHttpServerResponse actionRemoveSlur(const QJsonObject& body);
+
+    // Tier 3 — hairpins
+    QHttpServerResponse actionAddHairpin(const QJsonObject& body);
+    QHttpServerResponse actionRemoveHairpin(const QJsonObject& body);
+
+    // Tier 3 — lyrics
+    QHttpServerResponse actionAddLyric(const QJsonObject& body);
+    QHttpServerResponse actionSetLyric(const QJsonObject& body);
+    QHttpServerResponse actionRemoveLyric(const QJsonObject& body);
+
+    // Tier 4 — navigation marks
+    QHttpServerResponse actionInsertVolta(const QJsonObject& body);
+    QHttpServerResponse actionRemoveVolta(const QJsonObject& body);
+    QHttpServerResponse actionInsertMarker(const QJsonObject& body);
+    QHttpServerResponse actionRemoveMarker(const QJsonObject& body);
+    QHttpServerResponse actionInsertJump(const QJsonObject& body);
+    QHttpServerResponse actionRemoveJump(const QJsonObject& body);
+
+    // Structural ops
+    QHttpServerResponse actionInsertBeats(const QJsonObject& body);
+    QHttpServerResponse actionDeleteBeats(const QJsonObject& body);
+
+    // Metadata
+    QHttpServerResponse actionSetScoreMetadata(const QJsonObject& body);
+
+    // Serialization helpers
     QJsonObject serializeScore();
     QJsonObject serializePart(mu::engraving::Part* part);
     QJsonArray serializePartEvents(mu::engraving::Part* part);
@@ -59,7 +98,18 @@ private:
     QJsonObject serializeChord(mu::engraving::Chord* chord,
                                const QString& uuid,
                                const mu::engraving::Fraction& tick);
+    QJsonObject serializePartArticulations(mu::engraving::Part* part);
+    QJsonObject serializePartDynamics(mu::engraving::Part* part);
+    QJsonObject serializePartSlurs(mu::engraving::Part* part);
+    QJsonObject serializePartHairpins(mu::engraving::Part* part);
+    QJsonObject serializePartLyricsMap(mu::engraving::Part* part);
+    QJsonObject serializeScoreVoltas();
+    QJsonObject serializeScoreMarkers();
+    QJsonObject serializeScoreJumps();
+
     QString uuidForElement(mu::engraving::EngravingObject* obj) const;
+    QString uuidForChordRest(mu::engraving::EngravingObject* obj) const;
+    mu::engraving::EngravingObject* findByUuid(const QString& uuid) const;
     static QJsonObject beatJson(const mu::engraving::Fraction& tick);
     static QString durationTypeName(mu::engraving::DurationType dt);
     static QJsonObject pitchJson(mu::engraving::Note* note);

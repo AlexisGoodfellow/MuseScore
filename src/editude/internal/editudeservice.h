@@ -69,6 +69,10 @@ public:
     {
         return m_translator.localElementToUuid();
     }
+    const QHash<mu::engraving::EngravingObject*, QString>& applicatorTier3ElementToUuid() const
+    {
+        return m_applicator.tier3ElementToUuid();
+    }
     void connectToSession(const QString& sessionUrl);
     QString stateForTest() const;
 #endif

@@ -43,6 +43,13 @@ public:
         return m_elementToUuid;
     }
 
+    // Read-only view of the Tier 3 element→uuid reverse map, used by
+    // EditudeTestServer to resolve articulation/dynamic/slur/hairpin/lyric UUIDs.
+    const QHash<mu::engraving::EngravingObject*, QString>& tier3ElementToUuid() const
+    {
+        return m_tier3ElementToUuid;
+    }
+
     // Bootstraps m_partUuidToPart from ApplyAddPart registrations.
     // Call after loading a snapshot so that part-keyed ops (SetPartName,
     // SetKeySignature, SetClef, RemovePart) can resolve Part* by UUID.

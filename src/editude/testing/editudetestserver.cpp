@@ -22,6 +22,22 @@
 #include "engraving/types/types.h"
 #include "engraving/types/typesconv.h"
 
+#include "engraving/dom/articulation.h"
+#include "engraving/dom/chordrest.h"
+#include "engraving/dom/dynamic.h"
+#include "engraving/dom/harmony.h"
+#include "engraving/dom/hairpin.h"
+#include "engraving/dom/jump.h"
+#include "engraving/dom/lyrics.h"
+#include "engraving/dom/marker.h"
+#include "engraving/dom/note.h"
+#include "engraving/dom/slur.h"
+#include "engraving/dom/tempotext.h"
+#include "engraving/dom/timesig.h"
+#include "engraving/dom/tuplet.h"
+#include "engraving/dom/volta.h"
+#include "engraving/types/bps.h"
+
 #include "global/log.h"
 
 #include "internal/editudeservice.h"
@@ -125,6 +141,28 @@ QHttpServerResponse EditudeTestServer::handleAction(const QHttpServerRequest& re
     if (action == QLatin1String("remove_part"))   return actionRemovePart(body);
     if (action == QLatin1String("set_part_name")) return actionSetPartName(body);
     if (action == QLatin1String("set_staff_count")) return actionSetStaffCount(body);
+    if (action == QLatin1String("set_part_instrument")) return actionSetPartInstrument(body);
+    if (action == QLatin1String("add_articulation"))    return actionAddArticulation(body);
+    if (action == QLatin1String("remove_articulation")) return actionRemoveArticulation(body);
+    if (action == QLatin1String("add_dynamic"))         return actionAddDynamic(body);
+    if (action == QLatin1String("set_dynamic"))         return actionSetDynamic(body);
+    if (action == QLatin1String("remove_dynamic"))      return actionRemoveDynamic(body);
+    if (action == QLatin1String("add_slur"))            return actionAddSlur(body);
+    if (action == QLatin1String("remove_slur"))         return actionRemoveSlur(body);
+    if (action == QLatin1String("add_hairpin"))         return actionAddHairpin(body);
+    if (action == QLatin1String("remove_hairpin"))      return actionRemoveHairpin(body);
+    if (action == QLatin1String("add_lyric"))           return actionAddLyric(body);
+    if (action == QLatin1String("set_lyric"))           return actionSetLyric(body);
+    if (action == QLatin1String("remove_lyric"))        return actionRemoveLyric(body);
+    if (action == QLatin1String("insert_volta"))        return actionInsertVolta(body);
+    if (action == QLatin1String("remove_volta"))        return actionRemoveVolta(body);
+    if (action == QLatin1String("insert_marker"))       return actionInsertMarker(body);
+    if (action == QLatin1String("remove_marker"))       return actionRemoveMarker(body);
+    if (action == QLatin1String("insert_jump"))         return actionInsertJump(body);
+    if (action == QLatin1String("remove_jump"))         return actionRemoveJump(body);
+    if (action == QLatin1String("insert_beats"))        return actionInsertBeats(body);
+    if (action == QLatin1String("delete_beats"))        return actionDeleteBeats(body);
+    if (action == QLatin1String("set_score_metadata"))  return actionSetScoreMetadata(body);
 
     return errorResponse(QHttpServerResponse::StatusCode::BadRequest,
                          QString("unknown action: %1").arg(action));
@@ -359,6 +397,11 @@ QHttpServerResponse EditudeTestServer::handleStatus()
 // Score serialisation
 // ---------------------------------------------------------------------------
 
+static QJsonValue strOrNull(const QString& s)
+{
+    return s.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(s);
+}
+
 QJsonObject EditudeTestServer::serializeScore()
 {
     Score* score = m_svc->scoreForTest();
@@ -374,9 +417,18 @@ QJsonObject EditudeTestServer::serializeScore()
         { "tempo_map",        QJsonArray() },
         { "chord_symbols",    QJsonObject() },
         { "repeat_barlines",  QJsonArray() },
-        { "voltas",           QJsonObject() },
-        { "markers",          QJsonObject() },
-        { "jumps",            QJsonObject() },
+        { "voltas",           serializeScoreVoltas() },
+        { "markers",          serializeScoreMarkers() },
+        { "jumps",            serializeScoreJumps() },
+        { "title",            strOrNull(score->metaTag(u"workTitle").toQString()) },
+        { "subtitle",         strOrNull(score->metaTag(u"subtitle").toQString()) },
+        { "composer",         strOrNull(score->metaTag(u"composer").toQString()) },
+        { "arranger",         strOrNull(score->metaTag(u"arranger").toQString()) },
+        { "lyricist",         strOrNull(score->metaTag(u"lyricist").toQString()) },
+        { "copyright",        strOrNull(score->metaTag(u"copyright").toQString()) },
+        { "work_number",      strOrNull(score->metaTag(u"workNumber").toQString()) },
+        { "movement_number",  strOrNull(score->metaTag(u"movementNumber").toQString()) },
+        { "movement_title",   strOrNull(score->metaTag(u"movementTitle").toQString()) },
     };
 }
 
@@ -396,12 +448,12 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
         { "events",      serializePartEvents(part) },
         { "clef_changes", QJsonArray() },
         { "key_changes",  QJsonArray() },
-        { "articulations", QJsonObject() },
-        { "dynamics",      QJsonObject() },
-        { "slurs",         QJsonObject() },
-        { "hairpins",      QJsonObject() },
+        { "articulations", serializePartArticulations(part) },
+        { "dynamics",      serializePartDynamics(part) },
+        { "slurs",         serializePartSlurs(part) },
+        { "hairpins",      serializePartHairpins(part) },
         { "tuplets",       QJsonObject() },
-        { "lyrics",        QJsonObject() },
+        { "lyrics",        serializePartLyricsMap(part) },
     };
 }
 
@@ -510,7 +562,51 @@ QString EditudeTestServer::uuidForElement(EngravingObject* obj) const
     if (it2 != applMap.end()) {
         return it2.value();
     }
+    // Fall back to Tier 3 applicator map.
+    const auto& tier3Map = m_svc->applicatorTier3ElementToUuid();
+    auto it3 = tier3Map.find(obj);
+    if (it3 != tier3Map.end()) {
+        return it3.value();
+    }
     return QString();
+}
+
+mu::engraving::EngravingObject* EditudeTestServer::findByUuid(const QString& uuid) const
+{
+    const auto& localMap = m_svc->translatorLocalElementToUuid();
+    for (auto it = localMap.begin(); it != localMap.end(); ++it) {
+        if (it.value() == uuid) {
+            return it.key();
+        }
+    }
+    const auto& applMap = m_svc->applicatorElementToUuid();
+    for (auto it = applMap.begin(); it != applMap.end(); ++it) {
+        if (it.value() == uuid) {
+            return it.key();
+        }
+    }
+    const auto& tier3Map = m_svc->applicatorTier3ElementToUuid();
+    for (auto it = tier3Map.begin(); it != tier3Map.end(); ++it) {
+        if (it.value() == uuid) {
+            return it.key();
+        }
+    }
+    return nullptr;
+}
+
+QString EditudeTestServer::uuidForChordRest(EngravingObject* obj) const
+{
+    const QString direct = uuidForElement(obj);
+    if (!direct.isEmpty()) {
+        return direct;
+    }
+    if (obj && obj->isChord()) {
+        Chord* chord = toChord(static_cast<EngravingItem*>(obj));
+        if (chord->notes().size() == 1) {
+            return uuidForElement(chord->notes().front());
+        }
+    }
+    return {};
 }
 
 QJsonObject EditudeTestServer::beatJson(const Fraction& tick)
@@ -634,6 +730,954 @@ QHttpServerResponse EditudeTestServer::actionSetStaffCount(const QJsonObject& bo
     return applicator.apply(score, op)
         ? okResponse()
         : errorResponse(QHttpServerResponse::StatusCode::InternalServerError, "set_staff_count failed");
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 serialization helpers
+// ---------------------------------------------------------------------------
+
+static QString articulationNameFromSymId(SymId id)
+{
+    static const QHash<SymId, QString> s_map = {
+        { SymId::articStaccatoAbove,     QStringLiteral("staccato")      },
+        { SymId::articAccentAbove,       QStringLiteral("accent")        },
+        { SymId::articTenutoAbove,       QStringLiteral("tenuto")        },
+        { SymId::articMarcatoAbove,      QStringLiteral("marcato")       },
+        { SymId::articStaccatissimoAbove,QStringLiteral("staccatissimo") },
+        { SymId::fermataAbove,           QStringLiteral("fermata")       },
+        { SymId::ornamentTrill,          QStringLiteral("trill")         },
+        { SymId::ornamentMordent,        QStringLiteral("mordent")       },
+        { SymId::ornamentTurn,           QStringLiteral("turn")          },
+    };
+    return s_map.value(id, QStringLiteral("staccato"));
+}
+
+static QString dynamicKindName(DynamicType dt)
+{
+    static const QHash<DynamicType, QString> s_map = {
+        { DynamicType::PPP, QStringLiteral("ppp") },
+        { DynamicType::PP,  QStringLiteral("pp")  },
+        { DynamicType::P,   QStringLiteral("p")   },
+        { DynamicType::MP,  QStringLiteral("mp")  },
+        { DynamicType::MF,  QStringLiteral("mf")  },
+        { DynamicType::F,   QStringLiteral("f")   },
+        { DynamicType::FF,  QStringLiteral("ff")  },
+        { DynamicType::FFF, QStringLiteral("fff") },
+        { DynamicType::SFZ, QStringLiteral("sfz") },
+        { DynamicType::FP,  QStringLiteral("fp")  },
+        { DynamicType::RF,  QStringLiteral("rf")  },
+    };
+    return s_map.value(dt, QStringLiteral("mf"));
+}
+
+static QString markerKindName(MarkerType mt)
+{
+    static const QHash<MarkerType, QString> s_map = {
+        { MarkerType::SEGNO,    QStringLiteral("segno")     },
+        { MarkerType::CODA,     QStringLiteral("coda")      },
+        { MarkerType::FINE,     QStringLiteral("fine")      },
+        { MarkerType::TOCODA,   QStringLiteral("to_coda")   },
+        { MarkerType::VARSEGNO, QStringLiteral("segno_var") },
+    };
+    return s_map.value(mt, QStringLiteral("segno"));
+}
+
+QJsonObject EditudeTestServer::serializePartArticulations(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(SegmentType::ChordRest); seg;
+             seg = seg->next(SegmentType::ChordRest)) {
+            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+                EngravingItem* el = seg->element(track);
+                if (!el || !el->isChord()) {
+                    continue;
+                }
+                Chord* chord = toChord(el);
+                for (Articulation* art : chord->articulations()) {
+                    const QString artUuid = uuidForElement(art);
+                    if (artUuid.isEmpty()) {
+                        continue;
+                    }
+                    const QString eventUuid = uuidForChordRest(chord);
+                    result[artUuid] = QJsonObject{
+                        { "id",           artUuid },
+                        { "event_id",     eventUuid },
+                        { "articulation", articulationNameFromSymId(art->symId()) },
+                    };
+                }
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartDynamics(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(); seg; seg = seg->next()) {
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || !el->isDynamic()) {
+                    continue;
+                }
+                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) {
+                    continue;
+                }
+                Dynamic* dyn = toDynamic(el);
+                const QString uuid = uuidForElement(dyn);
+                if (uuid.isEmpty()) {
+                    continue;
+                }
+                result[uuid] = QJsonObject{
+                    { "id",   uuid },
+                    { "beat", beatJson(dyn->tick()) },
+                    { "kind", dynamicKindName(dyn->dynamicType()) },
+                };
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartSlurs(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isSlur()) {
+            continue;
+        }
+        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
+            continue;
+        }
+        const QString uuid = uuidForElement(sp);
+        if (uuid.isEmpty()) {
+            continue;
+        }
+        ChordRest* startCR = dynamic_cast<ChordRest*>(sp->startElement());
+        ChordRest* endCR   = dynamic_cast<ChordRest*>(sp->endElement());
+        const QString startUuid = startCR ? uuidForChordRest(startCR) : QString();
+        const QString endUuid   = endCR   ? uuidForChordRest(endCR)   : QString();
+        result[uuid] = QJsonObject{
+            { "id",             uuid      },
+            { "start_event_id", startUuid },
+            { "end_event_id",   endUuid   },
+        };
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartHairpins(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isHairpin()) {
+            continue;
+        }
+        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
+            continue;
+        }
+        const QString uuid = uuidForElement(sp);
+        if (uuid.isEmpty()) {
+            continue;
+        }
+        Hairpin* hp = toHairpin(sp);
+        const QString kind = hp->isCrescendo()
+            ? QStringLiteral("crescendo")
+            : QStringLiteral("decrescendo");
+        result[uuid] = QJsonObject{
+            { "id",         uuid },
+            { "start_beat", beatJson(hp->tick()) },
+            { "end_beat",   beatJson(hp->tick2()) },
+            { "kind",       kind },
+        };
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartLyricsMap(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(SegmentType::ChordRest); seg;
+             seg = seg->next(SegmentType::ChordRest)) {
+            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+                EngravingItem* el = seg->element(track);
+                if (!el || !el->isChordRest()) {
+                    continue;
+                }
+                ChordRest* cr = toChordRest(el);
+                for (Lyrics* lyr : cr->lyrics()) {
+                    const QString uuid = uuidForElement(lyr);
+                    if (uuid.isEmpty()) {
+                        continue;
+                    }
+                    const QString eventUuid = uuidForChordRest(cr);
+                    static const QHash<LyricsSyllabic, QString> s_syl = {
+                        { LyricsSyllabic::SINGLE, QStringLiteral("single") },
+                        { LyricsSyllabic::BEGIN,  QStringLiteral("begin")  },
+                        { LyricsSyllabic::MIDDLE, QStringLiteral("middle") },
+                        { LyricsSyllabic::END,    QStringLiteral("end")    },
+                    };
+                    const QString syllabic = s_syl.value(lyr->syllabic(), QStringLiteral("single"));
+                    result[uuid] = QJsonObject{
+                        { "id",       uuid },
+                        { "event_id", eventUuid },
+                        { "verse",    lyr->verse() },
+                        { "syllabic", syllabic },
+                        { "text",     lyr->plainText().toQString() },
+                    };
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 4 serialization helpers
+// ---------------------------------------------------------------------------
+
+QJsonObject EditudeTestServer::serializeScoreVoltas()
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isVolta()) {
+            continue;
+        }
+        const QString uuid = uuidForElement(sp);
+        if (uuid.isEmpty()) {
+            continue;
+        }
+        Volta* volta = toVolta(sp);
+        QJsonArray numbers;
+        for (int n : volta->endings()) {
+            numbers.append(n);
+        }
+        result[uuid] = QJsonObject{
+            { "id",         uuid },
+            { "start_beat", beatJson(volta->tick()) },
+            { "end_beat",   beatJson(volta->tick2()) },
+            { "numbers",    numbers },
+            { "open_end",   volta->voltaType() == Volta::Type::OPEN },
+        };
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializeScoreMarkers()
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (EngravingItem* el : m->el()) {
+            if (!el || !el->isMarker()) {
+                continue;
+            }
+            Marker* marker = toMarker(el);
+            const QString uuid = uuidForElement(marker);
+            if (uuid.isEmpty()) {
+                continue;
+            }
+            const QString label = marker->label().toQString();
+            QJsonObject obj{
+                { "id",   uuid },
+                { "beat", beatJson(marker->tick()) },
+                { "kind", markerKindName(marker->markerType()) },
+                { "label", label.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(label) },
+            };
+            result[uuid] = obj;
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializeScoreJumps()
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (EngravingItem* el : m->el()) {
+            if (!el || !el->isJump()) {
+                continue;
+            }
+            Jump* jump = toJump(el);
+            const QString uuid = uuidForElement(jump);
+            if (uuid.isEmpty()) {
+                continue;
+            }
+            auto toJsonOrNull = [](const String& s) -> QJsonValue {
+                return s.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(s.toQString());
+            };
+            result[uuid] = QJsonObject{
+                { "id",          uuid },
+                { "beat",        beatJson(jump->tick()) },
+                { "jump_to",     jump->jumpTo().toQString() },
+                { "play_until",  toJsonOrNull(jump->playUntil()) },
+                { "continue_at", toJsonOrNull(jump->continueAt()) },
+                { "text",        toJsonOrNull(jump->plainText()) },
+            };
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 action handlers
+// ---------------------------------------------------------------------------
+
+QHttpServerResponse EditudeTestServer::actionSetPartInstrument(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+    QJsonObject op = body;
+    op["type"] = "SetPartInstrument";
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+                        "set_part_instrument failed");
+}
+
+QHttpServerResponse EditudeTestServer::actionAddArticulation(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString eventId = body["event_id"].toString();
+    const QString artName = body["articulation"].toString();
+
+    EngravingObject* obj = findByUuid(eventId);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "event not found");
+    }
+
+    ChordRest* cr = nullptr;
+    if (obj->isNote()) {
+        cr = toNote(static_cast<EngravingItem*>(obj))->chord();
+    } else if (obj->isChordRest()) {
+        cr = toChordRest(static_cast<EngravingItem*>(obj));
+    }
+    if (!cr) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "event is not a note or chordrest");
+    }
+
+    static const QHash<QString, SymId> s_artMap = {
+        { "staccato",      SymId::articStaccatoAbove      },
+        { "accent",        SymId::articAccentAbove         },
+        { "tenuto",        SymId::articTenutoAbove         },
+        { "marcato",       SymId::articMarcatoAbove        },
+        { "staccatissimo", SymId::articStaccatissimoAbove  },
+        { "fermata",       SymId::fermataAbove             },
+    };
+    const SymId symId = s_artMap.value(artName, SymId::noSym);
+    if (symId == SymId::noSym) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "unknown articulation type");
+    }
+
+    score->startCmd(TranslatableString("test", "add articulation"));
+    Articulation* art = Factory::createArticulation(score->dummy()->chord());
+    art->setSymId(symId);
+    art->setParent(cr);
+    art->setTrack(cr->track());
+    score->undoAddElement(art);
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionRemoveArticulation(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "articulation not found");
+    }
+
+    Articulation* art = dynamic_cast<Articulation*>(obj);
+    if (!art) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "element is not an Articulation");
+    }
+
+    score->startCmd(TranslatableString("test", "remove articulation"));
+    score->undoRemoveElement(art);
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionAddDynamic(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const QString kind = body["kind"].toString();
+
+    static const QHash<QString, DynamicType> s_dynMap = {
+        { "ppp", DynamicType::PPP }, { "pp",  DynamicType::PP  },
+        { "p",   DynamicType::P   }, { "mp",  DynamicType::MP  },
+        { "mf",  DynamicType::MF  }, { "f",   DynamicType::F   },
+        { "ff",  DynamicType::FF  }, { "fff", DynamicType::FFF },
+        { "sfz", DynamicType::SFZ }, { "fp",  DynamicType::FP  },
+    };
+    const DynamicType dt = s_dynMap.value(kind, DynamicType::OTHER);
+    if (dt == DynamicType::OTHER) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "unknown dynamic kind");
+    }
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "beat not found in score");
+    }
+
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+    score->startCmd(TranslatableString("test", "add dynamic"));
+    Dynamic* dyn = Factory::createDynamic(seg);
+    dyn->setParent(seg);
+    dyn->setTrack(part->startTrack());
+    dyn->setDynamicType(dt);
+    score->undoAddElement(dyn);
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionSetDynamic(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "dynamic not found");
+    }
+
+    Dynamic* dyn = dynamic_cast<Dynamic*>(obj);
+    if (!dyn) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "element is not a Dynamic");
+    }
+
+    static const QHash<QString, DynamicType> s_dynMap = {
+        { "ppp", DynamicType::PPP }, { "pp",  DynamicType::PP  },
+        { "p",   DynamicType::P   }, { "mp",  DynamicType::MP  },
+        { "mf",  DynamicType::MF  }, { "f",   DynamicType::F   },
+        { "ff",  DynamicType::FF  }, { "fff", DynamicType::FFF },
+    };
+    const QString kind = body["kind"].toString();
+    const DynamicType dt = s_dynMap.value(kind, DynamicType::OTHER);
+    if (dt == DynamicType::OTHER) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "unknown dynamic kind");
+    }
+
+    score->startCmd(TranslatableString("test", "set dynamic"));
+    dyn->undoChangeProperty(Pid::DYNAMIC_TYPE, PropertyValue(dt));
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionRemoveDynamic(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "dynamic not found");
+    }
+
+    Dynamic* dyn = dynamic_cast<Dynamic*>(obj);
+    if (!dyn) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "element is not a Dynamic");
+    }
+
+    score->startCmd(TranslatableString("test", "remove dynamic"));
+    score->undoRemoveElement(dyn);
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionAddSlur(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString startId = body["start_event_id"].toString();
+    const QString endId   = body["end_event_id"].toString();
+
+    EngravingObject* startObj = findByUuid(startId);
+    EngravingObject* endObj   = findByUuid(endId);
+    if (!startObj || !endObj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "event not found");
+    }
+
+    auto toCR = [](EngravingObject* o) -> ChordRest* {
+        if (o->isNote()) return toNote(static_cast<EngravingItem*>(o))->chord();
+        if (o->isChordRest()) return toChordRest(static_cast<EngravingItem*>(o));
+        return nullptr;
+    };
+    ChordRest* startCR = toCR(startObj);
+    ChordRest* endCR   = toCR(endObj);
+    if (!startCR || !endCR) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "event is not a note or chordrest");
+    }
+
+    score->startCmd(TranslatableString("test", "add slur"));
+    Slur* slur = Factory::createSlur(score->dummy());
+    slur->setScore(score);
+    slur->setTick(startCR->tick());
+    slur->setTick2(endCR->tick());
+    slur->setTrack(startCR->track());
+    slur->setTrack2(endCR->track());
+    slur->setStartElement(startCR);
+    slur->setEndElement(endCR);
+    score->undoAddElement(slur);
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionRemoveSlur(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "slur not found");
+    }
+
+    Slur* slur = dynamic_cast<Slur*>(obj);
+    if (!slur) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "element is not a Slur");
+    }
+
+    score->startCmd(TranslatableString("test", "remove slur"));
+    score->undoRemoveElement(slur);
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionAddHairpin(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject sb = body["start_beat"].toObject();
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+
+    const bool isCrescendo = (body["kind"].toString() == QStringLiteral("crescendo"));
+    const HairpinType hpType = isCrescendo ? HairpinType::CRESC_HAIRPIN : HairpinType::DIM_HAIRPIN;
+
+    score->startCmd(TranslatableString("test", "add hairpin"));
+    score->addHairpin(hpType, startTick, endTick, part->startTrack());
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionRemoveHairpin(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "hairpin not found");
+    }
+
+    Hairpin* hp = dynamic_cast<Hairpin*>(obj);
+    if (!hp) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "element is not a Hairpin");
+    }
+
+    score->startCmd(TranslatableString("test", "remove hairpin"));
+    score->undoRemoveElement(hp);
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionAddLyric(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString eventId = body["event_id"].toString();
+    EngravingObject* obj = findByUuid(eventId);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "event not found");
+    }
+
+    ChordRest* cr = nullptr;
+    if (obj->isNote()) {
+        cr = toNote(static_cast<EngravingItem*>(obj))->chord();
+    } else if (obj->isChordRest()) {
+        cr = toChordRest(static_cast<EngravingItem*>(obj));
+    }
+    if (!cr) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "event is not a note or chordrest");
+    }
+
+    const int verse      = body.value("verse").toInt(0);
+    const QString text   = body["text"].toString();
+    const QString sylStr = body.value("syllabic").toString(QStringLiteral("single"));
+
+    static const QHash<QString, LyricsSyllabic> s_syl = {
+        { "single", LyricsSyllabic::SINGLE },
+        { "begin",  LyricsSyllabic::BEGIN  },
+        { "middle", LyricsSyllabic::MIDDLE },
+        { "end",    LyricsSyllabic::END    },
+    };
+    const LyricsSyllabic syllabic = s_syl.value(sylStr, LyricsSyllabic::SINGLE);
+
+    score->startCmd(TranslatableString("test", "add lyric"));
+    Lyrics* lyric = Factory::createLyrics(cr);
+    lyric->setTrack(cr->track());
+    lyric->setParent(cr);
+    lyric->setVerse(verse);
+    lyric->setSyllabic(syllabic);
+    lyric->setPlainText(String(text));
+    score->undoAddElement(lyric);
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionSetLyric(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "lyric not found");
+    }
+
+    Lyrics* lyric = dynamic_cast<Lyrics*>(obj);
+    if (!lyric) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "element is not Lyrics");
+    }
+
+    const QString text = body["text"].toString();
+    score->startCmd(TranslatableString("test", "set lyric"));
+    lyric->undoChangeProperty(Pid::TEXT, PropertyValue(String(text)));
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionRemoveLyric(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "lyric not found");
+    }
+
+    Lyrics* lyric = dynamic_cast<Lyrics*>(obj);
+    if (!lyric) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "element is not Lyrics");
+    }
+
+    score->startCmd(TranslatableString("test", "remove lyric"));
+    score->undoRemoveElement(lyric);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Tier 4 action handlers
+// ---------------------------------------------------------------------------
+
+QHttpServerResponse EditudeTestServer::actionInsertVolta(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    QJsonObject op = body;
+    op["type"] = "InsertVolta";
+    if (!op.contains("id")) {
+        op["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+                        "insert_volta failed");
+}
+
+QHttpServerResponse EditudeTestServer::actionRemoveVolta(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "volta not found");
+    }
+
+    Volta* volta = dynamic_cast<Volta*>(obj);
+    if (!volta) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "element is not a Volta");
+    }
+
+    score->startCmd(TranslatableString("test", "remove volta"));
+    score->undoRemoveElement(volta);
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionInsertMarker(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    QJsonObject op = body;
+    op["type"] = "InsertMarker";
+    if (!op.contains("id")) {
+        op["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+                        "insert_marker failed");
+}
+
+QHttpServerResponse EditudeTestServer::actionRemoveMarker(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "marker not found");
+    }
+
+    Marker* marker = dynamic_cast<Marker*>(obj);
+    if (!marker) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "element is not a Marker");
+    }
+
+    score->startCmd(TranslatableString("test", "remove marker"));
+    score->undoRemoveElement(marker);
+    score->endCmd();
+
+    return okResponse();
+}
+
+QHttpServerResponse EditudeTestServer::actionInsertJump(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    QJsonObject op = body;
+    op["type"] = "InsertJump";
+    if (!op.contains("id")) {
+        op["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+                        "insert_jump failed");
+}
+
+QHttpServerResponse EditudeTestServer::actionRemoveJump(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "jump not found");
+    }
+
+    Jump* jump = dynamic_cast<Jump*>(obj);
+    if (!jump) {
+        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+                             "element is not a Jump");
+    }
+
+    score->startCmd(TranslatableString("test", "remove jump"));
+    score->undoRemoveElement(jump);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Structural + metadata action handlers
+// ---------------------------------------------------------------------------
+
+QHttpServerResponse EditudeTestServer::actionInsertBeats(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    QJsonObject op = body;
+    op["type"] = "InsertBeats";
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+                        "insert_beats failed");
+}
+
+QHttpServerResponse EditudeTestServer::actionDeleteBeats(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    QJsonObject op = body;
+    op["type"] = "DeleteBeats";
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+                        "delete_beats failed");
+}
+
+QHttpServerResponse EditudeTestServer::actionSetScoreMetadata(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    QJsonObject op = body;
+    op["type"] = "SetScoreMetadata";
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+                        "set_score_metadata failed");
 }
 
 // ---------------------------------------------------------------------------
