@@ -34,8 +34,12 @@
 #include "engraving/dom/rest.h"
 #include "engraving/dom/segment.h"
 #include "engraving/dom/staff.h"
+#include "engraving/dom/articulation.h"
+#include "engraving/types/propertyvalue.h"
 #include "engraving/dom/clef.h"
+#include "engraving/dom/dynamic.h"
 #include "engraving/dom/keysig.h"
+#include "engraving/dom/lyrics.h"
 #include "engraving/dom/navigate.h"
 #include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
@@ -923,37 +927,213 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
 // normally.  Full INotationInteraction calls will be wired in a follow-up once
 // the MuseScore API surface for each element type is confirmed.
 
-bool ScoreApplicator::applyAddArticulation(Score* /*score*/, const QJsonObject& op)
+// ---------------------------------------------------------------------------
+// Tier 3 articulation helpers
+// ---------------------------------------------------------------------------
+
+static SymId articulationSymId(const QString& name)
 {
-    LOGD() << "[editude] applyAddArticulation: id=" << op["id"].toString()
-           << " event_id=" << op["event_id"].toString()
-           << " articulation=" << op["articulation"].toString();
+    static const QHash<QString, SymId> s_map = {
+        { "staccato",      SymId::articStaccatoAbove      },
+        { "accent",        SymId::articAccentAbove         },
+        { "tenuto",        SymId::articTenutoAbove         },
+        { "marcato",       SymId::articMarcatoAbove        },
+        { "staccatissimo", SymId::articStaccatissimoAbove  },
+        { "fermata",       SymId::fermataAbove             },
+        { "trill",         SymId::ornamentTrill            },
+        { "mordent",       SymId::ornamentMordent          },
+        { "turn",          SymId::ornamentTurn             },
+    };
+    return s_map.value(name, SymId::noSym);
+}
+
+bool ScoreApplicator::applyAddArticulation(Score* score, const QJsonObject& op)
+{
+    const QString id       = op["id"].toString();
+    const QString eventId  = op["event_id"].toString();
+    const QString artName  = op["articulation"].toString();
+
+    if (id.isEmpty() || eventId.isEmpty()) {
+        LOGW() << "[editude] applyAddArticulation: missing id or event_id";
+        return false;
+    }
+
+    EngravingObject* evObj = m_uuidToElement.value(eventId);
+    if (!evObj) {
+        LOGW() << "[editude] applyAddArticulation: unknown event_id" << eventId;
+        return false;
+    }
+
+    ChordRest* cr = nullptr;
+    if (evObj->isNote()) {
+        cr = toNote(static_cast<EngravingItem*>(evObj))->chord();
+    } else if (evObj->isChordRest()) {
+        cr = toChordRest(static_cast<EngravingItem*>(evObj));
+    }
+    if (!cr) {
+        LOGW() << "[editude] applyAddArticulation: event is not a note/chordrest" << eventId;
+        return false;
+    }
+
+    const SymId symId = articulationSymId(artName);
+    if (symId == SymId::noSym) {
+        LOGW() << "[editude] applyAddArticulation: unknown articulation name" << artName;
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add articulation"));
+    Articulation* art = Factory::createArticulation(score->dummy()->chord());
+    art->setSymId(symId);
+    art->setParent(cr);
+    art->setTrack(cr->track());
+    score->undoAddElement(art);
+    score->endCmd();
+
+    m_uuidToElement[id] = art;
+    m_elementToUuid[art] = id;
     return true;
 }
 
-bool ScoreApplicator::applyRemoveArticulation(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyRemoveArticulation(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applyRemoveArticulation: id=" << op["id"].toString();
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveArticulation: unknown id" << id;
+        return false;
+    }
+
+    Articulation* art = dynamic_cast<Articulation*>(m_uuidToElement.value(id));
+    if (!art) {
+        LOGW() << "[editude] applyRemoveArticulation: element is not Articulation" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(art);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove articulation"));
+    score->undoRemoveElement(art);
+    score->endCmd();
     return true;
 }
 
-bool ScoreApplicator::applyAddDynamic(Score* /*score*/, const QJsonObject& op)
+// ---------------------------------------------------------------------------
+// Tier 3 dynamic helpers
+// ---------------------------------------------------------------------------
+
+static DynamicType dynamicTypeFromName(const QString& name)
 {
-    LOGD() << "[editude] applyAddDynamic: id=" << op["id"].toString()
-           << " kind=" << op["kind"].toString();
+    static const QHash<QString, DynamicType> s_map = {
+        { "ppp", DynamicType::PPP },
+        { "pp",  DynamicType::PP  },
+        { "p",   DynamicType::P   },
+        { "mp",  DynamicType::MP  },
+        { "mf",  DynamicType::MF  },
+        { "f",   DynamicType::F   },
+        { "ff",  DynamicType::FF  },
+        { "fff", DynamicType::FFF },
+        { "sfz", DynamicType::SFZ },
+        { "fp",  DynamicType::FP  },
+        { "rf",  DynamicType::RF  },
+    };
+    return s_map.value(name, DynamicType::OTHER);
+}
+
+bool ScoreApplicator::applyAddDynamic(Score* score, const QJsonObject& op)
+{
+    const QString id      = op["id"].toString();
+    const QString partId  = op["part_id"].toString();
+    const QString kind    = op["kind"].toString();
+    const QJsonObject beat = op["beat"].toObject();
+
+    if (id.isEmpty() || partId.isEmpty()) {
+        LOGW() << "[editude] applyAddDynamic: missing id or part_id";
+        return false;
+    }
+
+    if (!m_partUuidToPart.contains(partId)) {
+        LOGW() << "[editude] applyAddDynamic: unknown part_id" << partId;
+        return false;
+    }
+
+    const DynamicType dt = dynamicTypeFromName(kind);
+    if (dt == DynamicType::OTHER) {
+        LOGW() << "[editude] applyAddDynamic: unknown dynamic kind" << kind;
+        return false;
+    }
+
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyAddDynamic: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    Part* part = m_partUuidToPart.value(partId);
+    const track_idx_t track = part->startTrack();
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+
+    score->startCmd(TranslatableString("undoableAction", "Add dynamic"));
+    Dynamic* dyn = Factory::createDynamic(seg);
+    dyn->setParent(seg);
+    dyn->setTrack(track);
+    dyn->setDynamicType(dt);
+    score->undoAddElement(dyn);
+    score->endCmd();
+
+    m_uuidToElement[id] = dyn;
+    m_elementToUuid[dyn] = id;
     return true;
 }
 
-bool ScoreApplicator::applySetDynamic(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applySetDynamic(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applySetDynamic: id=" << op["id"].toString()
-           << " kind=" << op["kind"].toString();
+    const QString id   = op["id"].toString();
+    const QString kind = op["kind"].toString();
+
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applySetDynamic: unknown id" << id;
+        return false;
+    }
+
+    Dynamic* dyn = dynamic_cast<Dynamic*>(m_uuidToElement.value(id));
+    if (!dyn) {
+        LOGW() << "[editude] applySetDynamic: element is not Dynamic" << id;
+        return false;
+    }
+
+    const DynamicType dt = dynamicTypeFromName(kind);
+    if (dt == DynamicType::OTHER) {
+        LOGW() << "[editude] applySetDynamic: unknown dynamic kind" << kind;
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Set dynamic"));
+    dyn->undoChangeProperty(Pid::DYNAMIC_TYPE, PropertyValue(dt));
+    score->endCmd();
     return true;
 }
 
-bool ScoreApplicator::applyRemoveDynamic(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyRemoveDynamic(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applyRemoveDynamic: id=" << op["id"].toString();
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveDynamic: unknown id" << id;
+        return false;
+    }
+
+    Dynamic* dyn = dynamic_cast<Dynamic*>(m_uuidToElement.value(id));
+    if (!dyn) {
+        LOGW() << "[editude] applyRemoveDynamic: element is not Dynamic" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(dyn);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove dynamic"));
+    score->undoRemoveElement(dyn);
+    score->endCmd();
     return true;
 }
 
@@ -998,25 +1178,111 @@ bool ScoreApplicator::applyRemoveTuplet(Score* /*score*/, const QJsonObject& op)
     return true;
 }
 
-bool ScoreApplicator::applyAddLyric(Score* /*score*/, const QJsonObject& op)
+// ---------------------------------------------------------------------------
+// Tier 3 lyric helpers
+// ---------------------------------------------------------------------------
+
+static LyricsSyllabic lyricSyllabicFromName(const QString& name)
 {
-    LOGD() << "[editude] applyAddLyric: id=" << op["id"].toString()
-           << " event_id=" << op["event_id"].toString()
-           << " verse=" << op["verse"].toInt()
-           << " text=" << op["text"].toString();
+    if (name == QStringLiteral("single"))  return LyricsSyllabic::SINGLE;
+    if (name == QStringLiteral("begin"))   return LyricsSyllabic::BEGIN;
+    if (name == QStringLiteral("middle"))  return LyricsSyllabic::MIDDLE;
+    if (name == QStringLiteral("end"))     return LyricsSyllabic::END;
+    return LyricsSyllabic::SINGLE;
+}
+
+bool ScoreApplicator::applyAddLyric(Score* score, const QJsonObject& op)
+{
+    const QString id      = op["id"].toString();
+    const QString eventId = op["event_id"].toString();
+    const int verse       = op["verse"].toInt(0);
+    const QString syllabic = op["syllabic"].toString(QStringLiteral("single"));
+    const QString text    = op["text"].toString();
+
+    if (id.isEmpty() || eventId.isEmpty()) {
+        LOGW() << "[editude] applyAddLyric: missing id or event_id";
+        return false;
+    }
+
+    EngravingObject* evObj = m_uuidToElement.value(eventId);
+    if (!evObj) {
+        LOGW() << "[editude] applyAddLyric: unknown event_id" << eventId;
+        return false;
+    }
+
+    ChordRest* cr = nullptr;
+    if (evObj->isNote()) {
+        cr = toNote(static_cast<EngravingItem*>(evObj))->chord();
+    } else if (evObj->isChordRest()) {
+        cr = toChordRest(static_cast<EngravingItem*>(evObj));
+    }
+    if (!cr) {
+        LOGW() << "[editude] applyAddLyric: event is not a note/chordrest" << eventId;
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add lyric"));
+    Lyrics* lyric = Factory::createLyrics(cr);
+    lyric->setTrack(cr->track());
+    lyric->setParent(cr);
+    lyric->setVerse(verse);
+    lyric->setSyllabic(lyricSyllabicFromName(syllabic));
+    lyric->setPlainText(String(text));
+    score->undoAddElement(lyric);
+    score->endCmd();
+
+    m_uuidToElement[id] = lyric;
+    m_elementToUuid[lyric] = id;
     return true;
 }
 
-bool ScoreApplicator::applySetLyric(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applySetLyric(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applySetLyric: id=" << op["id"].toString()
-           << " text=" << op["text"].toString();
+    const QString id       = op["id"].toString();
+    const QString text     = op["text"].toString();
+    const QString syllabic = op["syllabic"].toString();
+
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applySetLyric: unknown id" << id;
+        return false;
+    }
+
+    Lyrics* lyric = dynamic_cast<Lyrics*>(m_uuidToElement.value(id));
+    if (!lyric) {
+        LOGW() << "[editude] applySetLyric: element is not Lyrics" << id;
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Set lyric"));
+    lyric->undoChangeProperty(Pid::TEXT, PropertyValue(String(text)));
+    if (!syllabic.isEmpty()) {
+        lyric->undoChangeProperty(Pid::SYLLABIC,
+                                   PropertyValue(static_cast<int>(lyricSyllabicFromName(syllabic))));
+    }
+    score->endCmd();
     return true;
 }
 
-bool ScoreApplicator::applyRemoveLyric(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyRemoveLyric(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applyRemoveLyric: id=" << op["id"].toString();
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveLyric: unknown id" << id;
+        return false;
+    }
+
+    Lyrics* lyric = dynamic_cast<Lyrics*>(m_uuidToElement.value(id));
+    if (!lyric) {
+        LOGW() << "[editude] applyRemoveLyric: element is not Lyrics" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(lyric);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove lyric"));
+    score->undoRemoveElement(lyric);
+    score->endCmd();
     return true;
 }
 
