@@ -29,6 +29,7 @@
 #include "engraving/dom/chord.h"
 #include "engraving/dom/masterscore.h"
 #include "engraving/dom/note.h"
+#include "engraving/dom/part.h"
 #include "engraving/dom/segment.h"
 #include "engraving/types/fraction.h"
 #include "engraving/tests/utils/scorerw.h"
@@ -523,6 +524,129 @@ TEST_F(Editude_ScoreApplicatorTests, applySetTrack_movesToVoice1)
 
     // The UUID map should still contain an entry for the note.
     EXPECT_FALSE(applicator.elementToUuid().isEmpty());
+
+    delete score;
+}
+
+// ---------------------------------------------------------------------------
+// Group 6 — Part / Staff ops (Phase 1)
+// ---------------------------------------------------------------------------
+
+static QJsonObject makeAddPartPayload(const QString& partId,
+                                       const QString& name = "Violin",
+                                       int staffCount = 1)
+{
+    QJsonObject instr;
+    instr["musescore_id"] = "";
+    instr["name"]         = name;
+    instr["short_name"]   = name.left(3) + ".";
+
+    QJsonObject op;
+    op["type"]        = "AddPart";
+    op["part_id"]     = partId;
+    op["name"]        = name;
+    op["staff_count"] = staffCount;
+    op["instrument"]  = instr;
+    return op;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddPart_appendsPart)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const int partsBefore = static_cast<int>(score->parts().size());
+    const QString uuid    = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+
+    EXPECT_TRUE(applicator.apply(score, makeAddPartPayload(uuid)));
+    EXPECT_EQ(static_cast<int>(score->parts().size()), partsBefore + 1);
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyAddPart_missingPartId_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    QJsonObject op;
+    op["type"]        = "AddPart";
+    op["part_id"]     = "";
+    op["name"]        = "Cello";
+    op["staff_count"] = 1;
+    ScoreApplicator applicator;
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemovePart_decreasesPartCount)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(uuid)));
+    const int partsAfterAdd = static_cast<int>(score->parts().size());
+
+    QJsonObject removeOp;
+    removeOp["type"]    = "RemovePart";
+    removeOp["part_id"] = uuid;
+    EXPECT_TRUE(applicator.apply(score, removeOp));
+    EXPECT_EQ(static_cast<int>(score->parts().size()), partsAfterAdd - 1);
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applyRemovePart_unknownUuid_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    QJsonObject op;
+    op["type"]    = "RemovePart";
+    op["part_id"] = "no-such-part";
+    ScoreApplicator applicator;
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applySetPartName_renamesPart)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(uuid, "Violin")));
+
+    QJsonObject renameOp;
+    renameOp["type"]    = "SetPartName";
+    renameOp["part_id"] = uuid;
+    renameOp["name"]    = "Violin I";
+    EXPECT_TRUE(applicator.apply(score, renameOp));
+
+    // The last part added is the renamed one.
+    Part* part = score->parts().back();
+    EXPECT_EQ(part->partName(), u"Violin I");
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applySetPartName_unknownUuid_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    QJsonObject op;
+    op["type"]    = "SetPartName";
+    op["part_id"] = "ghost-part";
+    op["name"]    = "Oboe";
+    ScoreApplicator applicator;
+    EXPECT_FALSE(applicator.apply(score, op));
 
     delete score;
 }

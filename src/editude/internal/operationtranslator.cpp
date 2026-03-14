@@ -29,6 +29,7 @@
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/engravingitem.h"
+#include "engraving/dom/part.h"
 #include "engraving/dom/rest.h"
 #include "engraving/dom/tempotext.h"
 #include "engraving/dom/timesig.h"
@@ -259,6 +260,47 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
+    // ── Pass 9: AddPart / RemovePart ─────────────────────────────────────
+    // MuseScore may emit Part objects through changesChannel when a part is
+    // added or removed. Guard with ElementType::PART; if parts don't appear
+    // in changedObjects (score-level change not propagated), this pass is a
+    // no-op and the user's local part edits will not be transmitted.
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::PART) {
+            continue;
+        }
+        Part* part = static_cast<Part*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_knownPartUuids[part] = uuid;
+            ops.append(buildAddPart(part, uuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = m_knownPartUuids.value(part);
+            if (!uuid.isEmpty()) {
+                m_knownPartUuids.remove(part);
+                ops.append(buildRemovePart(uuid));
+            }
+        }
+    }
+
+    // ── Pass 10: SetPartName / SetStaffCount / SetPartInstrument ─────────
+    if (changedPropertyIdSet.count(Pid::PARTNAME)) {
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || obj->type() != ElementType::PART) {
+                continue;
+            }
+            if (!cmds.count(CommandType::ChangeProperty)) {
+                continue;
+            }
+            Part* part = static_cast<Part*>(obj);
+            const QString uuid = m_knownPartUuids.value(part);
+            if (uuid.isEmpty()) {
+                continue;
+            }
+            ops.append(buildSetPartName(uuid, part->partName().toQString()));
+        }
+    }
+
     return ops;
 }
 
@@ -478,4 +520,64 @@ QString OperationTranslator::durationTypeName(DurationType dt)
     case DurationType::V_64TH:    return QStringLiteral("64th");
     default:                      return QStringLiteral("unknown");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Part/staff directive builders (Pass 9+10)
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddPart(Part* part, const QString& uuid)
+{
+    QJsonObject instr;
+    instr["musescore_id"] = QStringLiteral("");
+    instr["name"]         = part->longName().toQString();
+    instr["short_name"]   = part->shortName().toQString();
+
+    QJsonObject payload;
+    payload["type"]        = QStringLiteral("AddPart");
+    payload["part_id"]     = uuid;
+    payload["name"]        = part->partName().toQString();
+    payload["staff_count"] = static_cast<int>(part->nstaves());
+    payload["instrument"]  = instr;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemovePart(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"]    = QStringLiteral("RemovePart");
+    payload["part_id"] = uuid;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetPartName(const QString& uuid, const QString& name)
+{
+    QJsonObject payload;
+    payload["type"]    = QStringLiteral("SetPartName");
+    payload["part_id"] = uuid;
+    payload["name"]    = name;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetStaffCount(const QString& uuid, int count)
+{
+    QJsonObject payload;
+    payload["type"]        = QStringLiteral("SetStaffCount");
+    payload["part_id"]     = uuid;
+    payload["staff_count"] = count;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetPartInstrument(const QString& uuid, Part* part)
+{
+    QJsonObject instr;
+    instr["musescore_id"] = QStringLiteral("");
+    instr["name"]         = part->longName().toQString();
+    instr["short_name"]   = part->shortName().toQString();
+
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("SetPartInstrument");
+    payload["part_id"]    = uuid;
+    payload["instrument"] = instr;
+    return payload;
 }

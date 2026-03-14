@@ -9,6 +9,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTimer>
+#include <QUuid>
 
 #include "engraving/dom/chord.h"
 #include "engraving/dom/engravingitem.h"
@@ -120,6 +121,10 @@ QHttpServerResponse EditudeTestServer::handleAction(const QHttpServerRequest& re
     if (action == QLatin1String("delete_event"))  return actionDeleteEvent(body);
     if (action == QLatin1String("set_pitch"))     return actionSetPitch(body);
     if (action == QLatin1String("undo"))          return actionUndo();
+    if (action == QLatin1String("add_part"))      return actionAddPart(body);
+    if (action == QLatin1String("remove_part"))   return actionRemovePart(body);
+    if (action == QLatin1String("set_part_name")) return actionSetPartName(body);
+    if (action == QLatin1String("set_staff_count")) return actionSetStaffCount(body);
 
     return errorResponse(QHttpServerResponse::StatusCode::BadRequest,
                          QString("unknown action: %1").arg(action));
@@ -555,6 +560,80 @@ QJsonObject EditudeTestServer::pitchJson(Note* note)
         pitch["accidental"] = QJsonValue::Null;
     }
     return pitch;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 — Part/Staff action handlers
+// ---------------------------------------------------------------------------
+
+QHttpServerResponse EditudeTestServer::actionAddPart(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    QJsonObject op = body;
+    op["type"] = "AddPart";
+    if (!op.contains("part_id")) {
+        op["part_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    if (!op.contains("staff_count")) {
+        op["staff_count"] = 1;
+    }
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError, "add_part failed");
+}
+
+QHttpServerResponse EditudeTestServer::actionRemovePart(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    QJsonObject op = body;
+    op["type"] = "RemovePart";
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError, "remove_part failed");
+}
+
+QHttpServerResponse EditudeTestServer::actionSetPartName(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    QJsonObject op = body;
+    op["type"] = "SetPartName";
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError, "set_part_name failed");
+}
+
+QHttpServerResponse EditudeTestServer::actionSetStaffCount(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+                             "score not ready");
+    }
+
+    QJsonObject op = body;
+    op["type"] = "SetStaffCount";
+    ScoreApplicator applicator;
+    return applicator.apply(score, op)
+        ? okResponse()
+        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError, "set_staff_count failed");
 }
 
 // ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@
 #include "engraving/dom/part.h"
 #include "engraving/dom/rest.h"
 #include "engraving/dom/segment.h"
+#include "engraving/dom/staff.h"
 #include "engraving/dom/timesig.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
@@ -548,6 +549,21 @@ bool ScoreApplicator::applySetTempo(Score* score, const QJsonObject& op)
     return true;
 }
 
+void ScoreApplicator::bootstrapPartMap(Score* score)
+{
+    // Called after the initial score is loaded (snapshot or empty).
+    // Parts baked into an MSCZ snapshot do not carry editude UUIDs, so this
+    // function cannot populate m_partUuidToPart from the score alone.
+    // The map is populated incrementally: applyAddPart registers each new
+    // part, and applyRemovePart removes it.
+    // This function exists as the designated call-site hook; once a protocol
+    // extension supplies per-part editude UUIDs in the bootstrap payload,
+    // the mapping can be built here.
+    Q_UNUSED(score);
+    LOGD() << "[editude] bootstrapPartMap: "
+           << m_partUuidToPart.size() << " parts already registered";
+}
+
 bool ScoreApplicator::applySetKeySignature(Score* /*score*/, const QJsonObject& op)
 {
     // TODO: requires part→staff mapping via m_partUuidToPart.
@@ -564,35 +580,128 @@ bool ScoreApplicator::applySetClef(Score* /*score*/, const QJsonObject& op)
     return true;
 }
 
-bool ScoreApplicator::applySetPartName(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applySetPartName(Score* score, const QJsonObject& op)
 {
-    // TODO: requires part lookup via m_partUuidToPart.
-    LOGD() << "[editude] applySetPartName: part_id=" << op["part_id"].toString()
-           << " (not yet implemented; part renames are ignored)";
+    const QString uuid = op["part_id"].toString();
+    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
+        LOGW() << "[editude] applySetPartName: unknown part_id" << uuid;
+        return false;
+    }
+    Part* part = m_partUuidToPart.value(uuid);
+    const QString name = op["name"].toString();
+    score->startCmd(TranslatableString("undoableAction", "Set part name"));
+    part->setPartName(String(name));
+    score->endCmd();
     return true;
 }
 
-bool ScoreApplicator::applySetStaffCount(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applySetStaffCount(Score* score, const QJsonObject& op)
 {
-    // TODO: requires part lookup via m_partUuidToPart.
-    LOGD() << "[editude] applySetStaffCount: part_id=" << op["part_id"].toString()
-           << " (not yet implemented; staff count changes are ignored)";
+    const QString uuid = op["part_id"].toString();
+    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
+        LOGW() << "[editude] applySetStaffCount: unknown part_id" << uuid;
+        return false;
+    }
+    Part* part = m_partUuidToPart.value(uuid);
+    const int target = op["staff_count"].toInt(0);
+    if (target <= 0) {
+        LOGW() << "[editude] applySetStaffCount: invalid staff_count" << target;
+        return false;
+    }
+    const int current = static_cast<int>(part->nstaves());
+    if (target == current) {
+        return true;
+    }
+    score->startCmd(TranslatableString("undoableAction", "Set staff count"));
+    if (target > current) {
+        for (int i = current; i < target; ++i) {
+            Staff* staff = Factory::createStaff(part);
+            score->appendStaff(staff);
+        }
+    } else {
+        // Remove from the tail of this part's staves.
+        const staff_idx_t partStart = part->startTrack() / VOICES;
+        for (int i = current; i > target; --i) {
+            score->cmdRemoveStaff(static_cast<staff_idx_t>(partStart + i - 1));
+        }
+    }
+    score->endCmd();
     return true;
 }
 
-bool ScoreApplicator::applyAddPart(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyAddPart(Score* score, const QJsonObject& op)
 {
-    // TODO: implement using Score::appendPart / insertPart; populate m_partUuidToPart.
-    LOGD() << "[editude] applyAddPart: part_id=" << op["part_id"].toString()
-           << " (not yet implemented; remote part additions are ignored)";
-    return true; // non-fatal — caller continues
+    const QString uuid = op["part_id"].toString();
+    if (uuid.isEmpty()) {
+        LOGW() << "[editude] applyAddPart: missing part_id";
+        return false;
+    }
+
+    const QString name = op["name"].toString();
+    const int staffCount = op["staff_count"].toInt(1);
+
+    Part* part = new Part(score);
+    part->setPartName(String(name));
+
+    // Short name from instrument if provided.
+    const QJsonObject instr = op["instrument"].toObject();
+    if (!instr.isEmpty()) {
+        const QString longName  = instr["name"].toString(name);
+        const QString shortName = instr["short_name"].toString();
+        part->setLongNameAll(String(longName));
+        part->setShortNameAll(String(shortName));
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add part"));
+    score->appendPart(part);
+    for (int i = 0; i < staffCount; ++i) {
+        Staff* staff = Factory::createStaff(part);
+        score->appendStaff(staff);
+    }
+    score->endCmd();
+
+    m_partUuidToPart[uuid] = part;
+    return true;
 }
 
-bool ScoreApplicator::applyRemovePart(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyRemovePart(Score* score, const QJsonObject& op)
 {
-    // TODO: requires part lookup via m_partUuidToPart.
-    LOGD() << "[editude] applyRemovePart: part_id=" << op["part_id"].toString()
-           << " (not yet implemented; remote part removals are ignored)";
+    const QString uuid = op["part_id"].toString();
+    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
+        LOGW() << "[editude] applyRemovePart: unknown part_id" << uuid;
+        return false;
+    }
+    Part* part = m_partUuidToPart.value(uuid);
+    m_partUuidToPart.remove(uuid);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove part"));
+    score->removePart(part);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applySetPartInstrument(Score* score, const QJsonObject& op)
+{
+    const QString uuid = op["part_id"].toString();
+    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
+        LOGW() << "[editude] applySetPartInstrument: unknown part_id" << uuid;
+        return false;
+    }
+    const QJsonObject instr = op["instrument"].toObject();
+    if (instr.isEmpty()) {
+        LOGW() << "[editude] applySetPartInstrument: null instrument — ignored";
+        return false;
+    }
+    Part* part = m_partUuidToPart.value(uuid);
+    const QString longName  = instr["name"].toString();
+    const QString shortName = instr["short_name"].toString();
+    // Update display names only; full playback-instrument change (transposition,
+    // MIDI bank, etc.) requires the InstrumentChange API and is deferred.
+    score->startCmd(TranslatableString("undoableAction", "Set part instrument"));
+    part->setPartName(String(longName));
+    part->setLongNameAll(String(longName));
+    part->setShortNameAll(String(shortName));
+    score->endCmd();
     return true;
 }
 
@@ -619,8 +728,9 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("SetClef"))          return applySetClef(score, payload);
     if (type == QLatin1String("SetPartName"))      return applySetPartName(score, payload);
     if (type == QLatin1String("SetStaffCount"))    return applySetStaffCount(score, payload);
-    if (type == QLatin1String("AddPart"))          return applyAddPart(score, payload);
-    if (type == QLatin1String("RemovePart"))       return applyRemovePart(score, payload);
+    if (type == QLatin1String("AddPart"))            return applyAddPart(score, payload);
+    if (type == QLatin1String("RemovePart"))         return applyRemovePart(score, payload);
+    if (type == QLatin1String("SetPartInstrument")) return applySetPartInstrument(score, payload);
 
     // Tier 3 — articulations
     if (type == QLatin1String("AddArticulation"))    return applyAddArticulation(score, payload);

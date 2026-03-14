@@ -41,6 +41,12 @@ private:
     QHttpServerResponse actionSetPitch(const QJsonObject& body);
     QHttpServerResponse actionUndo();
 
+    // Phase 1 — Part/Staff actions
+    QHttpServerResponse actionAddPart(const QJsonObject& body);
+    QHttpServerResponse actionRemovePart(const QJsonObject& body);
+    QHttpServerResponse actionSetPartName(const QJsonObject& body);
+    QHttpServerResponse actionSetStaffCount(const QJsonObject& body);
+
     QJsonObject serializeScore();
     QJsonObject serializePart(mu::engraving::Part* part);
     QJsonArray serializePartEvents(mu::engraving::Part* part);

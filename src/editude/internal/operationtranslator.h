@@ -37,6 +37,7 @@
 
 namespace mu::engraving {
 class Chord;
+class Part;
 class Rest;
 class TempoText;
 class TimeSig;
@@ -92,6 +93,15 @@ private:
     static QJsonObject buildSetTimeSignature(mu::engraving::TimeSig* ts);
     static QJsonObject buildSetTempo(mu::engraving::TempoText* tt);
 
+    // Part/staff directive builders (Pass 9+10).
+    static QJsonObject buildAddPart(mu::engraving::Part* part,
+                                    const QString& uuid);
+    static QJsonObject buildRemovePart(const QString& uuid);
+    static QJsonObject buildSetPartName(const QString& uuid, const QString& name);
+    static QJsonObject buildSetStaffCount(const QString& uuid, int count);
+    static QJsonObject buildSetPartInstrument(const QString& uuid,
+                                               mu::engraving::Part* part);
+
     // Tier 3 builders — articulations.
     QJsonObject buildAddArticulation(mu::engraving::EngravingObject* art,
                                      const QString& uuid, const QString& partId,
@@ -144,6 +154,10 @@ private:
     static QJsonObject pitchJson(int tpc, int octave);
     static QJsonObject beatJson(const mu::engraving::Fraction& tick);
     static QString durationTypeName(mu::engraving::DurationType dt);
+
+    // Known parts map — used to detect Add/Remove by diffing against score->parts().
+    // Key: Part*, Value: editude UUID assigned when AddPart was first emitted.
+    QHash<mu::engraving::Part*, QString> m_knownPartUuids;
 
     // UUID maps for locally-inserted elements.
     // Mirrors ScoreApplicator's maps for elements inserted by this client:

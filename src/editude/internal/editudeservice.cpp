@@ -257,6 +257,7 @@ void EditudeService::onNotationChanged(mu::notation::INotationPtr notation)
     // Apply bootstrap ops before going live
     if (m_bootstrapReady && !m_pendingOps.isEmpty()) {
         m_applyingRemote = true;
+        m_applicator.bootstrapPartMap(m_score);
         applyPendingOps();
         m_applyingRemote = false;
         m_pendingOps = QJsonArray();

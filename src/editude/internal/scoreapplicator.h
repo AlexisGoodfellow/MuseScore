@@ -43,6 +43,13 @@ public:
         return m_elementToUuid;
     }
 
+    // Bootstraps m_partUuidToPart from ApplyAddPart registrations.
+    // Call after loading a snapshot so that part-keyed ops (SetPartName,
+    // SetKeySignature, SetClef, RemovePart) can resolve Part* by UUID.
+    // Note: parts baked into an MSCZ snapshot do not carry editude UUIDs;
+    // this map is populated incrementally via applyAddPart / applyRemovePart.
+    void bootstrapPartMap(mu::engraving::Score* score);
+
     // Shared static helpers — also used by EditudeTestServer.
     static int pitchToMidi(const QString& step, int octave, const QString& accidental);
     static mu::engraving::DurationType parseDurationType(const QString& name);
@@ -69,6 +76,7 @@ private:
     bool applySetStaffCount(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyAddPart(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemovePart(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetPartInstrument(mu::engraving::Score* score, const QJsonObject& payload);
 
     // Tier 3 — articulations
     bool applyAddArticulation(mu::engraving::Score* score, const QJsonObject& payload);
