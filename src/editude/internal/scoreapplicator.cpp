@@ -868,6 +868,24 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
 {
     const QString type = payload["type"].toString();
 
+    // op_batch — apply all sub-ops as a single undo command so the user can
+    // undo an entire paste/multi-op action in one step.
+    if (type == QLatin1String("op_batch")) {
+        const QJsonArray ops = payload["ops"].toArray();
+        if (ops.isEmpty()) {
+            return true;
+        }
+        score->startCmd(TranslatableString("undoableAction", "Remote batch edit"));
+        bool ok = true;
+        for (const QJsonValue& v : ops) {
+            if (!apply(score, v.toObject())) {
+                ok = false;
+            }
+        }
+        score->endCmd();
+        return ok;
+    }
+
     // Tier 1 — stream event operations
     if (type == QLatin1String("InsertNote"))      return applyInsertNote(score, payload);
     if (type == QLatin1String("InsertRest"))      return applyInsertRest(score, payload);

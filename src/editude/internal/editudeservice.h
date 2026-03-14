@@ -25,6 +25,7 @@
 
 #include <QJsonArray>
 #include <QNetworkAccessManager>
+#include <QUuid>
 #include <QObject>
 #include <QString>
 #include <QTimer>

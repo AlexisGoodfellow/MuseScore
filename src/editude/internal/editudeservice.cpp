@@ -158,32 +158,37 @@ void EditudeService::onServerMessage(const QString& text)
                << "at revision" << m_serverRevision;
         fetchAnnotations();
 
-        // Flush ops buffered during reconnect
+        // Flush batches buffered during reconnect — send each batch as-is, adding
+        // a fresh client_seq so the server can correlate acks.
         if (!m_bufferedOps.isEmpty()) {
             for (const QJsonValue& v : m_bufferedOps) {
-                const QJsonObject entry = v.toObject();
-                QJsonObject out;
-                out["type"]          = "op";
-                out["client_seq"]    = ++m_clientSeq;
-                out["base_revision"] = entry.value("base_revision").toInt(0);
-                out["payload"]       = entry.value("payload").toObject();
-                m_socket->sendTextMessage(QJsonDocument(out).toJson(QJsonDocument::Compact));
+                QJsonObject batch = v.toObject();
+                batch["client_seq"] = ++m_clientSeq;
+                m_socket->sendTextMessage(QJsonDocument(batch).toJson(QJsonDocument::Compact));
             }
-            LOGD() << "[editude] flushed" << m_bufferedOps.size() << "buffered ops";
+            LOGD() << "[editude] flushed" << m_bufferedOps.size() << "buffered batches";
             m_bufferedOps = QJsonArray();
         }
 
     } else if (type == "op_ack") {
+        // Legacy ack format — kept for compatibility with older server versions.
         const int revision = msg.value("revision").toInt();
         if (revision > m_serverRevision) {
             m_serverRevision = revision;
         }
-        LOGD() << "[editude] op_ack op_id=" << msg.value("op_id").toString()
+        LOGD() << "[editude] op_ack revision=" << revision;
+
+    } else if (type == "op_batch_ack") {
+        const int revision = msg.value("revision").toInt();
+        if (revision > m_serverRevision) {
+            m_serverRevision = revision;
+        }
+        LOGD() << "[editude] op_batch_ack batch_id=" << msg.value("batch_id").toString()
                << "revision=" << revision;
 
     } else if (type == "op") {
+        // Legacy single-op broadcast — wrap and apply as a batch of one.
         if (m_playbackActive) {
-            // Discard remote ops during playback — they will be replayed on catch-up.
             return;
         }
         const int revision = msg.value("revision").toInt();
@@ -196,6 +201,25 @@ void EditudeService::onServerMessage(const QString& text)
         }
         m_applyingRemote = true;
         m_applicator.apply(m_score, msg.value("payload").toObject());
+        m_applyingRemote = false;
+
+    } else if (type == "op_batch") {
+        // Batch of sub-ops from a peer — apply as a single undo transaction.
+        if (m_playbackActive) {
+            return;
+        }
+        const int revision = msg.value("revision").toInt();
+        if (revision > m_serverRevision) {
+            m_serverRevision = revision;
+        }
+        if (!m_score) {
+            LOGW() << "[editude] received remote op_batch but score not ready";
+            return;
+        }
+        // Pass the full op_batch message to apply(); ScoreApplicator handles
+        // startCmd/endCmd wrapping so the whole batch is one undo entry.
+        m_applyingRemote = true;
+        m_applicator.apply(m_score, msg);
         m_applyingRemote = false;
 
     } else if (type == "presence") {
@@ -219,7 +243,7 @@ void EditudeService::onServerMessage(const QString& text)
     } else if (type == "op_error") {
         const QString code = msg.value("code").toString();
         LOGD() << "[editude] op_error code=" << code;
-        if (code == "op_superseded" && m_presenceModel) {
+        if ((code == "op_superseded" || code == "batch_superseded") && m_presenceModel) {
             m_presenceModel->showToast(
                 "Your edit conflicted with a concurrent change and was not applied.");
         }
@@ -302,20 +326,33 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
         return;
     }
 
+    const QVector<QJsonObject> ops = m_translator.translateAll(
+        changes.changedObjects,
+        changes.changedPropertyIdSet,
+        m_projectId,
+        m_applicator.elementToUuid());
+
+    if (ops.isEmpty()) {
+        return;
+    }
+
+    // Pack all ops from this undo transaction into a single op_batch.
+    // They share base_revision so the server can OT-transform them correctly.
+    const int baseRevision = m_serverRevision;
+    QJsonArray opsArray;
+    for (const QJsonObject& payload : ops) {
+        opsArray.append(payload);
+    }
+
     if (m_state == State::Reconnecting) {
-        const QVector<QJsonObject> ops = m_translator.translateAll(
-            changes.changedObjects,
-            changes.changedPropertyIdSet,
-            m_projectId,
-            m_applicator.elementToUuid());
-        const int baseRevision = m_serverRevision;
-        for (const QJsonObject& payload : ops) {
-            if (m_bufferedOps.size() < 100) {
-                QJsonObject entry;
-                entry["payload"]       = payload;
-                entry["base_revision"] = baseRevision;
-                m_bufferedOps.append(entry);
-            }
+        // Buffer the whole batch as one unit; cap at 100 batches.
+        if (m_bufferedOps.size() < 100) {
+            QJsonObject batch;
+            batch["type"]          = "op_batch";
+            batch["batch_id"]      = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            batch["base_revision"] = baseRevision;
+            batch["ops"]           = opsArray;
+            m_bufferedOps.append(batch);
         }
         return;
     }
@@ -324,23 +361,13 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
         return;
     }
 
-    const QVector<QJsonObject> ops = m_translator.translateAll(
-        changes.changedObjects,
-        changes.changedPropertyIdSet,
-        m_projectId,
-        m_applicator.elementToUuid());
-
-    // Snapshot m_serverRevision once for this batch: all ops in one change
-    // event share the same base so the server can OT-transform them correctly.
-    const int baseRevision = m_serverRevision;
-    for (const QJsonObject& payload : ops) {
-        QJsonObject msg;
-        msg["type"]          = "op";
-        msg["client_seq"]    = ++m_clientSeq;
-        msg["base_revision"] = baseRevision;
-        msg["payload"]       = payload;
-        m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
-    }
+    QJsonObject msg;
+    msg["type"]          = "op_batch";
+    msg["batch_id"]      = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    msg["client_seq"]    = ++m_clientSeq;
+    msg["base_revision"] = baseRevision;
+    msg["ops"]           = opsArray;
+    m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
 }
 
 void EditudeService::_openWebSocket()
