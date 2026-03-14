@@ -41,7 +41,9 @@
 #include "engraving/dom/keysig.h"
 #include "engraving/dom/lyrics.h"
 #include "engraving/dom/hairpin.h"
+#include "engraving/dom/harmony.h"
 #include "engraving/dom/navigate.h"
+#include "engraving/dom/tuplet.h"
 #include "engraving/dom/slur.h"
 #include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
@@ -1271,17 +1273,113 @@ bool ScoreApplicator::applyRemoveHairpin(Score* score, const QJsonObject& op)
     return true;
 }
 
-bool ScoreApplicator::applyAddTuplet(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyAddTuplet(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applyAddTuplet: id=" << op["id"].toString()
-           << " actual=" << op["actual_notes"].toInt()
-           << " normal=" << op["normal_notes"].toInt();
+    const QString id          = op["id"].toString();
+    const QString partId      = op["part_id"].toString();
+    const int actualNotes     = op["actual_notes"].toInt(0);
+    const int normalNotes     = op["normal_notes"].toInt(0);
+    const QJsonObject beat    = op["beat"].toObject();
+    const QJsonObject baseDur = op["base_duration"].toObject();
+    const QJsonArray members  = op["members"].toArray();
+
+    if (id.isEmpty() || actualNotes <= 0 || normalNotes <= 0) {
+        LOGW() << "[editude] applyAddTuplet: invalid payload";
+        return false;
+    }
+
+    if (!m_partUuidToPart.contains(partId)) {
+        LOGW() << "[editude] applyAddTuplet: unknown part_id" << partId;
+        return false;
+    }
+
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const DurationType baseType = durationTypeFromName(baseDur["type"].toString());
+    if (baseType == DurationType::V_INVALID) {
+        LOGW() << "[editude] applyAddTuplet: unknown base duration" << baseDur["type"].toString();
+        return false;
+    }
+
+    // Find ChordRest at tick on the part's first track.
+    const track_idx_t track = m_partUuidToPart.value(partId)->startTrack();
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyAddTuplet: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    ChordRest* ocr = nullptr;
+    for (Segment* seg = measure->first(SegmentType::ChordRest); seg;
+         seg = seg->next(SegmentType::ChordRest)) {
+        if (seg->tick() == tick) {
+            ocr = toChordRest(seg->element(track));
+            break;
+        }
+    }
+    if (!ocr) {
+        LOGW() << "[editude] applyAddTuplet: no chordrest at tick" << tick.toString();
+        return false;
+    }
+
+    const TDuration baseLen(baseType);
+    // total ticks = normal_notes * base_duration
+    const Fraction totalTicks = baseLen.fraction() * normalNotes;
+
+    score->startCmd(TranslatableString("undoableAction", "Add tuplet"));
+    Tuplet* tuplet = Factory::createTuplet(measure);
+    tuplet->setRatio(Fraction(actualNotes, normalNotes));
+    tuplet->setTicks(totalTicks);
+    tuplet->setBaseLen(baseLen);
+    tuplet->setTrack(track);
+    tuplet->setTick(tick);
+    tuplet->setParent(measure);
+    score->cmdCreateTuplet(ocr, tuplet);
+    score->endCmd();
+
+    m_uuidToElement[id] = tuplet;
+    m_elementToUuid[tuplet] = id;
+
+    // Map member UUIDs to the created elements in order.
+    const auto& elems = tuplet->elements();
+    for (int i = 0; i < static_cast<int>(elems.size()) && i < members.size(); ++i) {
+        const QString memberId = members[i].toObject()["id"].toString();
+        if (!memberId.isEmpty() && elems[i]) {
+            m_uuidToElement[memberId]  = elems[i];
+            m_elementToUuid[elems[i]] = memberId;
+        }
+    }
+
     return true;
 }
 
-bool ScoreApplicator::applyRemoveTuplet(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyRemoveTuplet(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applyRemoveTuplet: id=" << op["id"].toString();
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveTuplet: unknown id" << id;
+        return false;
+    }
+
+    Tuplet* tuplet = dynamic_cast<Tuplet*>(m_uuidToElement.value(id));
+    if (!tuplet) {
+        LOGW() << "[editude] applyRemoveTuplet: element is not Tuplet" << id;
+        return false;
+    }
+
+    // Unregister members before removal.
+    for (DurationElement* elem : tuplet->elements()) {
+        const QString memberUuid = m_elementToUuid.value(elem);
+        if (!memberUuid.isEmpty()) {
+            m_uuidToElement.remove(memberUuid);
+            m_elementToUuid.remove(elem);
+        }
+    }
+    m_elementToUuid.remove(tuplet);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove tuplet"));
+    score->cmdDeleteTuplet(tuplet, /*replaceWithRest=*/true);
+    score->endCmd();
     return true;
 }
 
@@ -1393,24 +1491,81 @@ bool ScoreApplicator::applyRemoveLyric(Score* score, const QJsonObject& op)
     return true;
 }
 
-bool ScoreApplicator::applyAddChordSymbol(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyAddChordSymbol(Score* score, const QJsonObject& op)
 {
-    // Chord symbols are score-global (no part_id). Full rendering via MuseScore
-    // Harmony API is deferred; log and continue.
-    LOGD() << "[editude] applyAddChordSymbol: id=" << op["id"].toString()
-           << " name=" << op["name"].toString();
+    const QString id   = op["id"].toString();
+    const QString name = op["name"].toString();
+    const QJsonObject beat = op["beat"].toObject();
+
+    if (id.isEmpty() || name.isEmpty()) {
+        LOGW() << "[editude] applyAddChordSymbol: missing id or name";
+        return false;
+    }
+
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyAddChordSymbol: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+
+    score->startCmd(TranslatableString("undoableAction", "Add chord symbol"));
+    Harmony* harmony = Factory::createHarmony(seg);
+    harmony->setTrack(0);
+    harmony->setParent(seg);
+    harmony->setHarmonyType(HarmonyType::STANDARD);
+    harmony->setHarmony(String(name));
+    score->undoAddElement(harmony);
+    score->endCmd();
+
+    m_uuidToElement[id] = harmony;
+    m_elementToUuid[harmony] = id;
     return true;
 }
 
-bool ScoreApplicator::applySetChordSymbol(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applySetChordSymbol(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applySetChordSymbol: id=" << op["id"].toString()
-           << " name=" << op["name"].toString();
+    const QString id   = op["id"].toString();
+    const QString name = op["name"].toString();
+
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applySetChordSymbol: unknown id" << id;
+        return false;
+    }
+
+    Harmony* harmony = dynamic_cast<Harmony*>(m_uuidToElement.value(id));
+    if (!harmony) {
+        LOGW() << "[editude] applySetChordSymbol: element is not Harmony" << id;
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Set chord symbol"));
+    harmony->setHarmony(String(name));
+    score->endCmd();
     return true;
 }
 
-bool ScoreApplicator::applyRemoveChordSymbol(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applyRemoveChordSymbol(Score* score, const QJsonObject& op)
 {
-    LOGD() << "[editude] applyRemoveChordSymbol: id=" << op["id"].toString();
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveChordSymbol: unknown id" << id;
+        return false;
+    }
+
+    Harmony* harmony = dynamic_cast<Harmony*>(m_uuidToElement.value(id));
+    if (!harmony) {
+        LOGW() << "[editude] applyRemoveChordSymbol: element is not Harmony" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(harmony);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove chord symbol"));
+    score->undoRemoveElement(harmony);
+    score->endCmd();
     return true;
 }
