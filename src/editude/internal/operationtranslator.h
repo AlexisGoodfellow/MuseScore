@@ -37,6 +37,8 @@
 
 namespace mu::engraving {
 class Chord;
+class Clef;
+class KeySig;
 class Part;
 class Rest;
 class TempoText;
@@ -92,6 +94,9 @@ private:
     // Directive builders.
     static QJsonObject buildSetTimeSignature(mu::engraving::TimeSig* ts);
     static QJsonObject buildSetTempo(mu::engraving::TempoText* tt);
+    static QJsonObject buildSetKeySignature(mu::engraving::KeySig* ks, const QString& partUuid);
+    static QJsonObject buildSetClef(mu::engraving::Clef* clef, const QString& partUuid,
+                                    int staffIdx);
 
     // Part/staff directive builders (Pass 9+10).
     static QJsonObject buildAddPart(mu::engraving::Part* part,

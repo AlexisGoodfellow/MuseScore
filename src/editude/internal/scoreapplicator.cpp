@@ -34,6 +34,8 @@
 #include "engraving/dom/rest.h"
 #include "engraving/dom/segment.h"
 #include "engraving/dom/staff.h"
+#include "engraving/dom/clef.h"
+#include "engraving/dom/keysig.h"
 #include "engraving/dom/timesig.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
@@ -564,19 +566,111 @@ void ScoreApplicator::bootstrapPartMap(Score* score)
            << m_partUuidToPart.size() << " parts already registered";
 }
 
-bool ScoreApplicator::applySetKeySignature(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
 {
-    // TODO: requires part→staff mapping via m_partUuidToPart.
-    LOGD() << "[editude] applySetKeySignature: part_id=" << op["part_id"].toString()
-           << " (not yet implemented; key signature changes are ignored)";
+    const QString uuid = op["part_id"].toString();
+    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
+        LOGW() << "[editude] applySetKeySignature: unknown part_id" << uuid;
+        return false;
+    }
+
+    const QJsonValue ksSigVal = op["key_signature"];
+    if (ksSigVal.isNull() || ksSigVal.isUndefined()) {
+        // Remove not yet implemented — silently accept.
+        LOGD() << "[editude] applySetKeySignature: null (remove) not yet implemented";
+        return true;
+    }
+
+    const QJsonObject beat   = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int sharps         = ksSigVal.toObject()["sharps"].toInt(0);
+
+    if (sharps < -7 || sharps > 7) {
+        LOGW() << "[editude] applySetKeySignature: sharps out of range" << sharps;
+        return false;
+    }
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applySetKeySignature: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    Part* part = m_partUuidToPart.value(uuid);
+    const staff_idx_t firstStaff = part->startTrack() / VOICES;
+    const staff_idx_t nStaves    = static_cast<staff_idx_t>(part->nstaves());
+    const Key key = static_cast<Key>(sharps);
+
+    score->startCmd(TranslatableString("undoableAction", "Set key signature"));
+    Segment* seg = measure->undoGetSegment(SegmentType::KeySig, tick);
+    for (staff_idx_t i = 0; i < nStaves; ++i) {
+        const track_idx_t track = (firstStaff + i) * VOICES;
+        KeySig* ks = Factory::createKeySig(seg);
+        ks->setTrack(track);
+        ks->setKey(key);
+        seg->add(ks);
+        score->undoAddElement(ks);
+    }
+    score->endCmd();
     return true;
 }
 
-bool ScoreApplicator::applySetClef(Score* /*score*/, const QJsonObject& op)
+bool ScoreApplicator::applySetClef(Score* score, const QJsonObject& op)
 {
-    // TODO: requires part→staff mapping via m_partUuidToPart.
-    LOGD() << "[editude] applySetClef: part_id=" << op["part_id"].toString()
-           << " (not yet implemented; clef changes are ignored)";
+    const QString uuid = op["part_id"].toString();
+    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
+        LOGW() << "[editude] applySetClef: unknown part_id" << uuid;
+        return false;
+    }
+
+    const QJsonValue clefVal = op["clef"];
+    if (clefVal.isNull() || clefVal.isUndefined()) {
+        // Remove not yet implemented — silently accept.
+        LOGD() << "[editude] applySetClef: null (remove) not yet implemented";
+        return true;
+    }
+
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int staffIdx     = op["staff"].toInt(0);
+    const QString clefName = clefVal.toObject()["name"].toString();
+
+    static const QHash<QString, ClefType> s_clefMap = {
+        { "treble",     ClefType::G    },
+        { "bass",       ClefType::F    },
+        { "alto",       ClefType::C3   },
+        { "tenor",      ClefType::C4   },
+        { "percussion", ClefType::PERC },
+    };
+
+    const ClefType ct = s_clefMap.value(clefName, ClefType::INVALID);
+    if (ct == ClefType::INVALID) {
+        LOGW() << "[editude] applySetClef: unknown clef name" << clefName;
+        return false;
+    }
+
+    Part* part = m_partUuidToPart.value(uuid);
+    if (staffIdx < 0 || staffIdx >= static_cast<int>(part->nstaves())) {
+        LOGW() << "[editude] applySetClef: staff index out of range" << staffIdx;
+        return false;
+    }
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applySetClef: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    const track_idx_t track = (part->startTrack() / VOICES + staffIdx) * VOICES;
+    Segment* seg = measure->undoGetSegment(SegmentType::Clef, tick);
+
+    score->startCmd(TranslatableString("undoableAction", "Set clef"));
+    Clef* clef = Factory::createClef(score->dummy()->segment());
+    clef->setClefType(ct);
+    clef->setTrack(track);
+    clef->setParent(seg);
+    score->doUndoAddElement(clef);
+    score->endCmd();
     return true;
 }
 

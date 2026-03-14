@@ -650,3 +650,104 @@ TEST_F(Editude_ScoreApplicatorTests, applySetPartName_unknownUuid_returnsFalse)
 
     delete score;
 }
+
+// ── Group 7: SetKeySignature & SetClef ──────────────────────────────────────
+
+TEST_F(Editude_ScoreApplicatorTests, applySetKeySignature_addsKeySig)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(uuid, "Piano")));
+
+    QJsonObject op;
+    op["type"]    = "SetKeySignature";
+    op["part_id"] = uuid;
+    QJsonObject beat;
+    beat["numerator"]   = 0;
+    beat["denominator"] = 1;
+    op["beat"] = beat;
+    QJsonObject keySig;
+    keySig["sharps"] = 3;
+    op["key_signature"] = keySig;
+
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applySetKeySignature_unknownPart_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    QJsonObject op;
+    op["type"]    = "SetKeySignature";
+    op["part_id"] = "ghost-part";
+    QJsonObject beat;
+    beat["numerator"]   = 0;
+    beat["denominator"] = 1;
+    op["beat"] = beat;
+    QJsonObject keySig;
+    keySig["sharps"] = 0;
+    op["key_signature"] = keySig;
+
+    ScoreApplicator applicator;
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applySetClef_setsClefOnPart)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(uuid, "Cello")));
+
+    QJsonObject op;
+    op["type"]    = "SetClef";
+    op["part_id"] = uuid;
+    op["staff"]   = 0;
+    QJsonObject beat;
+    beat["numerator"]   = 0;
+    beat["denominator"] = 1;
+    op["beat"] = beat;
+    QJsonObject clef;
+    clef["name"] = "bass";
+    op["clef"] = clef;
+
+    EXPECT_TRUE(applicator.apply(score, op));
+
+    delete score;
+}
+
+TEST_F(Editude_ScoreApplicatorTests, applySetClef_unknownClefName_returnsFalse)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ScoreApplicator applicator;
+    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(uuid, "Piano")));
+
+    QJsonObject op;
+    op["type"]    = "SetClef";
+    op["part_id"] = uuid;
+    op["staff"]   = 0;
+    QJsonObject beat;
+    beat["numerator"]   = 0;
+    beat["denominator"] = 1;
+    op["beat"] = beat;
+    QJsonObject clef;
+    clef["name"] = "not-a-clef";
+    op["clef"] = clef;
+
+    EXPECT_FALSE(applicator.apply(score, op));
+
+    delete score;
+}

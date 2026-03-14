@@ -28,7 +28,9 @@
 
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
+#include "engraving/dom/clef.h"
 #include "engraving/dom/engravingitem.h"
+#include "engraving/dom/keysig.h"
 #include "engraving/dom/part.h"
 #include "engraving/dom/rest.h"
 #include "engraving/dom/tempotext.h"
@@ -298,6 +300,32 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 continue;
             }
             ops.append(buildSetPartName(uuid, part->partName().toQString()));
+        }
+    }
+
+    // ── Pass 11: SetKeySignature & SetClef ───────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || !cmds.count(CommandType::AddElement)) {
+            continue;
+        }
+        if (obj->type() == ElementType::KEYSIG) {
+            auto* ks = static_cast<KeySig*>(obj);
+            Part* part = static_cast<EngravingItem*>(obj)->part();
+            if (!part) continue;
+            const QString partUuid = m_knownPartUuids.value(part);
+            if (partUuid.isEmpty()) continue;
+            ops.append(buildSetKeySignature(ks, partUuid));
+        } else if (obj->type() == ElementType::CLEF) {
+            auto* clef = static_cast<Clef*>(obj);
+            Part* part = static_cast<EngravingItem*>(obj)->part();
+            if (!part) continue;
+            const QString partUuid = m_knownPartUuids.value(part);
+            if (partUuid.isEmpty()) continue;
+            // Local staff index within the part.
+            const staff_idx_t globalStaff = clef->track() / VOICES;
+            const staff_idx_t firstStaff  = part->startTrack() / VOICES;
+            const int staffIdx = static_cast<int>(globalStaff - firstStaff);
+            ops.append(buildSetClef(clef, partUuid, staffIdx));
         }
     }
 
@@ -579,5 +607,45 @@ QJsonObject OperationTranslator::buildSetPartInstrument(const QString& uuid, Par
     payload["type"]       = QStringLiteral("SetPartInstrument");
     payload["part_id"]    = uuid;
     payload["instrument"] = instr;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetKeySignature(KeySig* ks, const QString& partUuid)
+{
+    const int sharps = static_cast<int>(ks->key());
+
+    QJsonObject keySig;
+    keySig["sharps"] = sharps;
+
+    QJsonObject payload;
+    payload["type"]          = QStringLiteral("SetKeySignature");
+    payload["part_id"]       = partUuid;
+    payload["beat"]          = beatJson(ks->tick());
+    payload["key_signature"] = keySig;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetClef(Clef* clef, const QString& partUuid, int staffIdx)
+{
+    static const QHash<ClefType, QString> s_clefNames = {
+        { ClefType::G,    QStringLiteral("treble")     },
+        { ClefType::F,    QStringLiteral("bass")       },
+        { ClefType::C3,   QStringLiteral("alto")       },
+        { ClefType::C4,   QStringLiteral("tenor")      },
+        { ClefType::PERC, QStringLiteral("percussion") },
+    };
+
+    const ClefType ct   = clef->clefType();
+    const QString cname = s_clefNames.value(ct, QStringLiteral("treble"));
+
+    QJsonObject clefObj;
+    clefObj["name"] = cname;
+
+    QJsonObject payload;
+    payload["type"]    = QStringLiteral("SetClef");
+    payload["part_id"] = partUuid;
+    payload["beat"]    = beatJson(clef->tick());
+    payload["staff"]   = staffIdx;
+    payload["clef"]    = clefObj;
     return payload;
 }
