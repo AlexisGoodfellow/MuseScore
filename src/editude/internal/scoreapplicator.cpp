@@ -631,6 +631,11 @@ void ScoreApplicator::bootstrapPartMap(Score* score)
            << m_partUuidToPart.size() << " parts already registered";
 }
 
+void ScoreApplicator::registerPart(Part* part, const QString& uuid)
+{
+    m_partUuidToPart[uuid] = part;
+}
+
 bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
 {
     const QString uuid = op["part_id"].toString();
@@ -1884,7 +1889,6 @@ bool ScoreApplicator::applyInsertBeats(Score* score, const QJsonObject& op)
         const Fraction measureLen = m->ticks();
 
         Score::InsertMeasureOptions opts;
-        opts.createMeasureRests = true;
         opts.needDeselectAll = false;
         score->insertMeasure(ElementType::MEASURE, m, opts);
         remaining -= measureLen;
