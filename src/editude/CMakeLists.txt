@@ -55,11 +55,9 @@ if (MUE_BUILD_EDITUDE_TESTS)
 endif()
 
 if (MUE_BUILD_EDITUDE_TEST_SERVER)
-    find_package(Qt6 REQUIRED COMPONENTS HttpServer)
     target_sources(editude PRIVATE
         testing/editudetestserver.h
         testing/editudetestserver.cpp
     )
-    target_link_libraries(editude PRIVATE Qt6::HttpServer)
     target_compile_definitions(editude PRIVATE MUE_BUILD_EDITUDE_TEST_SERVER)
 endif()

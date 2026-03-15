@@ -3,19 +3,19 @@
 
 #ifdef MUE_BUILD_EDITUDE_TEST_SERVER
 
-#include <QObject>
-#include <QHttpServer>
-#include <QHttpServerResponse>
-#include <QHttpServerRequest>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QObject>
+#include <QTcpServer>
+#include <QTcpSocket>
 
-#include "engraving/dom/score.h"
-#include "engraving/dom/part.h"
-#include "engraving/dom/note.h"
-#include "engraving/dom/rest.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/engravingobject.h"
+#include "engraving/dom/note.h"
+#include "engraving/dom/part.h"
+#include "engraving/dom/rest.h"
+#include "engraving/dom/score.h"
 
 namespace mu::editude::internal {
 class EditudeService;
@@ -23,90 +23,98 @@ class EditudeService;
 class EditudeTestServer : public QObject
 {
     Q_OBJECT
+
+    // Minimal HTTP reply value — status code + JSON body bytes.
+    struct Reply { int status; QByteArray body; };
+
 public:
     explicit EditudeTestServer(EditudeService* svc, quint16 port, QObject* parent = nullptr);
     void start();
 
-private:
-    QHttpServerResponse handleHealth();
-    QHttpServerResponse handleScore();
-    QHttpServerResponse handleWaitRevision(const QHttpServerRequest& req);
-    QHttpServerResponse handleAction(const QHttpServerRequest& req);
-    QHttpServerResponse handleConnect(const QHttpServerRequest& req);
-    QHttpServerResponse handleStatus();
+private slots:
+    void onNewConnection();
+    void onReadyRead(QTcpSocket* socket);
 
-    QHttpServerResponse actionInsertNote(const QJsonObject& body);
-    QHttpServerResponse actionInsertRest(const QJsonObject& body);
-    QHttpServerResponse actionDeleteEvent(const QJsonObject& body);
-    QHttpServerResponse actionSetPitch(const QJsonObject& body);
-    QHttpServerResponse actionUndo();
+private:
+    Reply handleHealth();
+    Reply handleScore();
+    Reply handleWaitRevision(const QJsonObject& body);
+    Reply handleAction(const QJsonObject& body);
+    Reply handleConnect(const QJsonObject& body);
+    Reply handleStatus();
+
+    Reply actionInsertNote(const QJsonObject& body);
+    Reply actionInsertRest(const QJsonObject& body);
+    Reply actionDeleteEvent(const QJsonObject& body);
+    Reply actionSetPitch(const QJsonObject& body);
+    Reply actionUndo();
 
     // Tier 1 — extended ops
-    QHttpServerResponse actionInsertChord(const QJsonObject& body);
-    QHttpServerResponse actionAddChordNote(const QJsonObject& body);
-    QHttpServerResponse actionRemoveChordNote(const QJsonObject& body);
-    QHttpServerResponse actionSetTie(const QJsonObject& body);
-    QHttpServerResponse actionSetTrack(const QJsonObject& body);
+    Reply actionInsertChord(const QJsonObject& body);
+    Reply actionAddChordNote(const QJsonObject& body);
+    Reply actionRemoveChordNote(const QJsonObject& body);
+    Reply actionSetTie(const QJsonObject& body);
+    Reply actionSetTrack(const QJsonObject& body);
 
     // Tier 2 — score directives
-    QHttpServerResponse actionSetTimeSignature(const QJsonObject& body);
-    QHttpServerResponse actionSetTempo(const QJsonObject& body);
-    QHttpServerResponse actionSetKeySignature(const QJsonObject& body);
-    QHttpServerResponse actionSetClef(const QJsonObject& body);
+    Reply actionSetTimeSignature(const QJsonObject& body);
+    Reply actionSetTempo(const QJsonObject& body);
+    Reply actionSetKeySignature(const QJsonObject& body);
+    Reply actionSetClef(const QJsonObject& body);
 
-    // Phase 1 — Part/Staff actions
-    QHttpServerResponse actionAddPart(const QJsonObject& body);
-    QHttpServerResponse actionRemovePart(const QJsonObject& body);
-    QHttpServerResponse actionSetPartName(const QJsonObject& body);
-    QHttpServerResponse actionSetStaffCount(const QJsonObject& body);
-    QHttpServerResponse actionSetPartInstrument(const QJsonObject& body);
+    // Part / Staff actions
+    Reply actionAddPart(const QJsonObject& body);
+    Reply actionRemovePart(const QJsonObject& body);
+    Reply actionSetPartName(const QJsonObject& body);
+    Reply actionSetStaffCount(const QJsonObject& body);
+    Reply actionSetPartInstrument(const QJsonObject& body);
 
     // Tier 3 — chord symbols
-    QHttpServerResponse actionAddChordSymbol(const QJsonObject& body);
-    QHttpServerResponse actionSetChordSymbol(const QJsonObject& body);
-    QHttpServerResponse actionRemoveChordSymbol(const QJsonObject& body);
+    Reply actionAddChordSymbol(const QJsonObject& body);
+    Reply actionSetChordSymbol(const QJsonObject& body);
+    Reply actionRemoveChordSymbol(const QJsonObject& body);
 
     // Tier 3 — articulations
-    QHttpServerResponse actionAddArticulation(const QJsonObject& body);
-    QHttpServerResponse actionRemoveArticulation(const QJsonObject& body);
+    Reply actionAddArticulation(const QJsonObject& body);
+    Reply actionRemoveArticulation(const QJsonObject& body);
 
     // Tier 3 — dynamics
-    QHttpServerResponse actionAddDynamic(const QJsonObject& body);
-    QHttpServerResponse actionSetDynamic(const QJsonObject& body);
-    QHttpServerResponse actionRemoveDynamic(const QJsonObject& body);
+    Reply actionAddDynamic(const QJsonObject& body);
+    Reply actionSetDynamic(const QJsonObject& body);
+    Reply actionRemoveDynamic(const QJsonObject& body);
 
     // Tier 3 — slurs
-    QHttpServerResponse actionAddSlur(const QJsonObject& body);
-    QHttpServerResponse actionRemoveSlur(const QJsonObject& body);
+    Reply actionAddSlur(const QJsonObject& body);
+    Reply actionRemoveSlur(const QJsonObject& body);
 
     // Tier 3 — hairpins
-    QHttpServerResponse actionAddHairpin(const QJsonObject& body);
-    QHttpServerResponse actionRemoveHairpin(const QJsonObject& body);
+    Reply actionAddHairpin(const QJsonObject& body);
+    Reply actionRemoveHairpin(const QJsonObject& body);
 
     // Tier 3 — lyrics
-    QHttpServerResponse actionAddLyric(const QJsonObject& body);
-    QHttpServerResponse actionSetLyric(const QJsonObject& body);
-    QHttpServerResponse actionRemoveLyric(const QJsonObject& body);
+    Reply actionAddLyric(const QJsonObject& body);
+    Reply actionSetLyric(const QJsonObject& body);
+    Reply actionRemoveLyric(const QJsonObject& body);
 
     // Tier 4 — navigation marks
-    QHttpServerResponse actionInsertVolta(const QJsonObject& body);
-    QHttpServerResponse actionRemoveVolta(const QJsonObject& body);
-    QHttpServerResponse actionInsertMarker(const QJsonObject& body);
-    QHttpServerResponse actionRemoveMarker(const QJsonObject& body);
-    QHttpServerResponse actionInsertJump(const QJsonObject& body);
-    QHttpServerResponse actionRemoveJump(const QJsonObject& body);
+    Reply actionInsertVolta(const QJsonObject& body);
+    Reply actionRemoveVolta(const QJsonObject& body);
+    Reply actionInsertMarker(const QJsonObject& body);
+    Reply actionRemoveMarker(const QJsonObject& body);
+    Reply actionInsertJump(const QJsonObject& body);
+    Reply actionRemoveJump(const QJsonObject& body);
 
     // Structural ops
-    QHttpServerResponse actionInsertBeats(const QJsonObject& body);
-    QHttpServerResponse actionDeleteBeats(const QJsonObject& body);
+    Reply actionInsertBeats(const QJsonObject& body);
+    Reply actionDeleteBeats(const QJsonObject& body);
 
     // Metadata
-    QHttpServerResponse actionSetScoreMetadata(const QJsonObject& body);
+    Reply actionSetScoreMetadata(const QJsonObject& body);
 
     // Serialization helpers
     QJsonObject serializeScore();
     QJsonObject serializePart(mu::engraving::Part* part);
-    QJsonArray serializePartEvents(mu::engraving::Part* part);
+    QJsonArray  serializePartEvents(mu::engraving::Part* part);
     QJsonObject serializeNote(mu::engraving::Note* note,
                               const QString& uuid,
                               const mu::engraving::Fraction& tick);
@@ -137,12 +145,13 @@ private:
     static QString durationTypeName(mu::engraving::DurationType dt);
     static QJsonObject pitchJson(mu::engraving::Note* note);
 
-    QHttpServerResponse errorResponse(QHttpServerResponse::StatusCode code, const QString& msg);
-    QHttpServerResponse okResponse();
+    Reply errorResponse(int status, const QString& msg);
+    Reply okResponse();
 
     EditudeService* m_svc;
     quint16 m_port;
-    QHttpServer* m_server = nullptr;
+    QTcpServer* m_server = nullptr;
+    QHash<QTcpSocket*, QByteArray> m_buffers;
 };
 
 } // namespace mu::editude::internal

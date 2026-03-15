@@ -59,48 +59,100 @@ EditudeTestServer::EditudeTestServer(EditudeService* svc, quint16 port, QObject*
 
 void EditudeTestServer::start()
 {
-    m_server = new QHttpServer(this);
-    m_server->route("/health", QHttpServerRequest::Method::Get,
-        [this](const QHttpServerRequest&) { return handleHealth(); });
-    m_server->route("/score", QHttpServerRequest::Method::Get,
-        [this](const QHttpServerRequest&) { return handleScore(); });
-    m_server->route("/wait_revision", QHttpServerRequest::Method::Post,
-        [this](const QHttpServerRequest& req) { return handleWaitRevision(req); });
-    m_server->route("/action", QHttpServerRequest::Method::Post,
-        [this](const QHttpServerRequest& req) { return handleAction(req); });
-    m_server->route("/connect", QHttpServerRequest::Method::Post,
-        [this](const QHttpServerRequest& req) { return handleConnect(req); });
-    m_server->route("/status", QHttpServerRequest::Method::Get,
-        [this](const QHttpServerRequest&) { return handleStatus(); });
-    m_server->listen(QHostAddress::LocalHost, m_port);
-    LOGD() << "[EditudeTestServer] listening on port" << m_port;
+    m_server = new QTcpServer(this);
+    connect(m_server, &QTcpServer::newConnection, this, &EditudeTestServer::onNewConnection);
+    if (!m_server->listen(QHostAddress::LocalHost, m_port))
+        LOGW() << "[EditudeTestServer] failed to listen on port" << m_port;
+    else
+        LOGD() << "[EditudeTestServer] listening on port" << m_port;
 }
 
-QHttpServerResponse EditudeTestServer::handleHealth()
+void EditudeTestServer::onNewConnection()
 {
-    return QHttpServerResponse(QJsonDocument(QJsonObject{ { "status", "ok" } }));
+    QTcpSocket* socket = m_server->nextPendingConnection();
+    connect(socket, &QTcpSocket::readyRead, this, [this, socket]() { onReadyRead(socket); });
+    connect(socket, &QTcpSocket::disconnected, this, [this, socket]() {
+        m_buffers.remove(socket);
+        socket->deleteLater();
+    });
 }
 
-QHttpServerResponse EditudeTestServer::handleScore()
+void EditudeTestServer::onReadyRead(QTcpSocket* socket)
 {
-    if (m_svc->scoreForTest() == nullptr) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
-                             "score not ready");
+    m_buffers[socket] += socket->readAll();
+    const QByteArray& buf = m_buffers[socket];
+
+    // Wait until the full HTTP header section has arrived.
+    const int sep = buf.indexOf("\r\n\r\n");
+    if (sep < 0)
+        return;
+
+    // Parse request line: "METHOD /path HTTP/1.1"
+    const int lineEnd = buf.indexOf("\r\n");
+    const QList<QByteArray> reqParts = buf.left(lineEnd).split(' ');
+    if (reqParts.size() < 2) { socket->disconnectFromHost(); return; }
+    const QString method = QString::fromLatin1(reqParts[0]);
+    const QString path   = QString::fromLatin1(reqParts[1]).section('?', 0, 0);
+
+    // Extract Content-Length from headers.
+    int contentLength = 0;
+    for (const QByteArray& line : buf.mid(lineEnd + 2, sep - lineEnd - 2).split('\n')) {
+        if (line.trimmed().toLower().startsWith("content-length:"))
+            contentLength = line.trimmed().mid(15).trimmed().toInt();
     }
-    const QJsonObject obj = serializeScore();
-    return QHttpServerResponse(QJsonDocument(obj));
+
+    // Wait until the full body has arrived.
+    if (buf.size() - (sep + 4) < contentLength)
+        return;
+
+    const QJsonObject bodyObj = QJsonDocument::fromJson(buf.mid(sep + 4, contentLength)).object();
+
+    // Dispatch to the appropriate handler.
+    Reply reply;
+    if      (method == "GET"  && path == "/health")        reply = handleHealth();
+    else if (method == "GET"  && path == "/score")         reply = handleScore();
+    else if (method == "GET"  && path == "/status")        reply = handleStatus();
+    else if (method == "POST" && path == "/wait_revision") reply = handleWaitRevision(bodyObj);
+    else if (method == "POST" && path == "/action")        reply = handleAction(bodyObj);
+    else if (method == "POST" && path == "/connect")       reply = handleConnect(bodyObj);
+    else                                                   reply = errorResponse(404, "not found");
+
+    // Write the HTTP response and close the connection.
+    const QByteArray statusText = reply.status == 200 ? "OK"
+                                : reply.status == 408 ? "Request Timeout"
+                                : "Error";
+    socket->write("HTTP/1.1 " + QByteArray::number(reply.status) + " " + statusText + "\r\n");
+    socket->write("Content-Type: application/json\r\n");
+    socket->write("Content-Length: " + QByteArray::number(reply.body.size()) + "\r\n");
+    socket->write("Connection: close\r\n");
+    socket->write("\r\n");
+    socket->write(reply.body);
+    socket->flush();
+    socket->disconnectFromHost();
+    m_buffers.remove(socket);
 }
 
-QHttpServerResponse EditudeTestServer::handleWaitRevision(const QHttpServerRequest& req)
+EditudeTestServer::Reply EditudeTestServer::handleHealth()
 {
-    const QJsonObject body = QJsonDocument::fromJson(req.body()).object();
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::handleScore()
+{
+    if (m_svc->scoreForTest() == nullptr)
+        return errorResponse(503, "score not ready");
+    return { 200, QJsonDocument(serializeScore()).toJson(QJsonDocument::Compact) };
+}
+
+EditudeTestServer::Reply EditudeTestServer::handleWaitRevision(const QJsonObject& body)
+{
     const int minRevision = body.value("min_revision").toInt();
     const int timeoutMs   = body.value("timeout_ms").toInt(5000);
 
     if (m_svc->serverRevisionForTest() >= minRevision) {
-        return QHttpServerResponse(QJsonDocument(QJsonObject{
+        return { 200, QJsonDocument(QJsonObject{
             { "revision", m_svc->serverRevisionForTest() }
-        }));
+        }).toJson(QJsonDocument::Compact) };
     }
 
     QEventLoop loop;
@@ -119,22 +171,17 @@ QHttpServerResponse EditudeTestServer::handleWaitRevision(const QHttpServerReque
     deadlineTimer.start(timeoutMs);
     loop.exec();
 
-    if (achieved >= 0) {
-        return QHttpServerResponse(QJsonDocument(QJsonObject{ { "revision", achieved } }));
-    }
-    return QHttpServerResponse(
-        QHttpServerResponse::StatusCode::RequestTimeout,
-        QJsonDocument(QJsonObject{
-            { "error", "timeout" },
-            { "revision", m_svc->serverRevisionForTest() }
-        })
-    );
+    if (achieved >= 0)
+        return { 200, QJsonDocument(QJsonObject{ { "revision", achieved } }).toJson(QJsonDocument::Compact) };
+    return { 408, QJsonDocument(QJsonObject{
+        { "error", "timeout" },
+        { "revision", m_svc->serverRevisionForTest() }
+    }).toJson(QJsonDocument::Compact) };
 }
 
-QHttpServerResponse EditudeTestServer::handleAction(const QHttpServerRequest& req)
+EditudeTestServer::Reply EditudeTestServer::handleAction(const QJsonObject& body)
 {
-    const QJsonObject body = QJsonDocument::fromJson(req.body()).object();
-    const QString action   = body.value("action").toString();
+    const QString action = body.value("action").toString();
 
     if (action == QLatin1String("insert_note"))   return actionInsertNote(body);
     if (action == QLatin1String("insert_rest"))   return actionInsertRest(body);
@@ -180,15 +227,14 @@ QHttpServerResponse EditudeTestServer::handleAction(const QHttpServerRequest& re
     if (action == QLatin1String("delete_beats"))        return actionDeleteBeats(body);
     if (action == QLatin1String("set_score_metadata"))  return actionSetScoreMetadata(body);
 
-    return errorResponse(QHttpServerResponse::StatusCode::BadRequest,
-                         QString("unknown action: %1").arg(action));
+    return errorResponse(400, QString("unknown action: %1").arg(action));
 }
 
-QHttpServerResponse EditudeTestServer::actionInsertNote(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionInsertNote(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -204,20 +250,20 @@ QHttpServerResponse EditudeTestServer::actionInsertNote(const QJsonObject& body)
         pitchObj["octave"].toInt(),
         pitchObj["accidental"].toString());
     if (midi < 0 || midi > 127) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "invalid pitch");
     }
 
     const DurationType dt = ScoreApplicator::parseDurationType(durObj["type"].toString());
     if (dt == DurationType::V_INVALID) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "invalid duration type");
     }
     const int dots = durObj["dots"].toInt(0);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "beat not found in score");
     }
 
@@ -232,11 +278,11 @@ QHttpServerResponse EditudeTestServer::actionInsertNote(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionInsertRest(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionInsertRest(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -248,14 +294,14 @@ QHttpServerResponse EditudeTestServer::actionInsertRest(const QJsonObject& body)
 
     const DurationType dt = ScoreApplicator::parseDurationType(durObj["type"].toString());
     if (dt == DurationType::V_INVALID) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "invalid duration type");
     }
     const int dots = durObj["dots"].toInt(0);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "beat not found in score");
     }
 
@@ -269,17 +315,17 @@ QHttpServerResponse EditudeTestServer::actionInsertRest(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionDeleteEvent(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionDeleteEvent(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString eventId = body["event_id"].toString();
     if (eventId.isEmpty()) {
-        return errorResponse(QHttpServerResponse::StatusCode::BadRequest,
+        return errorResponse(400,
                              "event_id required");
     }
 
@@ -301,12 +347,12 @@ QHttpServerResponse EditudeTestServer::actionDeleteEvent(const QJsonObject& body
         }
     }
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "event not found");
+        return errorResponse(404, "event not found");
     }
 
     auto* item = dynamic_cast<EngravingItem*>(obj);
     if (!item) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not an EngravingItem");
     }
 
@@ -317,17 +363,17 @@ QHttpServerResponse EditudeTestServer::actionDeleteEvent(const QJsonObject& body
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionSetPitch(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetPitch(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString eventId = body["event_id"].toString();
     if (eventId.isEmpty()) {
-        return errorResponse(QHttpServerResponse::StatusCode::BadRequest,
+        return errorResponse(400,
                              "event_id required");
     }
 
@@ -349,12 +395,12 @@ QHttpServerResponse EditudeTestServer::actionSetPitch(const QJsonObject& body)
         }
     }
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "event not found");
+        return errorResponse(404, "event not found");
     }
 
     Note* note = dynamic_cast<Note*>(obj);
     if (!note) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Note");
     }
 
@@ -364,7 +410,7 @@ QHttpServerResponse EditudeTestServer::actionSetPitch(const QJsonObject& body)
         pitchObj["octave"].toInt(),
         pitchObj["accidental"].toString());
     if (midi < 0 || midi > 127) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "invalid pitch");
     }
 
@@ -375,11 +421,11 @@ QHttpServerResponse EditudeTestServer::actionSetPitch(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionUndo()
+EditudeTestServer::Reply EditudeTestServer::actionUndo()
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
     EditData ed;
@@ -387,26 +433,21 @@ QHttpServerResponse EditudeTestServer::actionUndo()
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::handleConnect(const QHttpServerRequest& req)
+EditudeTestServer::Reply EditudeTestServer::handleConnect(const QJsonObject& body)
 {
-    const QJsonObject body = QJsonDocument::fromJson(req.body()).object();
     const QString sessionUrl = body.value("session_url").toString();
-    if (sessionUrl.isEmpty()) {
-        return QHttpServerResponse(
-            QHttpServerResponse::StatusCode::BadRequest,
-            QJsonDocument(QJsonObject{ { "error", "session_url required" } })
-        );
-    }
+    if (sessionUrl.isEmpty())
+        return errorResponse(400, "session_url required");
     m_svc->connectToSession(sessionUrl);
-    return QHttpServerResponse(QJsonDocument(QJsonObject{ { "ok", true } }));
+    return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::handleStatus()
+EditudeTestServer::Reply EditudeTestServer::handleStatus()
 {
-    return QHttpServerResponse(QJsonDocument(QJsonObject{
+    return { 200, QJsonDocument(QJsonObject{
         { "state",    m_svc->stateForTest() },
         { "revision", m_svc->serverRevisionForTest() },
-    }));
+    }).toJson(QJsonDocument::Compact) };
 }
 
 // ---------------------------------------------------------------------------
@@ -678,11 +719,11 @@ QJsonObject EditudeTestServer::pitchJson(Note* note)
 // Phase 1 — Part/Staff action handlers
 // ---------------------------------------------------------------------------
 
-QHttpServerResponse EditudeTestServer::actionAddPart(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionAddPart(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -697,20 +738,20 @@ QHttpServerResponse EditudeTestServer::actionAddPart(const QJsonObject& body)
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError, "add_part failed");
+        : errorResponse(500, "add_part failed");
 }
 
-QHttpServerResponse EditudeTestServer::actionRemovePart(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemovePart(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
@@ -721,17 +762,17 @@ QHttpServerResponse EditudeTestServer::actionRemovePart(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionSetPartName(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetPartName(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
@@ -743,24 +784,24 @@ QHttpServerResponse EditudeTestServer::actionSetPartName(const QJsonObject& body
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionSetStaffCount(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetStaffCount(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
     const int target = body["staff_count"].toInt(0);
     if (target <= 0) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "invalid staff_count");
     }
     const int current = static_cast<int>(part->nstaves());
@@ -1087,24 +1128,24 @@ QJsonObject EditudeTestServer::serializeScoreJumps()
 // Tier 3 action handlers
 // ---------------------------------------------------------------------------
 
-QHttpServerResponse EditudeTestServer::actionSetPartInstrument(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetPartInstrument(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
     const QJsonObject instr = body["instrument"].toObject();
     if (instr.isEmpty()) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "instrument required");
     }
     const QString longName  = instr["name"].toString();
@@ -1118,11 +1159,11 @@ QHttpServerResponse EditudeTestServer::actionSetPartInstrument(const QJsonObject
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionAddArticulation(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionAddArticulation(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -1131,7 +1172,7 @@ QHttpServerResponse EditudeTestServer::actionAddArticulation(const QJsonObject& 
 
     EngravingObject* obj = findByUuid(eventId);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "event not found");
+        return errorResponse(404, "event not found");
     }
 
     ChordRest* cr = nullptr;
@@ -1141,7 +1182,7 @@ QHttpServerResponse EditudeTestServer::actionAddArticulation(const QJsonObject& 
         cr = toChordRest(static_cast<EngravingItem*>(obj));
     }
     if (!cr) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "event is not a note or chordrest");
     }
 
@@ -1155,7 +1196,7 @@ QHttpServerResponse EditudeTestServer::actionAddArticulation(const QJsonObject& 
     };
     const SymId symId = s_artMap.value(artName, SymId::noSym);
     if (symId == SymId::noSym) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "unknown articulation type");
     }
 
@@ -1170,23 +1211,23 @@ QHttpServerResponse EditudeTestServer::actionAddArticulation(const QJsonObject& 
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionRemoveArticulation(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemoveArticulation(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "articulation not found");
+        return errorResponse(404, "articulation not found");
     }
 
     Articulation* art = dynamic_cast<Articulation*>(obj);
     if (!art) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not an Articulation");
     }
 
@@ -1197,17 +1238,17 @@ QHttpServerResponse EditudeTestServer::actionRemoveArticulation(const QJsonObjec
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionAddDynamic(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionAddDynamic(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(0);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
@@ -1225,13 +1266,13 @@ QHttpServerResponse EditudeTestServer::actionAddDynamic(const QJsonObject& body)
     };
     const DynamicType dt = s_dynMap.value(kind, DynamicType::OTHER);
     if (dt == DynamicType::OTHER) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "unknown dynamic kind");
     }
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "beat not found in score");
     }
 
@@ -1247,23 +1288,23 @@ QHttpServerResponse EditudeTestServer::actionAddDynamic(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionSetDynamic(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetDynamic(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "dynamic not found");
+        return errorResponse(404, "dynamic not found");
     }
 
     Dynamic* dyn = dynamic_cast<Dynamic*>(obj);
     if (!dyn) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Dynamic");
     }
 
@@ -1276,7 +1317,7 @@ QHttpServerResponse EditudeTestServer::actionSetDynamic(const QJsonObject& body)
     const QString kind = body["kind"].toString();
     const DynamicType dt = s_dynMap.value(kind, DynamicType::OTHER);
     if (dt == DynamicType::OTHER) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "unknown dynamic kind");
     }
 
@@ -1287,23 +1328,23 @@ QHttpServerResponse EditudeTestServer::actionSetDynamic(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionRemoveDynamic(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemoveDynamic(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "dynamic not found");
+        return errorResponse(404, "dynamic not found");
     }
 
     Dynamic* dyn = dynamic_cast<Dynamic*>(obj);
     if (!dyn) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Dynamic");
     }
 
@@ -1314,11 +1355,11 @@ QHttpServerResponse EditudeTestServer::actionRemoveDynamic(const QJsonObject& bo
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionAddSlur(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionAddSlur(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -1328,7 +1369,7 @@ QHttpServerResponse EditudeTestServer::actionAddSlur(const QJsonObject& body)
     EngravingObject* startObj = findByUuid(startId);
     EngravingObject* endObj   = findByUuid(endId);
     if (!startObj || !endObj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "event not found");
+        return errorResponse(404, "event not found");
     }
 
     auto toCR = [](EngravingObject* o) -> ChordRest* {
@@ -1339,7 +1380,7 @@ QHttpServerResponse EditudeTestServer::actionAddSlur(const QJsonObject& body)
     ChordRest* startCR = toCR(startObj);
     ChordRest* endCR   = toCR(endObj);
     if (!startCR || !endCR) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "event is not a note or chordrest");
     }
 
@@ -1358,23 +1399,23 @@ QHttpServerResponse EditudeTestServer::actionAddSlur(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionRemoveSlur(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemoveSlur(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "slur not found");
+        return errorResponse(404, "slur not found");
     }
 
     Slur* slur = dynamic_cast<Slur*>(obj);
     if (!slur) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Slur");
     }
 
@@ -1385,17 +1426,17 @@ QHttpServerResponse EditudeTestServer::actionRemoveSlur(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionAddHairpin(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionAddHairpin(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(0);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
@@ -1415,23 +1456,23 @@ QHttpServerResponse EditudeTestServer::actionAddHairpin(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionRemoveHairpin(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemoveHairpin(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "hairpin not found");
+        return errorResponse(404, "hairpin not found");
     }
 
     Hairpin* hp = dynamic_cast<Hairpin*>(obj);
     if (!hp) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Hairpin");
     }
 
@@ -1442,18 +1483,18 @@ QHttpServerResponse EditudeTestServer::actionRemoveHairpin(const QJsonObject& bo
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionAddLyric(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionAddLyric(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString eventId = body["event_id"].toString();
     EngravingObject* obj = findByUuid(eventId);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "event not found");
+        return errorResponse(404, "event not found");
     }
 
     ChordRest* cr = nullptr;
@@ -1463,7 +1504,7 @@ QHttpServerResponse EditudeTestServer::actionAddLyric(const QJsonObject& body)
         cr = toChordRest(static_cast<EngravingItem*>(obj));
     }
     if (!cr) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "event is not a note or chordrest");
     }
 
@@ -1492,23 +1533,23 @@ QHttpServerResponse EditudeTestServer::actionAddLyric(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionSetLyric(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetLyric(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "lyric not found");
+        return errorResponse(404, "lyric not found");
     }
 
     Lyrics* lyric = dynamic_cast<Lyrics*>(obj);
     if (!lyric) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not Lyrics");
     }
 
@@ -1520,23 +1561,23 @@ QHttpServerResponse EditudeTestServer::actionSetLyric(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionRemoveLyric(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemoveLyric(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "lyric not found");
+        return errorResponse(404, "lyric not found");
     }
 
     Lyrics* lyric = dynamic_cast<Lyrics*>(obj);
     if (!lyric) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not Lyrics");
     }
 
@@ -1551,11 +1592,11 @@ QHttpServerResponse EditudeTestServer::actionRemoveLyric(const QJsonObject& body
 // Tier 4 action handlers
 // ---------------------------------------------------------------------------
 
-QHttpServerResponse EditudeTestServer::actionInsertVolta(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionInsertVolta(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -1567,27 +1608,27 @@ QHttpServerResponse EditudeTestServer::actionInsertVolta(const QJsonObject& body
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+        : errorResponse(500,
                         "insert_volta failed");
 }
 
-QHttpServerResponse EditudeTestServer::actionRemoveVolta(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemoveVolta(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "volta not found");
+        return errorResponse(404, "volta not found");
     }
 
     Volta* volta = dynamic_cast<Volta*>(obj);
     if (!volta) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Volta");
     }
 
@@ -1598,11 +1639,11 @@ QHttpServerResponse EditudeTestServer::actionRemoveVolta(const QJsonObject& body
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionInsertMarker(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionInsertMarker(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -1614,27 +1655,27 @@ QHttpServerResponse EditudeTestServer::actionInsertMarker(const QJsonObject& bod
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+        : errorResponse(500,
                         "insert_marker failed");
 }
 
-QHttpServerResponse EditudeTestServer::actionRemoveMarker(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemoveMarker(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "marker not found");
+        return errorResponse(404, "marker not found");
     }
 
     Marker* marker = dynamic_cast<Marker*>(obj);
     if (!marker) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Marker");
     }
 
@@ -1645,11 +1686,11 @@ QHttpServerResponse EditudeTestServer::actionRemoveMarker(const QJsonObject& bod
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionInsertJump(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionInsertJump(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -1661,27 +1702,27 @@ QHttpServerResponse EditudeTestServer::actionInsertJump(const QJsonObject& body)
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+        : errorResponse(500,
                         "insert_jump failed");
 }
 
-QHttpServerResponse EditudeTestServer::actionRemoveJump(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemoveJump(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "jump not found");
+        return errorResponse(404, "jump not found");
     }
 
     Jump* jump = dynamic_cast<Jump*>(obj);
     if (!jump) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Jump");
     }
 
@@ -1696,11 +1737,11 @@ QHttpServerResponse EditudeTestServer::actionRemoveJump(const QJsonObject& body)
 // Structural + metadata action handlers
 // ---------------------------------------------------------------------------
 
-QHttpServerResponse EditudeTestServer::actionInsertBeats(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionInsertBeats(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -1709,15 +1750,15 @@ QHttpServerResponse EditudeTestServer::actionInsertBeats(const QJsonObject& body
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+        : errorResponse(500,
                         "insert_beats failed");
 }
 
-QHttpServerResponse EditudeTestServer::actionDeleteBeats(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionDeleteBeats(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -1726,15 +1767,15 @@ QHttpServerResponse EditudeTestServer::actionDeleteBeats(const QJsonObject& body
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+        : errorResponse(500,
                         "delete_beats failed");
 }
 
-QHttpServerResponse EditudeTestServer::actionSetScoreMetadata(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetScoreMetadata(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -1743,7 +1784,7 @@ QHttpServerResponse EditudeTestServer::actionSetScoreMetadata(const QJsonObject&
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+        : errorResponse(500,
                         "set_score_metadata failed");
 }
 
@@ -1751,11 +1792,11 @@ QHttpServerResponse EditudeTestServer::actionSetScoreMetadata(const QJsonObject&
 // Tier 1 extended action handlers
 // ---------------------------------------------------------------------------
 
-QHttpServerResponse EditudeTestServer::actionInsertChord(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionInsertChord(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -1766,13 +1807,13 @@ QHttpServerResponse EditudeTestServer::actionInsertChord(const QJsonObject& body
     const track_idx_t track   = static_cast<track_idx_t>(body.value("track").toInt(0));
 
     if (pitches.isEmpty()) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "pitches array required");
     }
 
     const DurationType dt = ScoreApplicator::parseDurationType(durObj["type"].toString());
     if (dt == DurationType::V_INVALID) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "invalid duration type");
     }
     const int dots = durObj["dots"].toInt(0);
@@ -1783,7 +1824,7 @@ QHttpServerResponse EditudeTestServer::actionInsertChord(const QJsonObject& body
         const int midi = ScoreApplicator::pitchToMidi(
             p["step"].toString(), p["octave"].toInt(), p["accidental"].toString());
         if (midi < 0 || midi > 127) {
-            return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+            return errorResponse(422,
                                  "invalid pitch in pitches array");
         }
         midiPitches.append(midi);
@@ -1791,7 +1832,7 @@ QHttpServerResponse EditudeTestServer::actionInsertChord(const QJsonObject& body
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "beat not found in score");
     }
 
@@ -1819,18 +1860,18 @@ QHttpServerResponse EditudeTestServer::actionInsertChord(const QJsonObject& body
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionAddChordNote(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionAddChordNote(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString eventId = body["event_id"].toString();
     EngravingObject* obj  = findByUuid(eventId);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "chord not found");
+        return errorResponse(404, "chord not found");
     }
 
     Chord* chord = nullptr;
@@ -1840,7 +1881,7 @@ QHttpServerResponse EditudeTestServer::actionAddChordNote(const QJsonObject& bod
         chord = toNote(static_cast<EngravingItem*>(obj))->chord();
     }
     if (!chord) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "event is not a chord");
     }
 
@@ -1849,7 +1890,7 @@ QHttpServerResponse EditudeTestServer::actionAddChordNote(const QJsonObject& bod
         pitchObj["step"].toString(), pitchObj["octave"].toInt(),
         pitchObj["accidental"].toString());
     if (midi < 0 || midi > 127) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "invalid pitch");
     }
 
@@ -1859,18 +1900,18 @@ QHttpServerResponse EditudeTestServer::actionAddChordNote(const QJsonObject& bod
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionRemoveChordNote(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemoveChordNote(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString eventId = body["event_id"].toString();
     EngravingObject* obj  = findByUuid(eventId);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "chord not found");
+        return errorResponse(404, "chord not found");
     }
 
     Chord* chord = nullptr;
@@ -1880,7 +1921,7 @@ QHttpServerResponse EditudeTestServer::actionRemoveChordNote(const QJsonObject& 
         chord = toNote(static_cast<EngravingItem*>(obj))->chord();
     }
     if (!chord) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "event is not a chord");
     }
 
@@ -1889,7 +1930,7 @@ QHttpServerResponse EditudeTestServer::actionRemoveChordNote(const QJsonObject& 
         pitchObj["step"].toString(), pitchObj["octave"].toInt(),
         pitchObj["accidental"].toString());
     if (midi < 0 || midi > 127) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "invalid pitch");
     }
 
@@ -1901,7 +1942,7 @@ QHttpServerResponse EditudeTestServer::actionRemoveChordNote(const QJsonObject& 
         }
     }
     if (!target) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound,
+        return errorResponse(404,
                              "pitch not found in chord");
     }
 
@@ -1911,23 +1952,23 @@ QHttpServerResponse EditudeTestServer::actionRemoveChordNote(const QJsonObject& 
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionSetTie(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetTie(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString eventId = body["event_id"].toString();
     EngravingObject* obj  = findByUuid(eventId);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "event not found");
+        return errorResponse(404, "event not found");
     }
 
     Note* note = dynamic_cast<Note*>(obj);
     if (!note) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Note");
     }
 
@@ -1978,23 +2019,23 @@ QHttpServerResponse EditudeTestServer::actionSetTie(const QJsonObject& body)
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionSetTrack(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetTrack(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString eventId = body["event_id"].toString();
     EngravingObject* obj  = findByUuid(eventId);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound, "event not found");
+        return errorResponse(404, "event not found");
     }
 
     auto* item = dynamic_cast<EngravingItem*>(obj);
     if (!item) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not an EngravingItem");
     }
 
@@ -2009,11 +2050,11 @@ QHttpServerResponse EditudeTestServer::actionSetTrack(const QJsonObject& body)
 // Tier 2 — score directive action handlers
 // ---------------------------------------------------------------------------
 
-QHttpServerResponse EditudeTestServer::actionSetTimeSignature(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetTimeSignature(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
     QJsonObject op = body;
@@ -2021,15 +2062,15 @@ QHttpServerResponse EditudeTestServer::actionSetTimeSignature(const QJsonObject&
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+        : errorResponse(500,
                         "set_time_signature failed");
 }
 
-QHttpServerResponse EditudeTestServer::actionSetTempo(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetTempo(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
     QJsonObject op = body;
@@ -2037,21 +2078,21 @@ QHttpServerResponse EditudeTestServer::actionSetTempo(const QJsonObject& body)
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(QHttpServerResponse::StatusCode::InternalServerError,
+        : errorResponse(500,
                         "set_tempo failed");
 }
 
-QHttpServerResponse EditudeTestServer::actionSetKeySignature(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetKeySignature(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
@@ -2062,13 +2103,13 @@ QHttpServerResponse EditudeTestServer::actionSetKeySignature(const QJsonObject& 
     const QJsonObject ksSigObj = body["key_signature"].toObject();
     const int sharps = ksSigObj["sharps"].toInt(0);
     if (sharps < -7 || sharps > 7) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "sharps out of range (-7..7)");
     }
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "beat not found in score");
     }
 
@@ -2090,17 +2131,17 @@ QHttpServerResponse EditudeTestServer::actionSetKeySignature(const QJsonObject& 
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionSetClef(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetClef(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
@@ -2120,18 +2161,18 @@ QHttpServerResponse EditudeTestServer::actionSetClef(const QJsonObject& body)
     };
     const ClefType ct = s_clefMap.value(clefName, ClefType::INVALID);
     if (ct == ClefType::INVALID) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "unknown clef name");
     }
 
     if (staffIdx < 0 || staffIdx >= static_cast<int>(part->nstaves())) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "staff index out of range");
     }
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "beat not found in score");
     }
 
@@ -2152,11 +2193,11 @@ QHttpServerResponse EditudeTestServer::actionSetClef(const QJsonObject& body)
 // Tier 3 — chord symbol action handlers
 // ---------------------------------------------------------------------------
 
-QHttpServerResponse EditudeTestServer::actionAddChordSymbol(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionAddChordSymbol(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
@@ -2164,13 +2205,13 @@ QHttpServerResponse EditudeTestServer::actionAddChordSymbol(const QJsonObject& b
     const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
     const QString name = body["name"].toString();
     if (name.isEmpty()) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "name required");
     }
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "beat not found in score");
     }
 
@@ -2187,24 +2228,24 @@ QHttpServerResponse EditudeTestServer::actionAddChordSymbol(const QJsonObject& b
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionSetChordSymbol(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionSetChordSymbol(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound,
+        return errorResponse(404,
                              "chord symbol not found");
     }
 
     Harmony* harmony = dynamic_cast<Harmony*>(obj);
     if (!harmony) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Harmony");
     }
 
@@ -2215,24 +2256,24 @@ QHttpServerResponse EditudeTestServer::actionSetChordSymbol(const QJsonObject& b
     return okResponse();
 }
 
-QHttpServerResponse EditudeTestServer::actionRemoveChordSymbol(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionRemoveChordSymbol(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(QHttpServerResponse::StatusCode::ServiceUnavailable,
+        return errorResponse(503,
                              "score not ready");
     }
 
     const QString id = body["id"].toString();
     EngravingObject* obj = findByUuid(id);
     if (!obj) {
-        return errorResponse(QHttpServerResponse::StatusCode::NotFound,
+        return errorResponse(404,
                              "chord symbol not found");
     }
 
     Harmony* harmony = dynamic_cast<Harmony*>(obj);
     if (!harmony) {
-        return errorResponse(QHttpServerResponse::StatusCode::UnprocessableEntity,
+        return errorResponse(422,
                              "element is not a Harmony");
     }
 
@@ -2393,18 +2434,14 @@ QJsonObject EditudeTestServer::serializeScoreChordSymbols()
 // Helper responses
 // ---------------------------------------------------------------------------
 
-QHttpServerResponse EditudeTestServer::errorResponse(QHttpServerResponse::StatusCode code,
-                                                       const QString& msg)
+EditudeTestServer::Reply EditudeTestServer::errorResponse(int status, const QString& msg)
 {
-    return QHttpServerResponse(
-        code,
-        QJsonDocument(QJsonObject{ { "error", msg } })
-    );
+    return { status, QJsonDocument(QJsonObject{ { "error", msg } }).toJson(QJsonDocument::Compact) };
 }
 
-QHttpServerResponse EditudeTestServer::okResponse()
+EditudeTestServer::Reply EditudeTestServer::okResponse()
 {
-    return QHttpServerResponse(QJsonDocument(QJsonObject{ { "ok", true } }));
+    return { 200, QJsonDocument(QJsonObject{ { "ok", true } }).toJson(QJsonDocument::Compact) };
 }
 
 } // namespace mu::editude::internal
