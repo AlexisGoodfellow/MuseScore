@@ -94,8 +94,13 @@ void EditudeService::start()
         m_pendingOps       = obj.value("snapshot_ops").toArray();
         m_bootstrapReady   = true;
 
-        // WebSocket open is deferred until the score finishes loading
-        openScoreForSession();
+        // Defer openProject() to the next event-loop iteration so it runs outside
+        // the QNetworkReply::finished callback stack.  openProject() triggers QML
+        // page navigation (openPageIfNeed) which must not be called re-entrantly
+        // from inside a network reply handler.
+        QTimer::singleShot(0, this, [this]() {
+            openScoreForSession();
+        });
     });
 
     m_playbackController()->isPlayingChanged().onNotify(
@@ -220,9 +225,19 @@ void EditudeService::onServerMessage(const QString& text)
             LOGW() << "[editude] received remote op but score not ready";
             return;
         }
-        m_applyingRemote = true;
-        m_applicator.apply(m_score, msg.value("payload").toObject());
-        m_applyingRemote = false;
+        // Defer the score mutation to the next event-loop iteration.  This
+        // prevents structural applicator calls (e.g. applyInsertBeats →
+        // MasterScore::insertMeasure) from being invoked while a nested
+        // QEventLoop is spinning inside EditudeTestServer::handleWaitRevision.
+        // m_serverRevision is already updated above so the wait-revision poll
+        // can detect completion before the deferred apply runs.
+        const QJsonObject payload = msg.value("payload").toObject();
+        QTimer::singleShot(0, this, [this, payload]() {
+            if (!m_score) return;
+            m_applyingRemote = true;
+            m_applicator.apply(m_score, payload);
+            m_applyingRemote = false;
+        });
 
     } else if (type == "op_batch") {
         // Batch of sub-ops from a peer — apply as a single undo transaction.
@@ -239,9 +254,14 @@ void EditudeService::onServerMessage(const QString& text)
         }
         // Pass the full op_batch message to apply(); ScoreApplicator handles
         // startCmd/endCmd wrapping so the whole batch is one undo entry.
-        m_applyingRemote = true;
-        m_applicator.apply(m_score, msg);
-        m_applyingRemote = false;
+        // Defer the score mutation to the next event-loop iteration (see "op"
+        // handler comment above for rationale).
+        QTimer::singleShot(0, this, [this, msg]() {
+            if (!m_score) return;
+            m_applyingRemote = true;
+            m_applicator.apply(m_score, msg);
+            m_applyingRemote = false;
+        });
 
     } else if (type == "presence") {
         const QString cid = msg.value("contributor_id").toString();
@@ -495,8 +515,10 @@ void EditudeService::onDisconnected()
     }
     LOGD() << "[editude] WS disconnected; attempt" << m_reconnectAttempt;
     m_state = State::Reconnecting;
-    m_socket->deleteLater();
-    m_socket = nullptr;
+    if (m_socket) {
+        m_socket->deleteLater();
+        m_socket = nullptr;
+    }
     const int delay = m_immediateReconnect
         ? 0
         : std::min(1000 * (1 << std::min(m_reconnectAttempt, 6)), 60000);
@@ -650,11 +672,16 @@ void EditudeService::fetchAnnotations()
 
 void EditudeService::connectToSession(const QString& sessionUrl)
 {
-    // Abort any existing socket connection
+    // Abort any existing socket connection.
+    // Null the member and sever signal connections BEFORE calling abort() — Qt may
+    // emit disconnected() synchronously from abort(), which would re-enter
+    // onDisconnected() and leave m_socket dangling if we haven't nulled it first.
     if (m_socket) {
-        m_socket->abort();
-        m_socket->deleteLater();
+        QWebSocket* oldSocket = m_socket;
         m_socket = nullptr;
+        oldSocket->disconnect(this);  // prevent onDisconnected() re-entrancy
+        oldSocket->abort();
+        oldSocket->deleteLater();
     }
 
     // Stop any pending timers
@@ -724,24 +751,27 @@ void EditudeService::connectToSession(const QString& sessionUrl)
                     this, &EditudeService::onReconnectTimer);
         }
 
-        // If a score is already loaded, apply bootstrap ops and open the WS immediately.
-        // If not, onNotationChanged() will handle it when the score becomes available.
-        if (m_score && !m_pendingOps.isEmpty()) {
-            m_applyingRemote = true;
-            applyPendingOps();
-            m_applyingRemote = false;
-            m_pendingOps = QJsonArray();
-        }
-
-        if (!m_websocketUrl.isEmpty() && !m_wsEverConnected) {
+        // If a score is already loaded, connect the WebSocket immediately.
+        // Both clients started the session from the same synchronised score state,
+        // so there is no need to reload from disk on every test — the relative ops
+        // will keep both sides consistent.
+        if (m_score != nullptr) {
             m_wsEverConnected = true;
             scheduleTokenRefresh();
             _openWebSocket();
-        } else {
-            // Score not loaded yet — openScoreForSession() + onNotationChanged() will
-            // complete the WS open sequence, just as in the original start() flow.
-            openScoreForSession();
+            return;
         }
+
+        // No score loaded yet (first /connect after startup).  Defer the openProject()
+        // call to the next event-loop iteration so it runs outside the network-reply
+        // callback stack.  openProject() calls openPageIfNeed() which triggers QML
+        // navigation — doing that synchronously inside a QNetworkReply::finished
+        // handler can crash on some platforms.
+        QTimer::singleShot(0, this, [this]() {
+            if (m_score == nullptr) {
+                openScoreForSession();
+            }
+        });
     });
 }
 
