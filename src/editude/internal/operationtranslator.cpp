@@ -55,11 +55,10 @@
 using namespace mu::editude::internal;
 using namespace mu::engraving;
 
-// Forward declarations for file-scope helpers used by translateAll.
-static QString articulationNameFromSymId(SymId id);
-static QString dynamicKindName(DynamicType dt);
+#include "editudeutils.h"
+
+// Forward declaration for file-scope helper used by translateAll.
 static QString lyricSyllabicName(LyricsSyllabic s);
-static QString markerKindName(MarkerType mt);
 
 // ---------------------------------------------------------------------------
 // Private helper: UUID lookup (local map first, then remote map).
@@ -1098,23 +1097,6 @@ QJsonObject OperationTranslator::buildSetTie(const QString& noteUuid, bool tieSt
 // Tier 3 builders — articulations
 // ---------------------------------------------------------------------------
 
-// Reverse of the articulationSymId() map in scoreapplicator.cpp.
-static QString articulationNameFromSymId(SymId id)
-{
-    static const QHash<SymId, QString> s_reverseMap = {
-        { SymId::articStaccatoAbove,      QStringLiteral("staccato")      },
-        { SymId::articAccentAbove,        QStringLiteral("accent")        },
-        { SymId::articTenutoAbove,        QStringLiteral("tenuto")        },
-        { SymId::articMarcatoAbove,       QStringLiteral("marcato")       },
-        { SymId::articStaccatissimoAbove, QStringLiteral("staccatissimo") },
-        { SymId::fermataAbove,            QStringLiteral("fermata")       },
-        { SymId::ornamentTrill,           QStringLiteral("trill")         },
-        { SymId::ornamentMordent,         QStringLiteral("mordent")       },
-        { SymId::ornamentTurn,            QStringLiteral("turn")          },
-    };
-    return s_reverseMap.value(id, QStringLiteral("staccato"));
-}
-
 QJsonObject OperationTranslator::buildAddArticulation(EngravingObject* art,
                                                        const QString& uuid,
                                                        const QString& /*partId*/,
@@ -1140,25 +1122,6 @@ QJsonObject OperationTranslator::buildRemoveArticulation(const QString& uuid)
 // ---------------------------------------------------------------------------
 // Tier 3 builders — dynamics
 // ---------------------------------------------------------------------------
-
-// Reverse map: DynamicType → Python kind string.
-static QString dynamicKindName(DynamicType dt)
-{
-    switch (dt) {
-    case DynamicType::PPP: return QStringLiteral("ppp");
-    case DynamicType::PP:  return QStringLiteral("pp");
-    case DynamicType::P:   return QStringLiteral("p");
-    case DynamicType::MP:  return QStringLiteral("mp");
-    case DynamicType::MF:  return QStringLiteral("mf");
-    case DynamicType::F:   return QStringLiteral("f");
-    case DynamicType::FF:  return QStringLiteral("ff");
-    case DynamicType::FFF: return QStringLiteral("fff");
-    case DynamicType::SFZ: return QStringLiteral("sfz");
-    case DynamicType::FP:  return QStringLiteral("fp");
-    case DynamicType::RF:  return QStringLiteral("rf");
-    default:               return QStringLiteral("mf");
-    }
-}
 
 QJsonObject OperationTranslator::buildAddDynamic(EngravingObject* dyn,
                                                   const QString& uuid,
@@ -1416,19 +1379,6 @@ QJsonObject OperationTranslator::buildRemoveVolta(const QString& uuid)
 // ---------------------------------------------------------------------------
 // Tier 4 builders — markers
 // ---------------------------------------------------------------------------
-
-// Reverse of s_markerKindMap in applyInsertMarker (scoreapplicator.cpp).
-static QString markerKindName(MarkerType mt)
-{
-    switch (mt) {
-    case MarkerType::SEGNO:    return QStringLiteral("segno");
-    case MarkerType::CODA:     return QStringLiteral("coda");
-    case MarkerType::FINE:     return QStringLiteral("fine");
-    case MarkerType::TOCODA:   return QStringLiteral("to_coda");
-    case MarkerType::VARSEGNO: return QStringLiteral("segno_var");
-    default:                   return QStringLiteral("segno");
-    }
-}
 
 QJsonObject OperationTranslator::buildInsertMarker(EngravingObject* marker, const QString& uuid)
 {

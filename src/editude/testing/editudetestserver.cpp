@@ -45,6 +45,7 @@
 #include "global/log.h"
 
 #include "internal/editudeservice.h"
+#include "internal/editudeutils.h"
 #include "internal/scoreapplicator.h"
 
 using namespace mu::editude::internal;
@@ -61,10 +62,11 @@ void EditudeTestServer::start()
 {
     m_server = new QTcpServer(this);
     connect(m_server, &QTcpServer::newConnection, this, &EditudeTestServer::onNewConnection);
-    if (!m_server->listen(QHostAddress::LocalHost, m_port))
+    if (!m_server->listen(QHostAddress::LocalHost, m_port)) {
         LOGW() << "[EditudeTestServer] failed to listen on port" << m_port;
-    else
+    } else {
         LOGD() << "[EditudeTestServer] listening on port" << m_port;
+    }
 }
 
 void EditudeTestServer::onNewConnection()
@@ -492,9 +494,9 @@ QJsonObject EditudeTestServer::serializeScore()
 QJsonObject EditudeTestServer::serializePart(Part* part)
 {
     const QJsonObject instrument{
-        { "musescore_id", part->instrumentId() },
-        { "name",         part->longName() },
-        { "short_name",   part->shortName() },
+        { "musescore_id", part->instrumentId().toQString() },
+        { "name",         part->longName().toQString() },
+        { "short_name",   part->shortName().toQString() },
     };
 
     return QJsonObject{
@@ -829,51 +831,8 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStaffCount(const QJsonObjec
 // Tier 3 serialization helpers
 // ---------------------------------------------------------------------------
 
-static QString articulationNameFromSymId(SymId id)
-{
-    static const QHash<SymId, QString> s_map = {
-        { SymId::articStaccatoAbove,     QStringLiteral("staccato")      },
-        { SymId::articAccentAbove,       QStringLiteral("accent")        },
-        { SymId::articTenutoAbove,       QStringLiteral("tenuto")        },
-        { SymId::articMarcatoAbove,      QStringLiteral("marcato")       },
-        { SymId::articStaccatissimoAbove,QStringLiteral("staccatissimo") },
-        { SymId::fermataAbove,           QStringLiteral("fermata")       },
-        { SymId::ornamentTrill,          QStringLiteral("trill")         },
-        { SymId::ornamentMordent,        QStringLiteral("mordent")       },
-        { SymId::ornamentTurn,           QStringLiteral("turn")          },
-    };
-    return s_map.value(id, QStringLiteral("staccato"));
-}
-
-static QString dynamicKindName(DynamicType dt)
-{
-    static const QHash<DynamicType, QString> s_map = {
-        { DynamicType::PPP, QStringLiteral("ppp") },
-        { DynamicType::PP,  QStringLiteral("pp")  },
-        { DynamicType::P,   QStringLiteral("p")   },
-        { DynamicType::MP,  QStringLiteral("mp")  },
-        { DynamicType::MF,  QStringLiteral("mf")  },
-        { DynamicType::F,   QStringLiteral("f")   },
-        { DynamicType::FF,  QStringLiteral("ff")  },
-        { DynamicType::FFF, QStringLiteral("fff") },
-        { DynamicType::SFZ, QStringLiteral("sfz") },
-        { DynamicType::FP,  QStringLiteral("fp")  },
-        { DynamicType::RF,  QStringLiteral("rf")  },
-    };
-    return s_map.value(dt, QStringLiteral("mf"));
-}
-
-static QString markerKindName(MarkerType mt)
-{
-    static const QHash<MarkerType, QString> s_map = {
-        { MarkerType::SEGNO,    QStringLiteral("segno")     },
-        { MarkerType::CODA,     QStringLiteral("coda")      },
-        { MarkerType::FINE,     QStringLiteral("fine")      },
-        { MarkerType::TOCODA,   QStringLiteral("to_coda")   },
-        { MarkerType::VARSEGNO, QStringLiteral("segno_var") },
-    };
-    return s_map.value(mt, QStringLiteral("segno"));
-}
+// articulationNameFromSymId, dynamicKindName, markerKindName are defined
+// inline in internal/editudeutils.h (shared with operationtranslator.cpp).
 
 QJsonObject EditudeTestServer::serializePartArticulations(Part* part)
 {
@@ -2443,7 +2402,5 @@ EditudeTestServer::Reply EditudeTestServer::okResponse()
 {
     return { 200, QJsonDocument(QJsonObject{ { "ok", true } }).toJson(QJsonDocument::Compact) };
 }
-
-} // namespace mu::editude::internal
 
 #endif // MUE_BUILD_EDITUDE_TEST_SERVER
