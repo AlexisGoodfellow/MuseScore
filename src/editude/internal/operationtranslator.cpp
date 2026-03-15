@@ -328,7 +328,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     }
 
     // ── Pass 10: SetPartName / SetStaffCount / SetPartInstrument ─────────
-    if (changedPropertyIdSet.count(Pid::PARTNAME)) {
+    if (changedPropertyIdSet.count(Pid::STAFF_LONG_NAME)) {
         for (const auto& [obj, cmds] : changedObjects) {
             if (!obj || obj->type() != ElementType::PART) {
                 continue;

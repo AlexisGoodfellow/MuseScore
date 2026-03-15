@@ -1328,7 +1328,9 @@ bool ScoreApplicator::applyAddTuplet(Score* score, const QJsonObject& op)
     }
 
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
-    const DurationType baseType = durationTypeFromName(baseDur["type"].toString());
+    const QByteArray baseTypeUtf8 = baseDur["type"].toString().toUtf8();
+    const DurationType baseType = TConv::fromXml(
+        muse::AsciiStringView(baseTypeUtf8.constData()), DurationType::V_INVALID);
     if (baseType == DurationType::V_INVALID) {
         LOGW() << "[editude] applyAddTuplet: unknown base duration" << baseDur["type"].toString();
         return false;
@@ -1857,7 +1859,7 @@ bool ScoreApplicator::applyInsertBeats(Score* score, const QJsonObject& op)
     const Fraction atTick(atObj["numerator"].toInt(), atObj["denominator"].toInt());
     const Fraction duration(durObj["numerator"].toInt(), durObj["denominator"].toInt());
 
-    if (duration <= Fraction(0)) {
+    if (duration <= Fraction(0, 1)) {
         LOGW() << "[editude] applyInsertBeats: non-positive duration";
         return false;
     }
@@ -1873,7 +1875,7 @@ bool ScoreApplicator::applyInsertBeats(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Insert beats"));
 
     Fraction remaining = duration;
-    while (remaining > Fraction(0)) {
+    while (remaining > Fraction(0, 1)) {
         // Re-resolve target each iteration because prior inserts shift ticks.
         Measure* m = score->tick2measure(atTick);
         if (!m) {
@@ -1901,7 +1903,7 @@ bool ScoreApplicator::applyDeleteBeats(Score* score, const QJsonObject& op)
     const Fraction atTick(atObj["numerator"].toInt(), atObj["denominator"].toInt());
     const Fraction duration(durObj["numerator"].toInt(), durObj["denominator"].toInt());
 
-    if (duration <= Fraction(0)) {
+    if (duration <= Fraction(0, 1)) {
         LOGW() << "[editude] applyDeleteBeats: non-positive duration";
         return false;
     }

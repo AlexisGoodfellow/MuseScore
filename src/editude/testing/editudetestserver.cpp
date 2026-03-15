@@ -18,7 +18,7 @@
 #include "engraving/dom/noteval.h"
 #include "engraving/dom/rest.h"
 #include "engraving/dom/segment.h"
-#include "engraving/dom/undo.h"
+#include "engraving/editing/undo.h"
 #include "engraving/types/types.h"
 #include "engraving/types/typesconv.h"
 
