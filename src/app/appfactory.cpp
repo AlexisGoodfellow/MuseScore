@@ -408,6 +408,9 @@ std::shared_ptr<muse::IApplication> AppFactory::newGuiApp(const CmdOptions& opti
     app->addModule(new mu::print::PrintModule());
 #endif
     app->addModule(new mu::project::ProjectModule());
+#ifdef MUE_BUILD_EDITUDE_MODULE
+    app->addModule(new mu::editude::EditudeModule());
+#endif
     app->addModule(new muse::update::UpdateModule());
     app->addModule(new muse::workspace::WorkspaceModule());
 
@@ -512,9 +515,6 @@ static void addConsoleModules(std::shared_ptr<ConsoleApp> app)
     app->addModule(new mu::notation::NotationModule());
     app->addModule(new mu::playback::PlaybackModule());
     app->addModule(new mu::project::ProjectModule());
-#ifdef MUE_BUILD_EDITUDE_MODULE
-    app->addModule(new mu::editude::EditudeModule());
-#endif
     app->addModule(new muse::extensions::ExtensionsModule());
     app->addModule(new mu::notation::NotationSceneModule());
 }

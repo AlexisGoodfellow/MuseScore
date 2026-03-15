@@ -49,6 +49,7 @@ void EditudeModuleContext::registerExports()
 void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
 {
     if (mode != muse::IApplication::RunMode::GuiApp) {
+        LOGI() << "[EditudeModule] skipping — not GuiApp";
         return;
     }
 
@@ -59,6 +60,7 @@ void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
     m_service->start();
 
 #ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+    LOGI() << "[EditudeModule] test server enabled, EDITUDE_TEST_PORT=" << qgetenv("EDITUDE_TEST_PORT");
     {
         const QByteArray portEnv = qgetenv("EDITUDE_TEST_PORT");
         if (!portEnv.isEmpty()) {

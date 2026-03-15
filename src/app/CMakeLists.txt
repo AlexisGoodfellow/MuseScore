@@ -170,6 +170,7 @@ add_to_link_if_exists(iex_videoexport)
 add_to_link_if_exists(inspector)
 add_to_link_if_exists(instrumentsscene)
 add_to_link_if_exists(musesounds)
+add_to_link_if_exists(editude)
 add_to_link_if_exists(notation)
 add_to_link_if_exists(notationscene)
 add_to_link_if_exists(palette)
@@ -297,6 +298,13 @@ target_include_directories(MuseScoreStudio PRIVATE
 ###########################################
 
 target_link_libraries(MuseScoreStudio PRIVATE ${LINK_LIB} ${COVERAGE_LINK_FLAGS})
+
+if (MUE_BUILD_EDITUDE_MODULE)
+    target_compile_definitions(MuseScoreStudio PRIVATE MUE_BUILD_EDITUDE_MODULE)
+endif()
+if (MUE_BUILD_EDITUDE_TEST_SERVER)
+    target_compile_definitions(MuseScoreStudio PRIVATE MUE_BUILD_EDITUDE_TEST_SERVER)
+endif()
 
 if (CC_IS_EMCC)
     include(exported_functions.cmake)
