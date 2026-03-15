@@ -28,6 +28,14 @@ else()
     set(MAYBE_BRAILLE_QML)
 endif()
 
+if (MUE_BUILD_EDITUDE_MODULE)
+    set(MAYBE_EDITUDE_QML
+        TARGET editude_qml
+    )
+else()
+    set(MAYBE_EDITUDE_QML)
+endif()
+
 qt_add_qml_module(notationscene_qml
     URI MuseScore.NotationScene
     VERSION 1.0
@@ -298,6 +306,7 @@ qt_add_qml_module(notationscene_qml
     IMPORTS
         TARGET muse_ui_qml
         TARGET muse_uicomponents_qml
+        ${MAYBE_EDITUDE_QML}
         ${MAYBE_BRAILLE_QML}
 )
 

@@ -62,6 +62,12 @@ else()
     add_subdirectory(stubs/notation)
 endif()
 
+# editude must be added before notationscene so that editude_qml is defined
+# before notationscene_qml's qt_add_qml_module IMPORTS block is processed.
+if (MUE_BUILD_EDITUDE_MODULE)
+    add_subdirectory(editude)
+endif()
+
 if (MUE_BUILD_NOTATIONSCENE_MODULE)
     add_subdirectory(notationscene)
 else()
@@ -90,10 +96,6 @@ endif()
 
 if (MUE_BUILD_PROJECT_MODULE)
     add_subdirectory(project)
-endif()
-
-if (MUE_BUILD_EDITUDE_MODULE)
-    add_subdirectory(editude)
 endif()
 
 if (MUE_BUILD_APPSHELL_MODULE)
