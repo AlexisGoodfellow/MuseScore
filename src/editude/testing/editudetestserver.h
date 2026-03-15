@@ -41,12 +41,30 @@ private:
     QHttpServerResponse actionSetPitch(const QJsonObject& body);
     QHttpServerResponse actionUndo();
 
+    // Tier 1 — extended ops
+    QHttpServerResponse actionInsertChord(const QJsonObject& body);
+    QHttpServerResponse actionAddChordNote(const QJsonObject& body);
+    QHttpServerResponse actionRemoveChordNote(const QJsonObject& body);
+    QHttpServerResponse actionSetTie(const QJsonObject& body);
+    QHttpServerResponse actionSetTrack(const QJsonObject& body);
+
+    // Tier 2 — score directives
+    QHttpServerResponse actionSetTimeSignature(const QJsonObject& body);
+    QHttpServerResponse actionSetTempo(const QJsonObject& body);
+    QHttpServerResponse actionSetKeySignature(const QJsonObject& body);
+    QHttpServerResponse actionSetClef(const QJsonObject& body);
+
     // Phase 1 — Part/Staff actions
     QHttpServerResponse actionAddPart(const QJsonObject& body);
     QHttpServerResponse actionRemovePart(const QJsonObject& body);
     QHttpServerResponse actionSetPartName(const QJsonObject& body);
     QHttpServerResponse actionSetStaffCount(const QJsonObject& body);
     QHttpServerResponse actionSetPartInstrument(const QJsonObject& body);
+
+    // Tier 3 — chord symbols
+    QHttpServerResponse actionAddChordSymbol(const QJsonObject& body);
+    QHttpServerResponse actionSetChordSymbol(const QJsonObject& body);
+    QHttpServerResponse actionRemoveChordSymbol(const QJsonObject& body);
 
     // Tier 3 — articulations
     QHttpServerResponse actionAddArticulation(const QJsonObject& body);
@@ -103,6 +121,11 @@ private:
     QJsonObject serializePartSlurs(mu::engraving::Part* part);
     QJsonObject serializePartHairpins(mu::engraving::Part* part);
     QJsonObject serializePartLyricsMap(mu::engraving::Part* part);
+    QJsonArray  serializePartKeyChanges(mu::engraving::Part* part);
+    QJsonArray  serializePartClefChanges(mu::engraving::Part* part);
+    QJsonArray  serializeMetricGrid();
+    QJsonArray  serializeTempoMap();
+    QJsonObject serializeScoreChordSymbols();
     QJsonObject serializeScoreVoltas();
     QJsonObject serializeScoreMarkers();
     QJsonObject serializeScoreJumps();
