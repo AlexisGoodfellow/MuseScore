@@ -660,9 +660,10 @@ MeasureBase* MasterScore::insertMeasure(MeasureBase* beforeMeasure, const Insert
                             }
                             keySigList.push_back(ks);
                             // if instrument change on that place, set correct key signature for instrument change
-                            bool ic = s->next(SegmentType::ChordRest)->findAnnotation(ElementType::INSTRUMENT_CHANGE,
-                                                                                      e->part()->startTrack(),
-                                                                                      e->part()->endTrack() - 1);
+                            Segment* crSeg = s->next(SegmentType::ChordRest);
+                            bool ic = crSeg && crSeg->findAnnotation(ElementType::INSTRUMENT_CHANGE,
+                                                                     e->part()->startTrack(),
+                                                                     e->part()->endTrack() - 1);
                             if (ic) {
                                 KeySigEvent ke = ks->keySigEvent();
                                 ke.setForInstrumentChange(true);

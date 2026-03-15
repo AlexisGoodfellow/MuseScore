@@ -1887,7 +1887,6 @@ bool ScoreApplicator::applyInsertBeats(Score* score, const QJsonObject& op)
         opts.createMeasureRests = true;
         opts.needDeselectAll = false;
         score->insertMeasure(ElementType::MEASURE, m, opts);
-
         remaining -= measureLen;
     }
 
