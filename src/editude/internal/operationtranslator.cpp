@@ -340,7 +340,30 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         ops.append(buildAddChordNote(chordUuid, note));
     }
 
-    // ── Pass 5: SetTimeSignature & SetTempo ───────────────────────────────
+    // ── Pass 5a: AddPart / RemovePart ───────────────────────────────────
+    // Must run BEFORE the emittedTimeSig early return (Pass 5b) because
+    // adding a part creates staves whose TimeSig/KeySig/Clef elements
+    // appear in the same batch.  Without this, the TimeSig early return
+    // would suppress the AddPart op entirely.
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::PART) {
+            continue;
+        }
+        Part* part = static_cast<Part*>(obj);
+        if (cmds.count(CommandType::AddElement) || cmds.count(CommandType::InsertPart)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_knownPartUuids[part] = uuid;
+            ops.append(buildAddPart(part, uuid));
+        } else if (cmds.count(CommandType::RemoveElement) || cmds.count(CommandType::RemovePart)) {
+            const QString uuid = m_knownPartUuids.value(part);
+            if (!uuid.isEmpty()) {
+                m_knownPartUuids.remove(part);
+                ops.append(buildRemovePart(uuid));
+            }
+        }
+    }
+
+    // ── Pass 5b: SetTimeSignature & SetTempo ─────────────────────────────
     // A TimeSig may appear with AddElement (new time sig added) OR
     // ChangeProperty (existing time sig modified by cmdAddTimeSig).
     bool emittedTimeSig = false;
@@ -474,28 +497,6 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 continue;
             }
             ops.append(buildSetTrack(uuid, static_cast<EngravingItem*>(obj)));
-        }
-    }
-
-    // ── Pass 9: AddPart / RemovePart ─────────────────────────────────────
-    // MuseScore may emit Part objects through changesChannel when a part is
-    // added or removed.  Accept both AddElement (generic) and InsertPart /
-    // RemovePart (specific undo commands from undoInsertPart/undoRemovePart).
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::PART) {
-            continue;
-        }
-        Part* part = static_cast<Part*>(obj);
-        if (cmds.count(CommandType::AddElement) || cmds.count(CommandType::InsertPart)) {
-            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-            m_knownPartUuids[part] = uuid;
-            ops.append(buildAddPart(part, uuid));
-        } else if (cmds.count(CommandType::RemoveElement) || cmds.count(CommandType::RemovePart)) {
-            const QString uuid = m_knownPartUuids.value(part);
-            if (!uuid.isEmpty()) {
-                m_knownPartUuids.remove(part);
-                ops.append(buildRemovePart(uuid));
-            }
         }
     }
 
@@ -1201,7 +1202,7 @@ QString OperationTranslator::durationTypeName(DurationType dt)
 QJsonObject OperationTranslator::buildAddPart(Part* part, const QString& uuid)
 {
     QJsonObject instr;
-    instr["musescore_id"] = QStringLiteral("");
+    instr["musescore_id"] = part->instrumentId().toQString();
     instr["name"]         = part->longName().toQString();
     instr["short_name"]   = part->shortName().toQString();
 
@@ -1243,7 +1244,7 @@ QJsonObject OperationTranslator::buildSetStaffCount(const QString& uuid, int cou
 QJsonObject OperationTranslator::buildSetPartInstrument(const QString& uuid, Part* part)
 {
     QJsonObject instr;
-    instr["musescore_id"] = QStringLiteral("");
+    instr["musescore_id"] = part->instrumentId().toQString();
     instr["name"]         = part->longName().toQString();
     instr["short_name"]   = part->shortName().toQString();
 

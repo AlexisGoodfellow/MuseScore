@@ -29,6 +29,7 @@
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/harmony.h"
 #include "engraving/dom/hairpin.h"
+#include "engraving/dom/instrument.h"
 #include "engraving/dom/jump.h"
 #include "engraving/dom/keysig.h"
 #include "engraving/dom/lyrics.h"
@@ -823,8 +824,16 @@ EditudeTestServer::Reply EditudeTestServer::actionAddPart(const QJsonObject& bod
 
     const QJsonObject instr = body["instrument"].toObject();
     if (!instr.isEmpty()) {
+        const QString msId      = instr["musescore_id"].toString();
         const QString longName  = instr["name"].toString(name);
         const QString shortName = instr["short_name"].toString();
+        if (!msId.isEmpty()) {
+            Instrument inst;
+            inst.setId(String(msId));
+            inst.setLongName(String(longName));
+            inst.setShortName(String(shortName));
+            part->setInstrument(inst);
+        }
         part->setLongNameAll(String(longName));
         part->setShortNameAll(String(shortName));
     }
@@ -1211,10 +1220,18 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPartInstrument(const QJsonO
         return errorResponse(422,
                              "instrument required");
     }
+    const QString msId      = instr["musescore_id"].toString();
     const QString longName  = instr["name"].toString();
     const QString shortName = instr["short_name"].toString();
 
     score->startCmd(TranslatableString("test", "set part instrument"));
+    if (!msId.isEmpty()) {
+        Instrument inst;
+        inst.setId(String(msId));
+        inst.setLongName(String(longName));
+        inst.setShortName(String(shortName));
+        part->setInstrument(inst);
+    }
     part->setPartName(String(longName));
     part->setLongNameAll(String(longName));
     part->setShortNameAll(String(shortName));
