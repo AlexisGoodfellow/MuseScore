@@ -27,6 +27,7 @@
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/engravingitem.h"
 #include "engraving/dom/factory.h"
+#include "engraving/dom/instrument.h"
 #include "engraving/dom/measure.h"
 #include "engraving/dom/note.h"
 #include "engraving/dom/noteval.h"
@@ -844,21 +845,31 @@ bool ScoreApplicator::applyAddPart(Score* score, const QJsonObject& op)
     Part* part = new Part(score);
     part->setPartName(String(name));
 
-    // Short name from instrument if provided.
     const QJsonObject instr = op["instrument"].toObject();
     if (!instr.isEmpty()) {
+        const QString msId      = instr["musescore_id"].toString();
         const QString longName  = instr["name"].toString(name);
         const QString shortName = instr["short_name"].toString();
+        if (!msId.isEmpty()) {
+            Instrument inst;
+            inst.setId(String(msId));
+            inst.setLongName(String(longName));
+            inst.setShortName(String(shortName));
+            part->setInstrument(inst);
+        }
         part->setLongNameAll(String(longName));
         part->setShortNameAll(String(shortName));
     }
 
+    // Use undoInsertStaff + undoInsertPart (not appendPart/appendStaff)
+    // so that MuseScore creates the initial KeySig, TimeSig, and Clef
+    // for the new staves — matching the editor's actionAddPart behavior.
     score->startCmd(TranslatableString("undoableAction", "Add part"));
-    score->appendPart(part);
     for (int i = 0; i < staffCount; ++i) {
         Staff* staff = Factory::createStaff(part);
-        score->appendStaff(staff);
+        score->undoInsertStaff(staff, static_cast<staff_idx_t>(i), false);
     }
+    score->undoInsertPart(part, score->parts().size());
     score->endCmd();
 
     m_partUuidToPart[uuid] = part;
@@ -894,11 +905,17 @@ bool ScoreApplicator::applySetPartInstrument(Score* score, const QJsonObject& op
         return false;
     }
     Part* part = m_partUuidToPart.value(uuid);
+    const QString msId      = instr["musescore_id"].toString();
     const QString longName  = instr["name"].toString();
     const QString shortName = instr["short_name"].toString();
-    // Update display names only; full playback-instrument change (transposition,
-    // MIDI bank, etc.) requires the InstrumentChange API and is deferred.
     score->startCmd(TranslatableString("undoableAction", "Set part instrument"));
+    if (!msId.isEmpty()) {
+        Instrument inst;
+        inst.setId(String(msId));
+        inst.setLongName(String(longName));
+        inst.setShortName(String(shortName));
+        part->setInstrument(inst);
+    }
     part->setPartName(String(longName));
     part->setLongNameAll(String(longName));
     part->setShortNameAll(String(shortName));
