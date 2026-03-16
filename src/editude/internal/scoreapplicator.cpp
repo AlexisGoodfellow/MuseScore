@@ -865,15 +865,17 @@ bool ScoreApplicator::applyAddPart(Score* score, const QJsonObject& op)
         part->setShortNameAll(String(shortName));
     }
 
-    // Use undoInsertStaff + undoInsertPart (not appendPart/appendStaff)
-    // so that MuseScore creates the initial KeySig, TimeSig, and Clef
-    // for the new staves — matching the editor's actionAddPart behavior.
+    // Insert Part FIRST, then staves.  During undo (reversed order),
+    // staves are removed before the Part.  The previous staves-first
+    // ordering caused InsertPart::undo to call removePart while the
+    // Part's staves were still in Score::m_staves — rebuildMidiMapping
+    // then processed orphaned staves, corrupting state.
     score->startCmd(TranslatableString("undoableAction", "Add part"));
+    score->undoInsertPart(part, score->parts().size());
     for (int i = 0; i < staffCount; ++i) {
         Staff* staff = Factory::createStaff(part);
         score->undoInsertStaff(staff, static_cast<staff_idx_t>(i), false);
     }
-    score->undoInsertPart(part, score->parts().size());
     score->endCmd();
 
     m_partUuidToPart[uuid] = part;

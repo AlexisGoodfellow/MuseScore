@@ -841,14 +841,15 @@ EditudeTestServer::Reply EditudeTestServer::actionAddPart(const QJsonObject& bod
         part->setShortNameAll(String(shortName));
     }
 
-    // Follow MuseScore's own pattern: insert staves first, then the part.
-    // (See Score::appendPart(const InstrumentTemplate*) for reference.)
+    // Insert Part FIRST, then staves — same rationale as applyAddPart.
+    // During undo (reversed), staves are removed before the Part, so
+    // removePart doesn't encounter orphaned staves in Score::m_staves.
     score->startCmd(TranslatableString("test", "add part"));
+    score->undoInsertPart(part, score->parts().size());
     for (int i = 0; i < staffCount; ++i) {
         Staff* staff = Factory::createStaff(part);
         score->undoInsertStaff(staff, static_cast<staff_idx_t>(i), false);
     }
-    score->undoInsertPart(part, score->parts().size());
     score->endCmd();
 
     return okResponse();
