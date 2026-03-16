@@ -850,12 +850,16 @@ bool ScoreApplicator::applyAddPart(Score* score, const QJsonObject& op)
         const QString msId      = instr["musescore_id"].toString();
         const QString longName  = instr["name"].toString(name);
         const QString shortName = instr["short_name"].toString();
-        if (!msId.isEmpty()) {
-            Instrument inst;
-            inst.setId(String(msId));
-            inst.setLongName(String(longName));
-            inst.setShortName(String(shortName));
-            part->setInstrument(inst);
+        // Modify the Part's existing default Instrument in-place rather than
+        // replacing it.  Part() already initialises a properly constructed
+        // Instrument at tick -1; calling setInstrument() with a minimal stack
+        // Instrument creates a second InstrumentList entry at a different tick
+        // and leaves the list in a state that asserts during undo.
+        Instrument* existing = part->instrument();
+        if (existing && !msId.isEmpty()) {
+            existing->setId(String(msId));
+            existing->setLongName(String(longName));
+            existing->setShortName(String(shortName));
         }
         part->setLongNameAll(String(longName));
         part->setShortNameAll(String(shortName));
@@ -909,12 +913,12 @@ bool ScoreApplicator::applySetPartInstrument(Score* score, const QJsonObject& op
     const QString longName  = instr["name"].toString();
     const QString shortName = instr["short_name"].toString();
     score->startCmd(TranslatableString("undoableAction", "Set part instrument"));
-    if (!msId.isEmpty()) {
-        Instrument inst;
-        inst.setId(String(msId));
-        inst.setLongName(String(longName));
-        inst.setShortName(String(shortName));
-        part->setInstrument(inst);
+    // Modify existing Instrument in-place — same rationale as applyAddPart.
+    Instrument* existing = part->instrument();
+    if (existing && !msId.isEmpty()) {
+        existing->setId(String(msId));
+        existing->setLongName(String(longName));
+        existing->setShortName(String(shortName));
     }
     part->setPartName(String(longName));
     part->setLongNameAll(String(longName));

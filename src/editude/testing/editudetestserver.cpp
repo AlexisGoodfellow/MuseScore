@@ -827,12 +827,15 @@ EditudeTestServer::Reply EditudeTestServer::actionAddPart(const QJsonObject& bod
         const QString msId      = instr["musescore_id"].toString();
         const QString longName  = instr["name"].toString(name);
         const QString shortName = instr["short_name"].toString();
-        if (!msId.isEmpty()) {
-            Instrument inst;
-            inst.setId(String(msId));
-            inst.setLongName(String(longName));
-            inst.setShortName(String(shortName));
-            part->setInstrument(inst);
+        // Modify the Part's existing default Instrument in-place.
+        // Part() already creates a properly-initialised Instrument at tick -1;
+        // calling setInstrument() with a minimal stack Instrument inserts a
+        // second entry at a different tick and triggers an assertion during undo.
+        Instrument* existing = part->instrument();
+        if (existing && !msId.isEmpty()) {
+            existing->setId(String(msId));
+            existing->setLongName(String(longName));
+            existing->setShortName(String(shortName));
         }
         part->setLongNameAll(String(longName));
         part->setShortNameAll(String(shortName));
@@ -1225,12 +1228,12 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPartInstrument(const QJsonO
     const QString shortName = instr["short_name"].toString();
 
     score->startCmd(TranslatableString("test", "set part instrument"));
-    if (!msId.isEmpty()) {
-        Instrument inst;
-        inst.setId(String(msId));
-        inst.setLongName(String(longName));
-        inst.setShortName(String(shortName));
-        part->setInstrument(inst);
+    // Modify existing Instrument in-place — same rationale as actionAddPart.
+    Instrument* existing = part->instrument();
+    if (existing && !msId.isEmpty()) {
+        existing->setId(String(msId));
+        existing->setLongName(String(longName));
+        existing->setShortName(String(shortName));
     }
     part->setPartName(String(longName));
     part->setLongNameAll(String(longName));
