@@ -35,6 +35,7 @@
 #include "project/types/projecttypes.h"
 
 #include "engraving/dom/engravingitem.h"
+#include "engraving/dom/part.h"
 #include "notation/internal/igetscore.h"
 #include "log.h"
 #include "qml/Editude/editudeannotationmodel.h"
@@ -103,11 +104,13 @@ void EditudeService::start()
         });
     });
 
-    m_playbackController()->isPlayingChanged().onNotify(
-        this,
-        [this]() {
-            onPlaybackStateChanged();
-        });
+    if (m_playbackController()) {
+        m_playbackController()->isPlayingChanged().onNotify(
+            this,
+            [this]() {
+                onPlaybackStateChanged();
+            });
+    }
 }
 
 void EditudeService::openScoreForSession()
@@ -176,11 +179,50 @@ void EditudeService::onServerMessage(const QString& text)
             }
             m_applyingRemote = false;
             LOGD() << "[editude] applied" << syncOps.size() << "sync ops from peers";
+
+            // Sync part registrations from the applicator into the translator.
+            // When applyAddPart adopts an existing Part* (bootstrap de-dup), only
+            // the applicator's m_partUuidToPart is updated.  The translator's
+            // m_knownPartUuids must also learn about these parts; otherwise the
+            // next onScoreChanges() call (e.g. from MuseScore internal init)
+            // would generate spurious lazy AddPart ops for "unknown" parts.
+            for (auto it = m_applicator.partUuidToPart().cbegin();
+                 it != m_applicator.partUuidToPart().cend(); ++it) {
+                m_translator.registerKnownPart(it.value(), it.key());
+            }
         }
 
         m_serverRevision = msg.value("server_revision").toInt(m_serverRevision);
         LOGD() << "[editude] joined/rejoined project" << m_projectId
                << "at revision" << m_serverRevision;
+
+        // Bootstrap: send AddPart ops for any parts in the local score that are
+        // not yet known to the server (e.g. parts loaded from the blank MSCX file
+        // before any OT session was established). This lets the server's
+        // ProjectSession discover pre-existing parts so element ops succeed.
+        if (m_score && m_serverRevision == 0) {
+            const QVector<QJsonObject> bootstrapOps = m_translator.bootstrapPartsFromScore(
+                m_score,
+                [this](mu::engraving::Part* part, const QString& uuid) {
+                    m_applicator.registerPart(part, uuid);
+                });
+            if (!bootstrapOps.isEmpty() && m_socket) {
+                QJsonArray opsArray;
+                for (const QJsonObject& op : bootstrapOps) {
+                    opsArray.append(op);
+                }
+                QJsonObject batch;
+                batch["type"]          = QStringLiteral("op_batch");
+                batch["batch_id"]      = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                batch["base_revision"] = 0;
+                batch["ops"]           = opsArray;
+                m_socket->sendTextMessage(
+                    QJsonDocument(batch).toJson(QJsonDocument::Compact));
+                LOGD() << "[editude] bootstrapped" << bootstrapOps.size()
+                       << "pre-existing parts from MSCX";
+            }
+        }
+
         fetchAnnotations();
 
         // Drain batches buffered during the offline window.  Each batch retains
@@ -237,6 +279,13 @@ void EditudeService::onServerMessage(const QString& text)
             m_applyingRemote = true;
             m_applicator.apply(m_score, payload);
             m_applyingRemote = false;
+            // Sync any new part registrations from applicator to translator
+            // so subsequent onScoreChanges() calls don't generate spurious
+            // lazy AddPart ops for parts added by remote peers.
+            for (auto it = m_applicator.partUuidToPart().cbegin();
+                 it != m_applicator.partUuidToPart().cend(); ++it) {
+                m_translator.registerKnownPart(it.value(), it.key());
+            }
         });
 
     } else if (type == "op_batch") {
@@ -261,6 +310,11 @@ void EditudeService::onServerMessage(const QString& text)
             m_applyingRemote = true;
             m_applicator.apply(m_score, msg);
             m_applyingRemote = false;
+            // Sync part registrations (see "op" handler comment above).
+            for (auto it = m_applicator.partUuidToPart().cbegin();
+                 it != m_applicator.partUuidToPart().cend(); ++it) {
+                m_translator.registerKnownPart(it.value(), it.key());
+            }
         });
 
     } else if (type == "presence") {
@@ -377,6 +431,10 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
         return;
     }
 
+    LOGD() << "[editude] onScoreChanges: changedObjects=" << changes.changedObjects.size()
+           << "state=" << static_cast<int>(m_state)
+           << "socket=" << (m_socket != nullptr);
+
     // Diff the current metaTags against the last known snapshot to detect
     // changes made via score->setMetaTag(), which bypasses the undo system
     // and does not appear in changedObjects or changedPropertyIdSet.
@@ -400,13 +458,13 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
     const QVector<QJsonObject> ops = m_translator.translateAll(
         changes.changedObjects,
         changes.changedPropertyIdSet,
-        m_projectId,
         m_applicator.elementToUuid(),
         changedMetaTags);
 
     QVector<QJsonObject> allOps = ops;
 
     if (allOps.isEmpty()) {
+        LOGD() << "[editude] onScoreChanges: translateAll produced 0 ops, dropping";
         return;
     }
 
@@ -428,10 +486,14 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
             batch["ops"]           = opsArray;
             m_bufferedOps.append(batch);
         }
+        LOGD() << "[editude] onScoreChanges: buffered" << allOps.size() << "ops (reconnecting)";
         return;
     }
 
     if (m_state != State::Live || !m_socket) {
+        LOGW() << "[editude] onScoreChanges: NOT sending" << allOps.size()
+               << "ops — state=" << static_cast<int>(m_state)
+               << "socket=" << (m_socket != nullptr);
         return;
     }
 
@@ -441,6 +503,11 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
     msg["client_seq"]    = ++m_clientSeq;
     msg["base_revision"] = baseRevision;
     msg["ops"]           = opsArray;
+
+    for (const QJsonObject& op : allOps) {
+        LOGD() << "[editude] onScoreChanges: sending op type=" << op.value("type").toString()
+               << "base_rev=" << baseRevision;
+    }
     m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
 }
 
@@ -708,6 +775,41 @@ void EditudeService::connectToSession(const QString& sessionUrl)
     m_snapshotRevision = 0;
     m_tokenExpiry = 0;
 
+    // Reset OT subsystems so stale Part*/Element* ↔ UUID mappings from the
+    // previous project don't leak into the new session.
+    m_translator.reset();
+    m_applicator.reset();
+    m_lastKnownMetaTags.clear();
+
+    // Undo ALL local changes to restore the score to its pristine template
+    // state.  Each test session must start from a clean, known score —
+    // accumulated edits from previous tests (time-signature changes, added
+    // parts, etc.) would otherwise confound subsequent tests.
+    //
+    // Guard with m_applyingRemote: each undoRedo fires changesChannel →
+    // onScoreChanges → translateAll.  Without the guard, translateAll would
+    // lazily register the template part (resolvePartUuid), and bootstrap
+    // would then skip it — leaving the server without an AddPart for the
+    // template.  The guard causes onScoreChanges to return immediately.
+    if (m_score) {
+        m_applyingRemote = true;
+        while (m_score->undoStack()->canUndo()) {
+            m_score->undoRedo(true, nullptr);
+        }
+        m_applyingRemote = false;
+
+        // Re-populate the metaTags snapshot from the pristine score so the
+        // first onScoreChanges after this connectToSession doesn't see every
+        // existing tag as "changed" and emit spurious SetScoreMetadata ops.
+        // (onNotationChanged does this for first-time score load, but
+        // connectToSession bypasses onNotationChanged on reconnects.)
+        m_lastKnownMetaTags.clear();
+        for (const auto& [k, v] : m_score->metaTags()) {
+            m_lastKnownMetaTags[QString::fromStdU16String(k.toStdU16String())]
+                = QString::fromStdU16String(v.toStdU16String());
+        }
+    }
+
     // Set new session URL and trigger the bootstrap fetch — same logic as start()
     m_sessionUrl = sessionUrl;
 
@@ -751,10 +853,8 @@ void EditudeService::connectToSession(const QString& sessionUrl)
                     this, &EditudeService::onReconnectTimer);
         }
 
-        // If a score is already loaded, connect the WebSocket immediately.
-        // Both clients started the session from the same synchronised score state,
-        // so there is no need to reload from disk on every test — the relative ops
-        // will keep both sides consistent.
+        // Score is already loaded (undo-all above restored it to pristine
+        // state).  Connect the WebSocket immediately.
         if (m_score != nullptr) {
             m_wsEverConnected = true;
             scheduleTokenRefresh();
@@ -762,11 +862,10 @@ void EditudeService::connectToSession(const QString& sessionUrl)
             return;
         }
 
-        // No score loaded yet (first /connect after startup).  Defer the openProject()
-        // call to the next event-loop iteration so it runs outside the network-reply
-        // callback stack.  openProject() calls openPageIfNeed() which triggers QML
-        // navigation — doing that synchronously inside a QNetworkReply::finished
-        // handler can crash on some platforms.
+        // No score loaded yet (first /connect after startup).  Defer the
+        // openProject() call to the next event-loop iteration so it runs
+        // outside the QNetworkReply::finished callback stack — openProject()
+        // triggers QML navigation that must not be called re-entrantly.
         QTimer::singleShot(0, this, [this]() {
             if (m_score == nullptr) {
                 openScoreForSession();

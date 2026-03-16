@@ -21,6 +21,7 @@
  */
 #include "operationtranslator.h"
 
+#include <algorithm>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QSet>
@@ -41,6 +42,7 @@
 #include "engraving/dom/measure.h"
 #include "engraving/dom/part.h"
 #include "engraving/dom/slur.h"
+#include "engraving/dom/staff.h"
 #include "engraving/dom/tempotext.h"
 #include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
@@ -98,16 +100,85 @@ QString OperationTranslator::uuidForChordRest(
 }
 
 // ---------------------------------------------------------------------------
+// resolvePartUuid — look up or lazily register a Part's editude UUID.
+// ---------------------------------------------------------------------------
+QString OperationTranslator::resolvePartUuid(Part* part, QVector<QJsonObject>& lazyAddPartOps)
+{
+    if (!part) {
+        return {};
+    }
+    auto it = m_knownPartUuids.find(part);
+    if (it != m_knownPartUuids.end()) {
+        return it.value();
+    }
+    // Part not yet registered (loaded from MSCX before any OT session).
+    // Assign a UUID, emit AddPart so the server learns about this part,
+    // and record the mapping for all subsequent ops in this session.
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_knownPartUuids[part] = uuid;
+    lazyAddPartOps.append(buildAddPart(part, uuid));
+    return uuid;
+}
+
+// ---------------------------------------------------------------------------
+// registerKnownPart — external registration (e.g. after sync adopt).
+// ---------------------------------------------------------------------------
+void OperationTranslator::registerKnownPart(Part* part, const QString& uuid)
+{
+    if (part && !uuid.isEmpty()) {
+        m_knownPartUuids[part] = uuid;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// reset — clear all internal state for a fresh session.
+// ---------------------------------------------------------------------------
+void OperationTranslator::reset()
+{
+    m_knownPartUuids.clear();
+    m_localUuidToElement.clear();
+    m_localElementToUuid.clear();
+}
+
+// ---------------------------------------------------------------------------
+// bootstrapPartsFromScore — register pre-existing MSCX parts.
+// ---------------------------------------------------------------------------
+QVector<QJsonObject> OperationTranslator::bootstrapPartsFromScore(
+    Score* score,
+    std::function<void(Part*, const QString&)> registerCallback)
+{
+    if (!score) {
+        return {};
+    }
+    QVector<QJsonObject> ops;
+    for (Part* part : score->parts()) {
+        if (!part || m_knownPartUuids.contains(part)) {
+            continue;
+        }
+        const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        m_knownPartUuids[part] = uuid;
+        ops.append(buildAddPart(part, uuid));
+        if (registerCallback) {
+            registerCallback(part, uuid);
+        }
+    }
+    return ops;
+}
+
+// ---------------------------------------------------------------------------
 // translateAll — main dispatch
 // ---------------------------------------------------------------------------
 QVector<QJsonObject> OperationTranslator::translateAll(
     const std::map<EngravingObject*, std::unordered_set<CommandType>>& changedObjects,
     const PropertyIdSet& changedPropertyIdSet,
-    const QString& partId,
     const QHash<EngravingObject*, QString>& remoteElementToUuid,
     const QMap<QString, QString>& changedMetaTags)
 {
     QVector<QJsonObject> ops;
+    // AddPart ops for MSCX-loaded parts discovered lazily during this batch.
+    // These must be prepended to ops so the server knows about the parts before
+    // the element ops that reference them.
+    QVector<QJsonObject> lazyAddPartOps;
 
     // ── Pass 1: Group newly-added Notes by parent Chord ───────────────────
     //
@@ -137,37 +208,112 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     // ── Pass 2: InsertNote / InsertChord ──────────────────────────────────
     QSet<EngravingObject*> handledNotes;
     for (const auto& [chord, notes] : newChordNotes.asKeyValueRange()) {
+        // Skip elements with unsupported duration types (e.g. V_MEASURE for
+        // measure rests created during MuseScore's internal initialisation).
+        if (durationTypeName(chord->durationType().type()) == QLatin1String("unknown")) {
+            continue;
+        }
+        Part* chordPart = chord->staff() ? chord->staff()->part() : nullptr;
+        const QString chordPartUuid = resolvePartUuid(chordPart, lazyAddPartOps);
+        if (chordPartUuid.isEmpty()) {
+            continue; // no part available — skip
+        }
         const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
         if (notes.size() == 1) {
             // Single-note chord: UUID lives on the Note* (mirrors applyInsertNote).
             Note* n = notes[0];
             m_localElementToUuid[n]    = uuid;
             m_localUuidToElement[uuid] = n;
-            ops.append(buildInsertNote(n, uuid, partId));
+            ops.append(buildInsertNote(n, uuid, chordPartUuid));
         } else {
             // Multi-note chord: UUID lives on the Chord* (mirrors applyInsertChord).
             m_localElementToUuid[chord]  = uuid;
             m_localUuidToElement[uuid]   = chord;
-            ops.append(buildInsertChord(chord, notes, uuid, partId));
+            ops.append(buildInsertChord(chord, notes, uuid, chordPartUuid));
         }
         for (Note* n : notes) {
             handledNotes.insert(n);
         }
     }
 
-    // ── Pass 3: InsertRest ────────────────────────────────────────────────
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || !cmds.count(CommandType::AddElement)) {
-            continue;
+    // ── Pass 3: InsertRest (with fill-rest suppression) ──────────────────
+    //
+    // setNoteRest() creates the target element AND "fill rests" to pad the
+    // remaining measure duration.  On the peer, applying the primary op
+    // (InsertNote/InsertRest/InsertChord) via setNoteRest produces its own
+    // fills, so emitting InsertRest for fills would double-apply and corrupt
+    // the score.
+    //
+    // Suppression rules:
+    //   (a) Pass 2 emitted InsertNote/InsertChord → ALL rests are fills.
+    //   (b) Batch removes Notes (chord deletion creates fill rests) →
+    //       suppress all rests.
+    //   (c) Pure InsertRest: emit only the single rest at the earliest tick;
+    //       the remainder are fills from setNoteRest.
+    {
+        const bool hasNewChords = !newChordNotes.isEmpty();
+
+        // Pre-scan: does this batch remove any Notes?
+        bool hasNoteRemovals = false;
+        if (!hasNewChords) {
+            for (const auto& [obj, cmds] : changedObjects) {
+                if (!obj || !cmds.count(CommandType::RemoveElement)) {
+                    continue;
+                }
+                if (obj->type() == ElementType::NOTE) {
+                    hasNoteRemovals = true;
+                    break;
+                }
+            }
         }
-        if (obj->type() != ElementType::REST) {
-            continue;
+
+        if (!hasNewChords && !hasNoteRemovals) {
+            // Collect valid InsertRest candidates.
+            struct RestCandidate {
+                Rest* rest;
+                Fraction tick;
+                QString partUuid;
+            };
+            QVector<RestCandidate> candidates;
+
+            for (const auto& [obj, cmds] : changedObjects) {
+                if (!obj || !cmds.count(CommandType::AddElement)) {
+                    continue;
+                }
+                if (obj->type() != ElementType::REST) {
+                    continue;
+                }
+                Rest* rest = static_cast<Rest*>(obj);
+                if (durationTypeName(rest->durationType().type())
+                    == QLatin1String("unknown")) {
+                    continue;
+                }
+                Part* restPart = rest->staff() ? rest->staff()->part()
+                                               : nullptr;
+                const QString restPartUuid =
+                    resolvePartUuid(restPart, lazyAddPartOps);
+                if (restPartUuid.isEmpty()) {
+                    continue;
+                }
+                candidates.append({rest, rest->tick(), restPartUuid});
+            }
+
+            if (!candidates.isEmpty()) {
+                // Sort by tick — emit only the earliest (the primary rest).
+                std::sort(candidates.begin(), candidates.end(),
+                          [](const RestCandidate& a, const RestCandidate& b) {
+                              return a.tick < b.tick;
+                          });
+                const auto& c = candidates.first();
+                const QString uuid =
+                    QUuid::createUuid().toString(QUuid::WithoutBraces);
+                m_localElementToUuid[c.rest] = uuid;
+                m_localUuidToElement[uuid]   = c.rest;
+                ops.append(buildInsertRest(c.rest, uuid, c.partUuid));
+            }
         }
-        Rest* rest             = static_cast<Rest*>(obj);
-        const QString uuid     = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        m_localElementToUuid[rest]   = uuid;
-        m_localUuidToElement[uuid]   = rest;
-        ops.append(buildInsertRest(rest, uuid, partId));
+        // else: hasNewChords || hasNoteRemovals — all rests are fill rests
+        // created as side effects; skip the entire pass.
     }
 
     // ── Pass 4: AddChordNote (notes added to existing chords) ────────────
@@ -195,19 +341,41 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     }
 
     // ── Pass 5: SetTimeSignature & SetTempo ───────────────────────────────
+    // A TimeSig may appear with AddElement (new time sig added) OR
+    // ChangeProperty (existing time sig modified by cmdAddTimeSig).
+    bool emittedTimeSig = false;
     for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || !cmds.count(CommandType::AddElement)) {
+        if (!obj) {
             continue;
         }
-        if (obj->type() == ElementType::TIMESIG) {
+        if (obj->type() == ElementType::TIMESIG
+            && (cmds.count(CommandType::AddElement)
+                || cmds.count(CommandType::ChangeProperty))) {
             auto* ts = toTimeSig(static_cast<EngravingItem*>(obj));
             if (ts) {
                 ops.append(buildSetTimeSignature(ts));
+                emittedTimeSig = true;
             }
         }
-        if (obj->type() == ElementType::TEMPO_TEXT) {
+        if (obj->type() == ElementType::TEMPO_TEXT
+            && cmds.count(CommandType::AddElement)) {
             ops.append(buildSetTempo(static_cast<TempoText*>(obj)));
         }
+    }
+
+    // SetTimeSignature is a compound op: cmdAddTimeSig on the receiver
+    // calls rewriteMeasures which restructures measure boundaries, creates/
+    // removes rests, etc.  All other changes in this batch (InsertRest,
+    // DeleteEvent, InsertBeats, …) are side effects of the same rewrite and
+    // must NOT be emitted — applying them on the peer would double-apply and
+    // corrupt the score or crash during layout.
+    if (emittedTimeSig) {
+        if (!lazyAddPartOps.isEmpty()) {
+            QVector<QJsonObject> result = lazyAddPartOps;
+            result.append(ops);
+            return result;
+        }
+        return ops;
     }
 
     // ── Pass 6: RemoveElement ─────────────────────────────────────────────
@@ -272,11 +440,17 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     }
 
     // ── Pass 7: ChangePitch → SetPitch ────────────────────────────────────
+    // Accept both CommandType::ChangePitch (interactive pitch change via
+    // Score::changePitch) and CommandType::ChangeProperty with Pid::PITCH
+    // (programmatic pitch change via undoChangeProperty).
     for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || !cmds.count(CommandType::ChangePitch)) {
+        if (!obj || obj->type() != ElementType::NOTE) {
             continue;
         }
-        if (obj->type() != ElementType::NOTE) {
+        const bool hasPitchChange = cmds.count(CommandType::ChangePitch)
+            || (cmds.count(CommandType::ChangeProperty)
+                && changedPropertyIdSet.count(Pid::PITCH));
+        if (!hasPitchChange) {
             continue;
         }
         const QString uuid = uuidForElement(obj, remoteElementToUuid);
@@ -305,19 +479,18 @@ QVector<QJsonObject> OperationTranslator::translateAll(
 
     // ── Pass 9: AddPart / RemovePart ─────────────────────────────────────
     // MuseScore may emit Part objects through changesChannel when a part is
-    // added or removed. Guard with ElementType::PART; if parts don't appear
-    // in changedObjects (score-level change not propagated), this pass is a
-    // no-op and the user's local part edits will not be transmitted.
+    // added or removed.  Accept both AddElement (generic) and InsertPart /
+    // RemovePart (specific undo commands from undoInsertPart/undoRemovePart).
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::PART) {
             continue;
         }
         Part* part = static_cast<Part*>(obj);
-        if (cmds.count(CommandType::AddElement)) {
+        if (cmds.count(CommandType::AddElement) || cmds.count(CommandType::InsertPart)) {
             const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_knownPartUuids[part] = uuid;
             ops.append(buildAddPart(part, uuid));
-        } else if (cmds.count(CommandType::RemoveElement)) {
+        } else if (cmds.count(CommandType::RemoveElement) || cmds.count(CommandType::RemovePart)) {
             const QString uuid = m_knownPartUuids.value(part);
             if (!uuid.isEmpty()) {
                 m_knownPartUuids.remove(part);
@@ -326,7 +499,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 10: SetPartName / SetStaffCount / SetPartInstrument ─────────
+    // ── Pass 10: SetPartName / SetPartInstrument ────────────────────────
     if (changedPropertyIdSet.count(Pid::STAFF_LONG_NAME)) {
         for (const auto& [obj, cmds] : changedObjects) {
             if (!obj || obj->type() != ElementType::PART) {
@@ -341,6 +514,30 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 continue;
             }
             ops.append(buildSetPartName(uuid, part->partName().toQString()));
+            ops.append(buildSetPartInstrument(uuid, part));
+        }
+    }
+
+    // ── Pass 10b: SetStaffCount (InsertStaff / RemoveStaff) ──────────────
+    {
+        QSet<Part*> staffChangedParts;
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || obj->type() != ElementType::STAFF) {
+                continue;
+            }
+            if (!cmds.count(CommandType::InsertStaff)
+                && !cmds.count(CommandType::RemoveStaff)) {
+                continue;
+            }
+            auto* staff = static_cast<Staff*>(obj);
+            Part* part = staff->part();
+            if (part && !staffChangedParts.contains(part)) {
+                staffChangedParts.insert(part);
+                const QString uuid = m_knownPartUuids.value(part);
+                if (!uuid.isEmpty()) {
+                    ops.append(buildSetStaffCount(uuid, static_cast<int>(part->nstaves())));
+                }
+            }
         }
     }
 
@@ -373,7 +570,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_localElementToUuid[harmony]  = uuid;
             m_localUuidToElement[uuid]     = harmony;
-            const Fraction tick = harmony->tick();
+            const Fraction tick = harmony->tick().reduced();
             ops.append(buildAddChordSymbol(uuid, tick.numerator(), tick.denominator(),
                                            harmony->harmonyName().toQString()));
         } else if (cmds.count(CommandType::RemoveElement)) {
@@ -400,14 +597,14 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             auto* ks = static_cast<KeySig*>(obj);
             Part* part = static_cast<EngravingItem*>(obj)->part();
             if (!part) continue;
-            const QString partUuid = m_knownPartUuids.value(part);
+            const QString partUuid = resolvePartUuid(part, lazyAddPartOps);
             if (partUuid.isEmpty()) continue;
             ops.append(buildSetKeySignature(ks, partUuid));
         } else if (obj->type() == ElementType::CLEF) {
             auto* clef = static_cast<Clef*>(obj);
             Part* part = static_cast<EngravingItem*>(obj)->part();
             if (!part) continue;
-            const QString partUuid = m_knownPartUuids.value(part);
+            const QString partUuid = resolvePartUuid(part, lazyAddPartOps);
             if (partUuid.isEmpty()) continue;
             // Local staff index within the part.
             const staff_idx_t globalStaff = clef->track() / VOICES;
@@ -434,7 +631,10 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_localElementToUuid[art]  = uuid;
             m_localUuidToElement[uuid] = art;
-            ops.append(buildAddArticulation(art, uuid, partId, eventUuid));
+            Part* artPart = cr->staff() ? cr->staff()->part() : nullptr;
+            const QString artPartUuid = resolvePartUuid(artPart, lazyAddPartOps);
+            if (artPartUuid.isEmpty()) continue;
+            ops.append(buildAddArticulation(art, uuid, artPartUuid, eventUuid));
         } else if (cmds.count(CommandType::RemoveElement)) {
             const QString uuid = uuidForElement(art, remoteElementToUuid);
             if (!uuid.isEmpty()) {
@@ -453,7 +653,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         auto* dyn = static_cast<Dynamic*>(obj);
         Part* dynPart = static_cast<EngravingItem*>(dyn)->part();
         if (!dynPart) continue;
-        const QString dynPartUuid = m_knownPartUuids.value(dynPart);
+        const QString dynPartUuid = resolvePartUuid(dynPart, lazyAddPartOps);
         if (dynPartUuid.isEmpty()) continue;
 
         if (cmds.count(CommandType::AddElement)) {
@@ -499,7 +699,10 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_localElementToUuid[slur]  = uuid;
             m_localUuidToElement[uuid]  = slur;
-            ops.append(buildAddSlur(slur, uuid, partId, startUuid, endUuid));
+            Part* slurPart = startCr->staff() ? startCr->staff()->part() : nullptr;
+            const QString slurPartUuid = resolvePartUuid(slurPart, lazyAddPartOps);
+            if (slurPartUuid.isEmpty()) continue;
+            ops.append(buildAddSlur(slur, uuid, slurPartUuid, startUuid, endUuid));
         } else if (cmds.count(CommandType::RemoveElement)) {
             const QString uuid = uuidForElement(slur, remoteElementToUuid);
             if (!uuid.isEmpty()) {
@@ -518,7 +721,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         auto* hp = static_cast<Hairpin*>(obj);
         Part* hpPart = static_cast<EngravingItem*>(hp)->part();
         if (!hpPart) continue;
-        const QString hpPartUuid = m_knownPartUuids.value(hpPart);
+        const QString hpPartUuid = resolvePartUuid(hpPart, lazyAddPartOps);
         if (hpPartUuid.isEmpty()) continue;
 
         if (cmds.count(CommandType::AddElement)) {
@@ -548,7 +751,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (cmds.count(CommandType::AddElement)) {
             Part* tupPart = static_cast<EngravingItem*>(tup)->part();
             if (!tupPart) continue;
-            const QString tupPartUuid = m_knownPartUuids.value(tupPart);
+            const QString tupPartUuid = resolvePartUuid(tupPart, lazyAddPartOps);
             if (tupPartUuid.isEmpty()) continue;
 
             // Collect member UUIDs (members must already be registered from Pass 2/3).
@@ -598,7 +801,10 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_localElementToUuid[lyr]  = uuid;
             m_localUuidToElement[uuid] = lyr;
-            ops.append(buildAddLyric(lyr, uuid, partId, eventUuid,
+            Part* lyrPart = cr->staff() ? cr->staff()->part() : nullptr;
+            const QString lyrPartUuid = resolvePartUuid(lyrPart, lazyAddPartOps);
+            if (lyrPartUuid.isEmpty()) continue;
+            ops.append(buildAddLyric(lyr, uuid, lyrPartUuid, eventUuid,
                                      lyr->verse(),
                                      lyricSyllabicName(lyr->syllabic()),
                                      lyr->plainText().toQString()));
@@ -759,6 +965,13 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
+    // Prepend any lazily-generated AddPart ops so the server registers parts
+    // before processing the element ops that reference them.
+    if (!lazyAddPartOps.isEmpty()) {
+        QVector<QJsonObject> result = lazyAddPartOps;
+        result.append(ops);
+        return result;
+    }
     return ops;
 }
 
@@ -960,9 +1173,10 @@ QJsonObject OperationTranslator::pitchJson(int tpc, int octave)
 
 QJsonObject OperationTranslator::beatJson(const Fraction& tick)
 {
+    const Fraction r = tick.reduced();
     QJsonObject beat;
-    beat["numerator"]   = tick.numerator();
-    beat["denominator"] = tick.denominator();
+    beat["numerator"]   = r.numerator();
+    beat["denominator"] = r.denominator();
     return beat;
 }
 
@@ -1099,13 +1313,14 @@ QJsonObject OperationTranslator::buildSetTie(const QString& noteUuid, bool tieSt
 
 QJsonObject OperationTranslator::buildAddArticulation(EngravingObject* art,
                                                        const QString& uuid,
-                                                       const QString& /*partId*/,
+                                                       const QString& partId,
                                                        const QString& eventUuid)
 {
     auto* a = static_cast<Articulation*>(art);
     QJsonObject payload;
     payload["type"]         = QStringLiteral("AddArticulation");
     payload["id"]           = uuid;
+    payload["part_id"]      = partId;
     payload["event_id"]     = eventUuid;
     payload["articulation"] = articulationNameFromSymId(a->symId());
     return payload;
@@ -1160,13 +1375,14 @@ QJsonObject OperationTranslator::buildRemoveDynamic(const QString& uuid)
 
 QJsonObject OperationTranslator::buildAddSlur(EngravingObject* /*slur*/,
                                                const QString& uuid,
-                                               const QString& /*partId*/,
+                                               const QString& partId,
                                                const QString& startEventUuid,
                                                const QString& endEventUuid)
 {
     QJsonObject payload;
     payload["type"]           = QStringLiteral("AddSlur");
     payload["id"]             = uuid;
+    payload["part_id"]        = partId;
     payload["start_event_id"] = startEventUuid;
     payload["end_event_id"]   = endEventUuid;
     return payload;
@@ -1309,7 +1525,7 @@ static QString lyricSyllabicName(LyricsSyllabic s)
 
 QJsonObject OperationTranslator::buildAddLyric(EngravingObject* /*lyr*/,
                                                 const QString& uuid,
-                                                const QString& /*partId*/,
+                                                const QString& partId,
                                                 const QString& eventUuid,
                                                 int verse,
                                                 const QString& syllabic,
@@ -1318,6 +1534,7 @@ QJsonObject OperationTranslator::buildAddLyric(EngravingObject* /*lyr*/,
     QJsonObject payload;
     payload["type"]     = QStringLiteral("AddLyric");
     payload["id"]       = uuid;
+    payload["part_id"]  = partId;
     payload["event_id"] = eventUuid;
     payload["verse"]    = verse;
     payload["syllabic"] = syllabic;

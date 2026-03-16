@@ -50,12 +50,29 @@ public:
         return m_tier3ElementToUuid;
     }
 
+    // Read-only view of the part UUID → Part* map, used by EditudeService
+    // to sync part registrations from the applicator into the translator
+    // after applying sync ops.
+    const QHash<QString, mu::engraving::Part*>& partUuidToPart() const
+    {
+        return m_partUuidToPart;
+    }
+
     // Bootstraps m_partUuidToPart from ApplyAddPart registrations.
     // Call after loading a snapshot so that part-keyed ops (SetPartName,
     // SetKeySignature, SetClef, RemovePart) can resolve Part* by UUID.
     // Note: parts baked into an MSCZ snapshot do not carry editude UUIDs;
     // this map is populated incrementally via applyAddPart / applyRemovePart.
     void bootstrapPartMap(mu::engraving::Score* score);
+
+    // Clear all internal UUID ↔ element maps.  Called when connecting to a
+    // new project so stale mappings from the previous session are discarded.
+    void reset();
+
+    // Register an existing Part* with an editude UUID without creating a new part.
+    // Used when the OperationTranslator lazily assigns UUIDs to parts that were
+    // loaded from an MSCX file (rather than created via AddPart from the server).
+    void registerPart(mu::engraving::Part* part, const QString& uuid);
 
     // Shared static helpers — also used by EditudeTestServer.
     static int pitchToMidi(const QString& step, int octave, const QString& accidental);

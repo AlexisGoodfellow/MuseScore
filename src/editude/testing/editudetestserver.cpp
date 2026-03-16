@@ -4,6 +4,7 @@
 
 #include "editudetestserver.h"
 
+#include <QCoreApplication>
 #include <QEventLoop>
 #include <QHostAddress>
 #include <QJsonArray>
@@ -141,6 +142,11 @@ EditudeTestServer::Reply EditudeTestServer::handleHealth()
 
 EditudeTestServer::Reply EditudeTestServer::handleScore()
 {
+    // Flush any pending deferred applies (QTimer::singleShot(0) from the
+    // op/op_batch handlers) so the score DOM is consistent with
+    // m_serverRevision before we serialize.
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+
     if (m_svc->scoreForTest() == nullptr)
         return errorResponse(503, "score not ready");
     return { 200, QJsonDocument(serializeScore()).toJson(QJsonDocument::Compact) };
@@ -150,6 +156,14 @@ EditudeTestServer::Reply EditudeTestServer::handleWaitRevision(const QJsonObject
 {
     const int minRevision = body.value("min_revision").toInt();
     const int timeoutMs   = body.value("timeout_ms").toInt(5000);
+
+    // Flush any pending deferred applies before the fast-path check.
+    // The op/op_batch handlers update m_serverRevision immediately but defer
+    // the actual score mutation via QTimer::singleShot(0).  Without this
+    // flush, the fast path below can return "revision met" while the score
+    // DOM hasn't been mutated yet, causing a subsequent /score to see stale
+    // state.
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
 
     if (m_svc->serverRevisionForTest() >= minRevision) {
         return { 200, QJsonDocument(QJsonObject{
@@ -181,9 +195,12 @@ EditudeTestServer::Reply EditudeTestServer::handleWaitRevision(const QJsonObject
     }).toJson(QJsonDocument::Compact) };
 }
 
-EditudeTestServer::Reply EditudeTestServer::handleAction(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& body)
 {
     const QString action = body.value("action").toString();
+    LOGD() << "[editude-test] dispatchAction:" << action
+           << "state=" << m_svc->stateForTest()
+           << "rev=" << m_svc->serverRevisionForTest();
 
     if (action == QLatin1String("insert_note"))   return actionInsertNote(body);
     if (action == QLatin1String("insert_rest"))   return actionInsertRest(body);
@@ -230,6 +247,36 @@ EditudeTestServer::Reply EditudeTestServer::handleAction(const QJsonObject& body
     if (action == QLatin1String("set_score_metadata"))  return actionSetScoreMetadata(body);
 
     return errorResponse(400, QString("unknown action: %1").arg(action));
+}
+
+EditudeTestServer::Reply EditudeTestServer::handleAction(const QJsonObject& body)
+{
+    // Defer score mutation to the next event-loop iteration.  Action
+    // handlers call ScoreApplicator::apply() which runs startCmd →
+    // insertMeasure → endCmd → doLayoutRange.  Running that layout
+    // pass inside QTcpSocket::readyRead corrupts score-DOM pointers
+    // because Qt's scene-graph (NotationPaintView) still holds live
+    // references to the pre-edit layout data.  Deferring with
+    // QTimer::singleShot(0) matches the pattern used by
+    // EditudeService::onServerMessage for live ops (see lines 266-295
+    // of editudeservice.cpp).
+    Reply result;
+    QEventLoop loop;
+    QTimer::singleShot(0, this, [&]() {
+        result = dispatchAction(body);
+        loop.quit();
+    });
+    loop.exec();
+
+    // Flush pending events so that any WebSocket data queued by
+    // EditudeService::onScoreChanges (called synchronously during the
+    // action's endCmd → changesChannel) is actually written to the
+    // network before the HTTP response reaches the Python harness.
+    // Without this, the harness may call peer.wait_revision() before
+    // the editor's op_batch has left the process.
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+
+    return result;
 }
 
 EditudeTestServer::Reply EditudeTestServer::actionInsertNote(const QJsonObject& body)
@@ -416,8 +463,15 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPitch(const QJsonObject& bo
                              "invalid pitch");
     }
 
+    // Set PITCH, TPC1, and TPC2 together — setPitch(int) does NOT update
+    // TPC, so the translator's pitchJson(tpc1, octave) would read stale TPC
+    // and emit the wrong step+accidental.
+    const int tpc1 = note->tpc1default(midi);
+    const int tpc2 = note->tpc2default(midi);
     score->startCmd(TranslatableString("test", "set pitch"));
     note->undoChangeProperty(Pid::PITCH, midi);
+    note->undoChangeProperty(Pid::TPC1, tpc1);
+    note->undoChangeProperty(Pid::TPC2, tpc2);
     score->endCmd();
 
     return okResponse();
@@ -430,8 +484,13 @@ EditudeTestServer::Reply EditudeTestServer::actionUndo()
         return errorResponse(503,
                              "score not ready");
     }
+    // Use Score::undoRedo instead of bare undoStack()->undo().
+    // undoRedo calls update() (layout refresh), updateSelection(),
+    // and changesChannel().send() (OT op translation).  Without
+    // these the score DOM is left stale, causing SIGSEGV when the
+    // accessibility system or scene graph accesses it later.
     EditData ed;
-    score->undoStack()->undo(&ed);
+    score->undoRedo(true, &ed);
     return okResponse();
 }
 
@@ -499,8 +558,12 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
         { "short_name",   part->shortName().toQString() },
     };
 
+    const QString partUuid = uuidForPart(part);
+
     return QJsonObject{
-        { "id",          QString::fromStdString(part->id().toStdString()) },
+        { "id",          partUuid.isEmpty()
+                             ? QString::fromStdString(part->id().toStdString())
+                             : partUuid },
         { "instrument",  instrument },
         { "name",        QJsonValue::Null },
         { "staff_count", static_cast<int>(part->nstaves()) },
@@ -536,17 +599,21 @@ QJsonArray EditudeTestServer::serializePartEvents(Part* part)
                         continue;
                     }
                 }
-                const QString uuid = uuidForElement(el);
+                const QString uuid = uuidForChordRest(el);
                 if (uuid.isEmpty()) {
                     continue;
                 }
                 const Fraction tick = seg->tick();
-                if (el->isNote()) {
-                    events.append(serializeNote(toNote(el), uuid, tick));
-                } else if (el->isRest()) {
+                if (el->isRest()) {
                     events.append(serializeRest(toRest(el), uuid, tick));
                 } else if (el->isChord()) {
-                    events.append(serializeChord(toChord(el), uuid, tick));
+                    Chord* chord = toChord(el);
+                    if (chord->notes().size() == 1) {
+                        // Single-note chord → serialize as a "note" event.
+                        events.append(serializeNote(chord->notes().front(), uuid, tick));
+                    } else {
+                        events.append(serializeChord(chord, uuid, tick));
+                    }
                 }
             }
         }
@@ -653,6 +720,24 @@ mu::engraving::EngravingObject* EditudeTestServer::findByUuid(const QString& uui
     return nullptr;
 }
 
+QString EditudeTestServer::uuidForPart(Part* part) const
+{
+    // Check translator map (Part* → UUID).
+    const auto& knownParts = m_svc->translatorKnownPartUuids();
+    auto it = knownParts.find(part);
+    if (it != knownParts.end()) {
+        return it.value();
+    }
+    // Fall back to applicator map (UUID → Part*), reverse lookup.
+    const auto& applMap = m_svc->applicatorPartUuidToPart();
+    for (auto it2 = applMap.cbegin(); it2 != applMap.cend(); ++it2) {
+        if (it2.value() == part) {
+            return it2.key();
+        }
+    }
+    return QString();
+}
+
 QString EditudeTestServer::uuidForChordRest(EngravingObject* obj) const
 {
     const QString direct = uuidForElement(obj);
@@ -670,9 +755,10 @@ QString EditudeTestServer::uuidForChordRest(EngravingObject* obj) const
 
 QJsonObject EditudeTestServer::beatJson(const Fraction& tick)
 {
+    const Fraction r = tick.reduced();
     return QJsonObject{
-        { "numerator",   tick.numerator() },
-        { "denominator", tick.denominator() },
+        { "numerator",   r.numerator() },
+        { "denominator", r.denominator() },
     };
 }
 
@@ -729,18 +815,31 @@ EditudeTestServer::Reply EditudeTestServer::actionAddPart(const QJsonObject& bod
                              "score not ready");
     }
 
-    QJsonObject op = body;
-    op["type"] = "AddPart";
-    if (!op.contains("part_id")) {
-        op["part_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString name = body["name"].toString();
+    const int staffCount = body.value("staff_count").toInt(1);
+
+    Part* part = new Part(score);
+    part->setPartName(String(name));
+
+    const QJsonObject instr = body["instrument"].toObject();
+    if (!instr.isEmpty()) {
+        const QString longName  = instr["name"].toString(name);
+        const QString shortName = instr["short_name"].toString();
+        part->setLongNameAll(String(longName));
+        part->setShortNameAll(String(shortName));
     }
-    if (!op.contains("staff_count")) {
-        op["staff_count"] = 1;
+
+    // Follow MuseScore's own pattern: insert staves first, then the part.
+    // (See Score::appendPart(const InstrumentTemplate*) for reference.)
+    score->startCmd(TranslatableString("test", "add part"));
+    for (int i = 0; i < staffCount; ++i) {
+        Staff* staff = Factory::createStaff(part);
+        score->undoInsertStaff(staff, static_cast<staff_idx_t>(i), false);
     }
-    ScoreApplicator applicator;
-    return applicator.apply(score, op)
-        ? okResponse()
-        : errorResponse(500, "add_part failed");
+    score->undoInsertPart(part, score->parts().size());
+    score->endCmd();
+
+    return okResponse();
 }
 
 EditudeTestServer::Reply EditudeTestServer::actionRemovePart(const QJsonObject& body)
@@ -759,7 +858,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemovePart(const QJsonObject& 
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
     score->startCmd(TranslatableString("test", "remove part"));
-    score->removePart(part);
+    score->cmdRemovePart(part);
     score->endCmd();
     return okResponse();
 }
@@ -782,6 +881,10 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPartName(const QJsonObject&
     const QString name = body["name"].toString();
     score->startCmd(TranslatableString("test", "set part name"));
     part->setPartName(String(name));
+    part->setLongNameAll(String(name));
+    // Register a tracked ChangeProperty so the translator's Pass 10 detects
+    // the name change via Pid::STAFF_LONG_NAME on Part.
+    part->undoChangeProperty(Pid::STAFF_LONG_NAME, PropertyValue(String(name)));
     score->endCmd();
     return okResponse();
 }
@@ -813,9 +916,10 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStaffCount(const QJsonObjec
 
     score->startCmd(TranslatableString("test", "set staff count"));
     if (target > current) {
+        const staff_idx_t partStart = part->startTrack() / VOICES;
         for (int i = current; i < target; ++i) {
             Staff* staff = Factory::createStaff(part);
-            score->appendStaff(staff);
+            score->undoInsertStaff(staff, static_cast<staff_idx_t>(partStart + i), false);
         }
     } else {
         const staff_idx_t partStart = part->startTrack() / VOICES;
@@ -1114,6 +1218,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPartInstrument(const QJsonO
     part->setPartName(String(longName));
     part->setLongNameAll(String(longName));
     part->setShortNameAll(String(shortName));
+    part->undoChangeProperty(Pid::STAFF_LONG_NAME, PropertyValue(String(longName)));
     score->endCmd();
     return okResponse();
 }
@@ -2032,13 +2137,32 @@ EditudeTestServer::Reply EditudeTestServer::actionSetTempo(const QJsonObject& bo
         return errorResponse(503,
                              "score not ready");
     }
-    QJsonObject op = body;
-    op["type"] = "SetTempo";
-    ScoreApplicator applicator;
-    return applicator.apply(score, op)
-        ? okResponse()
-        : errorResponse(500,
-                        "set_tempo failed");
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const QJsonObject tempoObj = body["tempo"].toObject();
+    const double bpm = tempoObj["bpm"].toDouble(0.0);
+    if (bpm <= 0.0) {
+        return errorResponse(422,
+                             "invalid bpm");
+    }
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(422,
+                             "beat not found in score");
+    }
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+
+    score->startCmd(TranslatableString("test", "set tempo"));
+    TempoText* tt = Factory::createTempoText(seg);
+    tt->setTempo(BeatsPerSecond(bpm / 60.0));
+    tt->setParent(seg);
+    tt->setTrack(0);
+    score->undoAddElement(tt);
+    score->endCmd();
+
+    return okResponse();
 }
 
 EditudeTestServer::Reply EditudeTestServer::actionSetKeySignature(const QJsonObject& body)
@@ -2083,7 +2207,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetKeySignature(const QJsonObj
         KeySig* ks = Factory::createKeySig(seg);
         ks->setTrack(track);
         ks->setKey(key);
-        seg->add(ks);
+        ks->setParent(seg);
         score->undoAddElement(ks);
     }
     score->endCmd();
@@ -2210,7 +2334,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetChordSymbol(const QJsonObje
 
     const QString name = body["name"].toString();
     score->startCmd(TranslatableString("test", "set chord symbol"));
-    harmony->setHarmony(String(name));
+    harmony->undoChangeProperty(Pid::TEXT, PropertyValue(String(name)));
     score->endCmd();
     return okResponse();
 }

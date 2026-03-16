@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <functional>
 #include <map>
 #include <unordered_set>
 
@@ -34,6 +35,7 @@
 #include "engraving/dom/engravingobject.h"
 #include "engraving/dom/note.h"
 #include "engraving/dom/property.h"
+#include "engraving/dom/score.h"
 #include "engraving/types/types.h"
 
 namespace mu::engraving {
@@ -60,20 +62,55 @@ public:
     // The translator maintains its own m_localElementToUuid map for locally-
     //   inserted elements so that subsequent SetPitch / SetTrack / DeleteEvent
     //   ops targeting them can be emitted correctly.
+    //
+    // Part UUIDs are resolved from m_knownPartUuids. Parts not yet registered
+    // (e.g. loaded from MSCX before any OT session) are lazily assigned a UUID
+    // and an AddPart op is prepended to the output so the server learns about them.
     QVector<QJsonObject> translateAll(
         const std::map<mu::engraving::EngravingObject*,
                        std::unordered_set<mu::engraving::CommandType>>& changedObjects,
         const mu::engraving::PropertyIdSet& changedPropertyIdSet,
-        const QString& partId,
         const QHash<mu::engraving::EngravingObject*, QString>& remoteElementToUuid,
         const QMap<QString, QString>& changedMetaTags = {});
+
+    // Bootstraps m_knownPartUuids for all parts in the score that do not yet
+    // have an assigned editude UUID (e.g. parts loaded from an MSCX file).
+    // Returns AddPart ops for each newly registered part; the caller should
+    // send these to the server so it learns about the pre-existing parts.
+    // Also calls registerCallback(part, uuid) for each new part so the caller
+    // can register them in its ScoreApplicator.
+    QVector<QJsonObject> bootstrapPartsFromScore(
+        mu::engraving::Score* score,
+        std::function<void(mu::engraving::Part*, const QString&)> registerCallback = {});
+
+    // Register a known part in m_knownPartUuids without emitting an AddPart op.
+    // Used to sync part registrations from the applicator (e.g. after sync ops
+    // adopt existing parts) so that subsequent translateAll() calls do not
+    // generate spurious lazy AddPart ops.
+    void registerKnownPart(mu::engraving::Part* part, const QString& uuid);
+
+    // Clear all internal state (part UUIDs, element UUID maps).  Called when
+    // reconnecting to a new project so that stale mappings from the previous
+    // session do not leak into the new one.
+    void reset();
 
     const QHash<mu::engraving::EngravingObject*, QString>& localElementToUuid() const
     {
         return m_localElementToUuid;
     }
 
+    const QHash<mu::engraving::Part*, QString>& knownPartUuids() const
+    {
+        return m_knownPartUuids;
+    }
+
 private:
+    // Resolve the editude UUID for a Part*. If the part is not yet in
+    // m_knownPartUuids (e.g. loaded from MSCX), generate a fresh UUID,
+    // store it, and append an AddPart op to lazyAddPartOps.
+    QString resolvePartUuid(mu::engraving::Part* part,
+                            QVector<QJsonObject>& lazyAddPartOps);
+
     // UUID lookup across both local and remote maps.
     QString uuidForElement(
         mu::engraving::EngravingObject* obj,

@@ -73,6 +73,14 @@ public:
     {
         return m_applicator.tier3ElementToUuid();
     }
+    const QHash<mu::engraving::Part*, QString>& translatorKnownPartUuids() const
+    {
+        return m_translator.knownPartUuids();
+    }
+    const QHash<QString, mu::engraving::Part*>& applicatorPartUuidToPart() const
+    {
+        return m_applicator.partUuidToPart();
+    }
     void connectToSession(const QString& sessionUrl);
     QString stateForTest() const;
 #endif

@@ -40,6 +40,7 @@ private:
     Reply handleScore();
     Reply handleWaitRevision(const QJsonObject& body);
     Reply handleAction(const QJsonObject& body);
+    Reply dispatchAction(const QJsonObject& body);
     Reply handleConnect(const QJsonObject& body);
     Reply handleStatus();
 
@@ -140,6 +141,7 @@ private:
 
     QString uuidForElement(mu::engraving::EngravingObject* obj) const;
     QString uuidForChordRest(mu::engraving::EngravingObject* obj) const;
+    QString uuidForPart(mu::engraving::Part* part) const;
     mu::engraving::EngravingObject* findByUuid(const QString& uuid) const;
     static QJsonObject beatJson(const mu::engraving::Fraction& tick);
     static QString durationTypeName(mu::engraving::DurationType dt);

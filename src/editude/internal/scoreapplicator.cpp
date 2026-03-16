@@ -38,6 +38,7 @@
 #include "engraving/types/propertyvalue.h"
 #include "engraving/dom/clef.h"
 #include "engraving/dom/dynamic.h"
+#include "engraving/editing/editscoreproperties.h"
 #include "engraving/dom/keysig.h"
 #include "engraving/dom/lyrics.h"
 #include "engraving/dom/hairpin.h"
@@ -58,6 +59,15 @@
 
 using namespace mu::editude::internal;
 using namespace mu::engraving;
+
+void ScoreApplicator::reset()
+{
+    m_uuidToElement.clear();
+    m_elementToUuid.clear();
+    m_partUuidToPart.clear();
+    m_tier3UuidToElement.clear();
+    m_tier3ElementToUuid.clear();
+}
 
 int ScoreApplicator::pitchToMidi(const QString& step, int octave, const QString& accidental)
 {
@@ -210,8 +220,14 @@ bool ScoreApplicator::applySetPitch(Score* score, const QJsonObject& op)
         return false;
     }
 
+    // Set PITCH, TPC1, and TPC2 together — setPitch(int) does NOT update
+    // TPC, so the translator's pitchJson(tpc1, octave) would read stale TPC.
+    const int tpc1 = note->tpc1default(midi);
+    const int tpc2 = note->tpc2default(midi);
     score->startCmd(TranslatableString("undoableAction", "Set pitch"));
     note->undoChangeProperty(Pid::PITCH, midi);
+    note->undoChangeProperty(Pid::TPC1, tpc1);
+    note->undoChangeProperty(Pid::TPC2, tpc2);
     score->endCmd();
     return true;
 }
@@ -801,6 +817,27 @@ bool ScoreApplicator::applyAddPart(Score* score, const QJsonObject& op)
         return false;
     }
 
+    // Already registered under this UUID (idempotent).
+    if (m_partUuidToPart.contains(uuid)) {
+        return true;
+    }
+
+    // Bootstrap de-duplication: when two clients connect simultaneously to a
+    // fresh project, both bootstrap their pre-existing MSCX part (with
+    // different UUIDs). Each then receives the other's AddPart as a remote
+    // op. Instead of creating a duplicate, register the existing unregistered
+    // part under the remote UUID.
+    const QSet<Part*> registered(m_partUuidToPart.cbegin(), m_partUuidToPart.cend());
+    for (Part* existing : score->parts()) {
+        if (registered.contains(existing)) {
+            continue;
+        }
+        // Found an existing part not yet registered — adopt it.
+        m_partUuidToPart[uuid] = existing;
+        LOGD() << "[editude] applyAddPart: adopted existing part for uuid" << uuid;
+        return true;
+    }
+
     const QString name = op["name"].toString();
     const int staffCount = op["staff_count"].toInt(1);
 
@@ -873,21 +910,23 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
 {
     const QString type = payload["type"].toString();
 
-    // op_batch — apply all sub-ops as a single undo command so the user can
-    // undo an entire paste/multi-op action in one step.
+    // op_batch — apply each sub-op in sequence.  Each handler manages its own
+    // startCmd/endCmd scope.  We intentionally do NOT wrap the batch in an
+    // outer startCmd/endCmd because MuseScore does not support nested command
+    // scopes: the inner endCmd would prematurely close the outer scope,
+    // leaving the score in a corrupted layout state (SIGSEGV in
+    // Segment::createShape during the next scene-graph paint).
     if (type == QLatin1String("op_batch")) {
         const QJsonArray ops = payload["ops"].toArray();
         if (ops.isEmpty()) {
             return true;
         }
-        score->startCmd(TranslatableString("undoableAction", "Remote batch edit"));
         bool ok = true;
         for (const QJsonValue& v : ops) {
             if (!apply(score, v.toObject())) {
                 ok = false;
             }
         }
-        score->endCmd();
         return ok;
     }
 
@@ -1850,8 +1889,12 @@ bool ScoreApplicator::applySetScoreMetadata(Score* score, const QJsonObject& op)
 
     const QString tag = s_fieldMap.value(field, field);
 
+    // Use ChangeMetaText undo command instead of bare setMetaTag so the change
+    // goes through the undo system.  Without a real undo command, endCmd sees
+    // an empty macro and may not fire changesChannel().send(), which means the
+    // translator never picks up the change and the op never reaches the server.
     score->startCmd(TranslatableString("undoableAction", "Set score metadata"));
-    score->setMetaTag(String(tag), String(value));
+    score->undo(new ChangeMetaText(score, String(tag), String(value)));
     score->endCmd();
     return true;
 }
