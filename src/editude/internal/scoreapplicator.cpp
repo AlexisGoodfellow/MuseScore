@@ -64,6 +64,7 @@
 #include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
+#include "engraving/types/symnames.h"
 #include "engraving/types/typesconv.h"
 
 #include "log.h"
@@ -1127,17 +1128,83 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
 static SymId articulationSymId(const QString& name)
 {
     static const QHash<QString, SymId> s_map = {
-        { "staccato",      SymId::articStaccatoAbove      },
-        { "accent",        SymId::articAccentAbove         },
-        { "tenuto",        SymId::articTenutoAbove         },
-        { "marcato",       SymId::articMarcatoAbove        },
-        { "staccatissimo", SymId::articStaccatissimoAbove  },
-        { "fermata",       SymId::fermataAbove             },
-        { "trill",         SymId::ornamentTrill            },
-        { "mordent",       SymId::ornamentMordent          },
-        { "turn",          SymId::ornamentTurn             },
+        // --- Standard articulations (always use Above variant) ---
+        { "staccato",                    SymId::articStaccatoAbove                 },
+        { "accent",                      SymId::articAccentAbove                   },
+        { "tenuto",                      SymId::articTenutoAbove                   },
+        { "marcato",                     SymId::articMarcatoAbove                  },
+        { "staccatissimo",               SymId::articStaccatissimoAbove            },
+        { "staccatissimo_stroke",        SymId::articStaccatissimoStrokeAbove      },
+        { "staccatissimo_wedge",         SymId::articStaccatissimoWedgeAbove       },
+        { "tenuto_staccato",             SymId::articTenutoStaccatoAbove           },
+        { "accent_staccato",             SymId::articAccentStaccatoAbove           },
+        { "marcato_staccato",            SymId::articMarcatoStaccatoAbove          },
+        { "marcato_tenuto",              SymId::articMarcatoTenutoAbove            },
+        { "tenuto_accent",               SymId::articTenutoAccentAbove             },
+        { "stress",                      SymId::articStressAbove                   },
+        { "unstress",                    SymId::articUnstressAbove                 },
+        { "soft_accent",                 SymId::articSoftAccentAbove               },
+        { "soft_accent_staccato",        SymId::articSoftAccentStaccatoAbove       },
+        { "soft_accent_tenuto",          SymId::articSoftAccentTenutoAbove         },
+        { "soft_accent_tenuto_staccato", SymId::articSoftAccentTenutoStaccatoAbove },
+
+        // --- Fermatas ---
+        { "fermata",            SymId::fermataAbove          },
+        { "fermata_short",      SymId::fermataShortAbove     },
+        { "fermata_long",       SymId::fermataLongAbove      },
+        { "fermata_very_short", SymId::fermataVeryShortAbove },
+        { "fermata_very_long",  SymId::fermataVeryLongAbove  },
+        { "fermata_long_henze", SymId::fermataLongHenzeAbove },
+        { "fermata_short_henze", SymId::fermataShortHenzeAbove },
+
+        // --- Ornaments ---
+        { "trill",                 SymId::ornamentTrill                     },
+        { "mordent",               SymId::ornamentMordent                   },
+        { "turn",                  SymId::ornamentTurn                      },
+        { "turn_inverted",         SymId::ornamentTurnInverted              },
+        { "turn_slash",            SymId::ornamentTurnSlash                 },
+        { "turn_up",               SymId::ornamentTurnUp                    },
+        { "short_trill",           SymId::ornamentShortTrill                },
+        { "tremblement",           SymId::ornamentTremblement               },
+        { "prall_mordent",         SymId::ornamentPrallMordent              },
+        { "up_prall",              SymId::ornamentUpPrall                   },
+        { "mordent_upper_prefix",  SymId::ornamentPrecompMordentUpperPrefix },
+        { "up_mordent",            SymId::ornamentUpMordent                 },
+        { "down_mordent",          SymId::ornamentDownMordent               },
+        { "prall_down",            SymId::ornamentPrallDown                 },
+        { "prall_up",              SymId::ornamentPrallUp                   },
+        { "line_prall",            SymId::ornamentLinePrall                 },
+        { "precomp_slide",         SymId::ornamentPrecompSlide              },
+        { "shake",                 SymId::ornamentShake3                    },
+        { "shake_muffat",          SymId::ornamentShakeMuffat1              },
+        { "tremblement_couperin",  SymId::ornamentTremblementCouperin       },
+        { "pince_couperin",        SymId::ornamentPinceCouperin             },
+        { "haydn",                 SymId::ornamentHaydn                     },
+
+        // --- Bowing / string techniques ---
+        { "up_bow",               SymId::stringsUpBow              },
+        { "down_bow",             SymId::stringsDownBow            },
+        { "harmonic",             SymId::stringsHarmonic            },
+        { "snap_pizzicato",       SymId::pluckedSnapPizzicatoAbove },
+        { "left_hand_pizzicato",  SymId::pluckedLeftHandPizzicato  },
+
+        // --- Brass ---
+        { "brass_mute_open",   SymId::brassMuteOpen   },
+        { "brass_mute_closed", SymId::brassMuteClosed },
+
+        // --- Guitar ---
+        { "guitar_fade_in",      SymId::guitarFadeIn      },
+        { "guitar_fade_out",     SymId::guitarFadeOut     },
+        { "guitar_volume_swell", SymId::guitarVolumeSwell },
     };
-    return s_map.value(name, SymId::noSym);
+
+    const SymId mapped = s_map.value(name, SymId::noSym);
+    if (mapped != SymId::noSym) {
+        return mapped;
+    }
+    // Fallback: the name may be a raw SMuFL symbol name sent by the
+    // translator for a SymId not in our explicit map.
+    return SymNames::symIdByName(name.toUtf8().constData());
 }
 
 bool ScoreApplicator::applyAddArticulation(Score* score, const QJsonObject& op)

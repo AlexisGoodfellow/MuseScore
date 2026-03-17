@@ -790,11 +790,13 @@ void EditudeService::connectToSession(const QString& sessionUrl)
     if (m_currentNotation) {
         m_currentNotation->undoStack()->changesChannel().disconnect(this);
     }
-    // Mark the score as saved so closeOpenedProject() doesn't pop a save
-    // dialog (which would block in a headless test environment).
-    if (m_score) {
-        m_score->masterScore()->setSaved(true);
-    }
+
+    // Save the raw score pointer before clearing it — we need it later in the
+    // deferred callback to mark the score as saved (suppressing the "Save
+    // changes?" dialog) immediately before closeOpenedProject().  The Score*
+    // remains valid until closeOpenedProject() actually tears it down.
+    mu::engraving::Score* scoreToClose = m_score;
+
     m_score = nullptr;
     m_currentNotation = nullptr;
 
@@ -804,7 +806,7 @@ void EditudeService::connectToSession(const QString& sessionUrl)
     QNetworkRequest req{QUrl{m_sessionUrl}};
     QNetworkReply* reply = m_nam.get(req);
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, scoreToClose]() {
         reply->deleteLater();
 
         if (reply->error() != QNetworkReply::NoError) {
@@ -860,7 +862,17 @@ void EditudeService::connectToSession(const QString& sessionUrl)
         //
         // onNotationChanged() fires when the new score loads — it applies
         // bootstrap ops, opens the WebSocket, and subscribes to changes.
-        QTimer::singleShot(0, this, [this]() {
+        QTimer::singleShot(0, this, [this, scoreToClose]() {
+            // Mark the score as saved immediately before closing so the
+            // "Save changes?" dialog doesn't block the test environment.
+            // This must happen HERE (inside the deferred callback), not earlier —
+            // the undo stack change listener can re-dirty the score between
+            // setSaved(true) and closeOpenedProject() if there are pending
+            // change notifications in the event loop.
+            if (scoreToClose) {
+                scoreToClose->masterScore()->setSaved(true);
+            }
+
             auto oldSeqId = m_playbackController()->currentTrackSequenceId();
             m_projectFiles()->closeOpenedProject(false);
 
