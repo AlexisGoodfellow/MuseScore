@@ -250,6 +250,12 @@ private:
                                          const QString& eventUuid);
     static QJsonObject buildRemoveArpeggio(const QString& uuid);
 
+    // Grace note builders.
+    static QJsonObject buildAddGraceNote(mu::engraving::EngravingObject* graceObj,
+                                          const QString& uuid, const QString& partId,
+                                          const QString& eventUuid);
+    static QJsonObject buildRemoveGraceNote(const QString& uuid);
+
     // Tier 4 builders — volta.
     static QJsonObject buildInsertVolta(mu::engraving::EngravingObject* volta,
                                         const QString& uuid);

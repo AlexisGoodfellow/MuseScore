@@ -255,6 +255,8 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("remove_trill_line"))    return actionRemoveTrillLine(body);
     if (action == QLatin1String("add_arpeggio"))         return actionAddArpeggio(body);
     if (action == QLatin1String("remove_arpeggio"))      return actionRemoveArpeggio(body);
+    if (action == QLatin1String("add_grace_note"))       return actionAddGraceNote(body);
+    if (action == QLatin1String("remove_grace_note"))    return actionRemoveGraceNote(body);
     if (action == QLatin1String("add_lyric"))             return actionAddLyric(body);
     if (action == QLatin1String("set_lyric"))             return actionSetLyric(body);
     if (action == QLatin1String("remove_lyric"))          return actionRemoveLyric(body);
@@ -615,6 +617,7 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
         { "lyrics",        serializePartLyricsMap(part) },
         { "staff_texts",   serializePartStaffTexts(part) },
         { "arpeggios",     serializePartArpeggios(part) },
+        { "grace_notes",   serializePartGraceNotes(part) },
     };
 }
 
@@ -1021,6 +1024,21 @@ QJsonObject EditudeTestServer::serializePartArticulations(Part* part)
     return result;
 }
 
+static QString testGraceNoteTypeName(NoteType nt)
+{
+    static const QHash<NoteType, QString> s_map = {
+        { NoteType::ACCIACCATURA,  QStringLiteral("acciaccatura") },
+        { NoteType::APPOGGIATURA,  QStringLiteral("appoggiatura") },
+        { NoteType::GRACE4,        QStringLiteral("grace4") },
+        { NoteType::GRACE16,       QStringLiteral("grace16") },
+        { NoteType::GRACE32,       QStringLiteral("grace32") },
+        { NoteType::GRACE8_AFTER,  QStringLiteral("grace8_after") },
+        { NoteType::GRACE16_AFTER, QStringLiteral("grace16_after") },
+        { NoteType::GRACE32_AFTER, QStringLiteral("grace32_after") },
+    };
+    return s_map.value(nt, QStringLiteral("acciaccatura"));
+}
+
 static QString arpeggioDirectionName(ArpeggioType t)
 {
     static const QHash<ArpeggioType, QString> s_map = {
@@ -1061,6 +1079,42 @@ QJsonObject EditudeTestServer::serializePartArpeggios(Part* part)
                     { "event_id",  eventUuid },
                     { "direction", arpeggioDirectionName(arp->arpeggioType()) },
                 };
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartGraceNotes(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(SegmentType::ChordRest); seg;
+             seg = seg->next(SegmentType::ChordRest)) {
+            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+                EngravingItem* el = seg->element(track);
+                if (!el || !el->isChord()) {
+                    continue;
+                }
+                Chord* chord = toChord(el);
+                for (Chord* gc : chord->graceNotes()) {
+                    const QString gnUuid = uuidForElement(gc);
+                    if (gnUuid.isEmpty()) {
+                        continue;
+                    }
+                    const QString eventUuid = uuidForChordRest(chord);
+                    Note* firstNote = gc->notes().empty() ? nullptr : gc->notes().front();
+                    QJsonObject entry;
+                    entry["id"]         = gnUuid;
+                    entry["event_id"]   = eventUuid;
+                    entry["order"]      = static_cast<int>(gc->graceIndex());
+                    entry["grace_type"] = testGraceNoteTypeName(gc->noteType());
+                    if (firstNote) {
+                        entry["pitch"] = pitchJson(firstNote);
+                    }
+                    result[gnUuid] = entry;
+                }
             }
         }
     }
@@ -1683,6 +1737,108 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveArpeggio(const QJsonObje
 
     score->startCmd(TranslatableString("test", "remove arpeggio"));
     score->undoRemoveElement(arp);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionAddGraceNote(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString eventId   = body["event_id"].toString();
+    const int order         = body["order"].toInt(0);
+    const QString typeName  = body["grace_type"].toString();
+    const QJsonObject pitch = body["pitch"].toObject();
+
+    EngravingObject* obj = findByUuid(eventId);
+    if (!obj) {
+        return errorResponse(404, "event not found");
+    }
+
+    Chord* parentChord = nullptr;
+    if (obj->isNote()) {
+        parentChord = toNote(static_cast<EngravingItem*>(obj))->chord();
+    } else if (obj->isChord()) {
+        parentChord = toChord(static_cast<EngravingItem*>(obj));
+    }
+    if (!parentChord) {
+        return errorResponse(422, "event is not a note or chord");
+    }
+
+    static const QHash<QString, NoteType> s_gnMap = {
+        { QStringLiteral("acciaccatura"),  NoteType::ACCIACCATURA },
+        { QStringLiteral("appoggiatura"),  NoteType::APPOGGIATURA },
+        { QStringLiteral("grace4"),        NoteType::GRACE4 },
+        { QStringLiteral("grace16"),       NoteType::GRACE16 },
+        { QStringLiteral("grace32"),       NoteType::GRACE32 },
+        { QStringLiteral("grace8_after"),  NoteType::GRACE8_AFTER },
+        { QStringLiteral("grace16_after"), NoteType::GRACE16_AFTER },
+        { QStringLiteral("grace32_after"), NoteType::GRACE32_AFTER },
+    };
+    const NoteType nt = s_gnMap.value(typeName, NoteType::ACCIACCATURA);
+
+    const int midi = ScoreApplicator::pitchToMidi(
+        pitch["step"].toString(), pitch["octave"].toInt(),
+        pitch["accidental"].toString());
+    if (midi < 0 || midi > 127) {
+        return errorResponse(422, "invalid pitch");
+    }
+
+    // Determine duration type from the NoteType.
+    DurationType dt = DurationType::V_EIGHTH;
+    if (nt == NoteType::GRACE4)                              dt = DurationType::V_QUARTER;
+    else if (nt == NoteType::GRACE16 || nt == NoteType::GRACE16_AFTER) dt = DurationType::V_16TH;
+    else if (nt == NoteType::GRACE32 || nt == NoteType::GRACE32_AFTER) dt = DurationType::V_32ND;
+
+    score->startCmd(TranslatableString("test", "add grace note"));
+
+    Chord* graceChord = Factory::createChord(parentChord->segment());
+    graceChord->setNoteType(nt);
+    graceChord->setGraceIndex(static_cast<size_t>(order));
+    graceChord->setTrack(parentChord->track());
+    graceChord->setParent(parentChord);
+
+    TDuration dur(dt);
+    graceChord->setDurationType(dur);
+    graceChord->setTicks(dur.ticks());
+
+    Note* note = Factory::createNote(graceChord);
+    note->setPitch(midi);
+    note->setTpc1(note->tpc1default(midi));
+    note->setTpc2(note->tpc2default(midi));
+    note->setTrack(parentChord->track());
+    graceChord->add(note);
+
+    score->undoAddElement(graceChord);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveGraceNote(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "grace note not found");
+    }
+
+    Chord* graceChord = dynamic_cast<Chord*>(obj);
+    if (!graceChord || !graceChord->isGrace()) {
+        return errorResponse(422, "element is not a grace chord");
+    }
+
+    score->startCmd(TranslatableString("test", "remove grace note"));
+    score->undoRemoveElement(graceChord);
     score->endCmd();
 
     return okResponse();

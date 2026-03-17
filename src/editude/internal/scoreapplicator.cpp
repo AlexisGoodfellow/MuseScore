@@ -1099,6 +1099,8 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     // Arpeggios
     if (type == QLatin1String("AddArpeggio"))    return applyAddArpeggio(score, payload);
     if (type == QLatin1String("RemoveArpeggio")) return applyRemoveArpeggio(score, payload);
+    if (type == QLatin1String("AddGraceNote"))   return applyAddGraceNote(score, payload);
+    if (type == QLatin1String("RemoveGraceNote")) return applyRemoveGraceNote(score, payload);
 
     // Tier 4 — navigation marks
     if (type == QLatin1String("InsertVolta"))  return applyInsertVolta(score, payload);
@@ -2453,6 +2455,126 @@ bool ScoreApplicator::applyRemoveArpeggio(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Remove arpeggio"));
     score->undoRemoveElement(arp);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Grace notes
+// ---------------------------------------------------------------------------
+
+static NoteType graceNoteTypeFromName(const QString& name)
+{
+    static const QHash<QString, NoteType> s_map = {
+        { QStringLiteral("acciaccatura"),  NoteType::ACCIACCATURA },
+        { QStringLiteral("appoggiatura"),  NoteType::APPOGGIATURA },
+        { QStringLiteral("grace4"),        NoteType::GRACE4 },
+        { QStringLiteral("grace16"),       NoteType::GRACE16 },
+        { QStringLiteral("grace32"),       NoteType::GRACE32 },
+        { QStringLiteral("grace8_after"),  NoteType::GRACE8_AFTER },
+        { QStringLiteral("grace16_after"), NoteType::GRACE16_AFTER },
+        { QStringLiteral("grace32_after"), NoteType::GRACE32_AFTER },
+    };
+    return s_map.value(name, NoteType::ACCIACCATURA);
+}
+
+static DurationType graceNoteDurationType(NoteType nt)
+{
+    switch (nt) {
+    case NoteType::GRACE4:        return DurationType::V_QUARTER;
+    case NoteType::GRACE16:
+    case NoteType::GRACE16_AFTER: return DurationType::V_16TH;
+    case NoteType::GRACE32:
+    case NoteType::GRACE32_AFTER: return DurationType::V_32ND;
+    default:                      return DurationType::V_EIGHTH;
+    }
+}
+
+bool ScoreApplicator::applyAddGraceNote(Score* score, const QJsonObject& op)
+{
+    const QString id        = op["id"].toString();
+    const QString eventId   = op["event_id"].toString();
+    const int order         = op["order"].toInt(0);
+    const QString typeName  = op["grace_type"].toString();
+    const QJsonObject pitch = op["pitch"].toObject();
+
+    if (id.isEmpty() || eventId.isEmpty()) {
+        LOGW() << "[editude] applyAddGraceNote: missing id or event_id";
+        return false;
+    }
+
+    EngravingObject* evObj = m_uuidToElement.value(eventId);
+    if (!evObj) {
+        LOGW() << "[editude] applyAddGraceNote: unknown event_id" << eventId;
+        return false;
+    }
+
+    Chord* parentChord = nullptr;
+    if (evObj->isNote()) {
+        parentChord = toNote(static_cast<EngravingItem*>(evObj))->chord();
+    } else if (evObj->isChord()) {
+        parentChord = toChord(static_cast<EngravingItem*>(evObj));
+    }
+    if (!parentChord) {
+        LOGW() << "[editude] applyAddGraceNote: event is not a note/chord" << eventId;
+        return false;
+    }
+
+    const NoteType nt = graceNoteTypeFromName(typeName);
+    const int midi = pitchToMidi(pitch["step"].toString(),
+                                 pitch["octave"].toInt(),
+                                 pitch["accidental"].toString());
+    if (midi < 0 || midi > 127) {
+        LOGW() << "[editude] applyAddGraceNote: invalid pitch";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add grace note"));
+
+    Chord* graceChord = Factory::createChord(parentChord->segment());
+    graceChord->setNoteType(nt);
+    graceChord->setGraceIndex(static_cast<size_t>(order));
+    graceChord->setTrack(parentChord->track());
+    graceChord->setParent(parentChord);
+
+    TDuration dur(graceNoteDurationType(nt));
+    graceChord->setDurationType(dur);
+    graceChord->setTicks(dur.ticks());
+
+    Note* note = Factory::createNote(graceChord);
+    note->setPitch(midi);
+    note->setTpc1(note->tpc1default(midi));
+    note->setTpc2(note->tpc2default(midi));
+    note->setTrack(parentChord->track());
+    graceChord->add(note);
+
+    score->undoAddElement(graceChord);
+    score->endCmd();
+
+    m_uuidToElement[id] = graceChord;
+    m_elementToUuid[graceChord] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveGraceNote(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveGraceNote: unknown id" << id;
+        return false;
+    }
+
+    Chord* graceChord = dynamic_cast<Chord*>(m_uuidToElement.value(id));
+    if (!graceChord || !graceChord->isGrace()) {
+        LOGW() << "[editude] applyRemoveGraceNote: element is not a grace chord" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(graceChord);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove grace note"));
+    score->undoRemoveElement(graceChord);
     score->endCmd();
     return true;
 }

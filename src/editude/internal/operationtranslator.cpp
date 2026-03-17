@@ -208,6 +208,10 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!chord) {
             continue;
         }
+        // Skip grace chords — they are handled by Pass 26c (AddGraceNote).
+        if (chord->isGrace()) {
+            continue;
+        }
         auto chordIt = changedObjects.find(chord);
         if (chordIt != changedObjects.end() && chordIt->second.count(CommandType::AddElement)) {
             newChordNotes[chord].append(note);
@@ -458,7 +462,13 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || !cmds.count(CommandType::RemoveElement)) {
             continue;
         }
-        if (obj->type() == ElementType::CHORD || obj->type() == ElementType::REST) {
+        if (obj->type() == ElementType::CHORD) {
+            // Skip grace chords — they are handled by Pass 26c (RemoveGraceNote).
+            if (static_cast<Chord*>(obj)->isGrace()) {
+                continue;
+            }
+            removedChordsAndRests.insert(obj);
+        } else if (obj->type() == ElementType::REST) {
             removedChordsAndRests.insert(obj);
         }
     }
@@ -472,6 +482,11 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (obj->type() == ElementType::NOTE) {
             Note* note   = static_cast<Note*>(obj);
             Chord* chord = note->chord();
+
+            // Skip notes belonging to grace chords — handled by Pass 26c.
+            if (chord && chord->isGrace()) {
+                continue;
+            }
 
             if (chord && removedChordsAndRests.contains(chord)) {
                 // The whole chord is being removed. Emit one DeleteEvent per chord.
@@ -1213,6 +1228,40 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 ops.append(buildRemoveArpeggio(uuid));
                 m_localUuidToElement.remove(uuid);
                 m_localElementToUuid.remove(arp);
+            }
+        }
+    }
+
+    // ── Pass 26c: Grace notes (event-UUID anchored) ───────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::CHORD) {
+            continue;
+        }
+        auto* chord = static_cast<Chord*>(obj);
+        if (!chord->isGrace()) {
+            continue;
+        }
+        if (cmds.count(CommandType::AddElement)) {
+            Chord* parentChord = toChord(chord->explicitParent());
+            if (!parentChord) continue;
+            const QString eventUuid = uuidForChordRest(parentChord, remoteElementToUuid);
+            if (eventUuid.isEmpty()) {
+                LOGD() << "[editude] translateAll: AddGraceNote: parent chord UUID unknown, skipping";
+                continue;
+            }
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[chord]  = uuid;
+            m_localUuidToElement[uuid]   = chord;
+            Part* gnPart = chord->staff() ? chord->staff()->part() : nullptr;
+            const QString gnPartUuid = resolvePartUuid(gnPart, lazyAddPartOps);
+            if (gnPartUuid.isEmpty()) continue;
+            ops.append(buildAddGraceNote(chord, uuid, gnPartUuid, eventUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(chord, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveGraceNote(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(chord);
             }
         }
     }
@@ -2239,6 +2288,56 @@ QJsonObject OperationTranslator::buildRemoveArpeggio(const QString& uuid)
 {
     QJsonObject payload;
     payload["type"] = QStringLiteral("RemoveArpeggio");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Grace note builders
+// ---------------------------------------------------------------------------
+
+static QString graceNoteTypeName(NoteType nt)
+{
+    static const QHash<NoteType, QString> s_map = {
+        { NoteType::ACCIACCATURA,  QStringLiteral("acciaccatura") },
+        { NoteType::APPOGGIATURA,  QStringLiteral("appoggiatura") },
+        { NoteType::GRACE4,        QStringLiteral("grace4") },
+        { NoteType::GRACE16,       QStringLiteral("grace16") },
+        { NoteType::GRACE32,       QStringLiteral("grace32") },
+        { NoteType::GRACE8_AFTER,  QStringLiteral("grace8_after") },
+        { NoteType::GRACE16_AFTER, QStringLiteral("grace16_after") },
+        { NoteType::GRACE32_AFTER, QStringLiteral("grace32_after") },
+    };
+    return s_map.value(nt, QStringLiteral("acciaccatura"));
+}
+
+QJsonObject OperationTranslator::buildAddGraceNote(EngravingObject* graceObj,
+                                                    const QString& uuid,
+                                                    const QString& partId,
+                                                    const QString& eventUuid)
+{
+    auto* gc = static_cast<Chord*>(graceObj);
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("AddGraceNote");
+    payload["id"]         = uuid;
+    payload["part_id"]    = partId;
+    payload["event_id"]   = eventUuid;
+    payload["order"]      = static_cast<int>(gc->graceIndex());
+    payload["grace_type"] = graceNoteTypeName(gc->noteType());
+
+    // Pitch from first note in the grace chord.
+    if (!gc->notes().empty()) {
+        payload["pitch"] = pitchJson(gc->notes().front()->tpc(),
+                                     gc->notes().front()->octave());
+    }
+
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveGraceNote(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveGraceNote");
     payload["id"]   = uuid;
     return payload;
 }

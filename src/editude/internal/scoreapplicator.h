@@ -163,6 +163,9 @@ private:
     // Arpeggios
     bool applyAddArpeggio(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveArpeggio(mu::engraving::Score* score, const QJsonObject& payload);
+    // Grace notes
+    bool applyAddGraceNote(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveGraceNote(mu::engraving::Score* score, const QJsonObject& payload);
 
     // Tier 4 — navigation marks
     bool applyInsertVolta(mu::engraving::Score* score, const QJsonObject& payload);
