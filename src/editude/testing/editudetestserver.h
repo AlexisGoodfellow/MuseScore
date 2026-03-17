@@ -97,6 +97,21 @@ private:
     Reply actionSetLyric(const QJsonObject& body);
     Reply actionRemoveLyric(const QJsonObject& body);
 
+    // Tier 3 — staff text
+    Reply actionAddStaffText(const QJsonObject& body);
+    Reply actionSetStaffText(const QJsonObject& body);
+    Reply actionRemoveStaffText(const QJsonObject& body);
+
+    // Tier 3 — system text
+    Reply actionAddSystemText(const QJsonObject& body);
+    Reply actionSetSystemText(const QJsonObject& body);
+    Reply actionRemoveSystemText(const QJsonObject& body);
+
+    // Tier 3 — rehearsal marks
+    Reply actionAddRehearsalMark(const QJsonObject& body);
+    Reply actionSetRehearsalMark(const QJsonObject& body);
+    Reply actionRemoveRehearsalMark(const QJsonObject& body);
+
     // Tier 4 — navigation marks
     Reply actionInsertVolta(const QJsonObject& body);
     Reply actionRemoveVolta(const QJsonObject& body);
@@ -135,6 +150,9 @@ private:
     QJsonArray  serializeMetricGrid();
     QJsonArray  serializeTempoMap();
     QJsonObject serializeScoreChordSymbols();
+    QJsonObject serializePartStaffTexts(mu::engraving::Part* part);
+    QJsonObject serializeScoreSystemTexts();
+    QJsonObject serializeScoreRehearsalMarks();
     QJsonObject serializeScoreVoltas();
     QJsonObject serializeScoreMarkers();
     QJsonObject serializeScoreJumps();

@@ -52,6 +52,9 @@
 #include "engraving/dom/tie.h"
 #include "engraving/dom/tempotext.h"
 #include "engraving/dom/timesig.h"
+#include "engraving/dom/rehearsalmark.h"
+#include "engraving/dom/stafftext.h"
+#include "engraving/dom/systemtext.h"
 #include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
@@ -1058,6 +1061,21 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("SetChordSymbol"))    return applySetChordSymbol(score, payload);
     if (type == QLatin1String("RemoveChordSymbol")) return applyRemoveChordSymbol(score, payload);
 
+    // Tier 3 — staff text (part-scoped)
+    if (type == QLatin1String("AddStaffText"))    return applyAddStaffText(score, payload);
+    if (type == QLatin1String("SetStaffText"))    return applySetStaffText(score, payload);
+    if (type == QLatin1String("RemoveStaffText")) return applyRemoveStaffText(score, payload);
+
+    // Tier 3 — system text (score-global)
+    if (type == QLatin1String("AddSystemText"))    return applyAddSystemText(score, payload);
+    if (type == QLatin1String("SetSystemText"))    return applySetSystemText(score, payload);
+    if (type == QLatin1String("RemoveSystemText")) return applyRemoveSystemText(score, payload);
+
+    // Tier 3 — rehearsal marks (score-global)
+    if (type == QLatin1String("AddRehearsalMark"))    return applyAddRehearsalMark(score, payload);
+    if (type == QLatin1String("SetRehearsalMark"))    return applySetRehearsalMark(score, payload);
+    if (type == QLatin1String("RemoveRehearsalMark")) return applyRemoveRehearsalMark(score, payload);
+
     // Tier 4 — navigation marks
     if (type == QLatin1String("InsertVolta"))  return applyInsertVolta(score, payload);
     if (type == QLatin1String("RemoveVolta"))  return applyRemoveVolta(score, payload);
@@ -1720,6 +1738,260 @@ bool ScoreApplicator::applyRemoveChordSymbol(Score* score, const QJsonObject& op
 
     score->startCmd(TranslatableString("undoableAction", "Remove chord symbol"));
     score->undoRemoveElement(harmony);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 — staff text (part-scoped)
+// ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applyAddStaffText(Score* score, const QJsonObject& op)
+{
+    const QString id      = op["id"].toString();
+    const QString partId  = op["part_id"].toString();
+    const QString text    = op["text"].toString();
+    const QJsonObject beat = op["beat"].toObject();
+
+    if (id.isEmpty() || partId.isEmpty()) {
+        LOGW() << "[editude] applyAddStaffText: missing id or part_id";
+        return false;
+    }
+
+    if (!m_partUuidToPart.contains(partId)) {
+        LOGW() << "[editude] applyAddStaffText: unknown part_id" << partId;
+        return false;
+    }
+
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyAddStaffText: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    Part* part = m_partUuidToPart.value(partId);
+    const track_idx_t track = part->startTrack();
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+
+    score->startCmd(TranslatableString("undoableAction", "Add staff text"));
+    StaffText* st = Factory::createStaffText(seg, TextStyleType::STAFF);
+    st->setParent(seg);
+    st->setTrack(track);
+    st->setPlainText(String(text));
+    score->undoAddElement(st);
+    score->endCmd();
+
+    m_uuidToElement[id] = st;
+    m_elementToUuid[st] = id;
+    return true;
+}
+
+bool ScoreApplicator::applySetStaffText(Score* score, const QJsonObject& op)
+{
+    const QString id   = op["id"].toString();
+    const QString text = op["text"].toString();
+
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applySetStaffText: unknown id" << id;
+        return false;
+    }
+
+    StaffText* st = dynamic_cast<StaffText*>(m_uuidToElement.value(id));
+    if (!st) {
+        LOGW() << "[editude] applySetStaffText: element is not StaffText" << id;
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Set staff text"));
+    st->undoChangeProperty(Pid::TEXT, PropertyValue(String(text)));
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveStaffText(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveStaffText: unknown id" << id;
+        return false;
+    }
+
+    StaffText* st = dynamic_cast<StaffText*>(m_uuidToElement.value(id));
+    if (!st) {
+        LOGW() << "[editude] applyRemoveStaffText: element is not StaffText" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(st);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove staff text"));
+    score->undoRemoveElement(st);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 — system text (score-global)
+// ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applyAddSystemText(Score* score, const QJsonObject& op)
+{
+    const QString id   = op["id"].toString();
+    const QString text = op["text"].toString();
+    const QJsonObject beat = op["beat"].toObject();
+
+    if (id.isEmpty()) {
+        LOGW() << "[editude] applyAddSystemText: missing id";
+        return false;
+    }
+
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyAddSystemText: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+
+    score->startCmd(TranslatableString("undoableAction", "Add system text"));
+    SystemText* st = Factory::createSystemText(seg, TextStyleType::SYSTEM);
+    st->setParent(seg);
+    st->setTrack(0);
+    st->setPlainText(String(text));
+    score->undoAddElement(st);
+    score->endCmd();
+
+    m_uuidToElement[id] = st;
+    m_elementToUuid[st] = id;
+    return true;
+}
+
+bool ScoreApplicator::applySetSystemText(Score* score, const QJsonObject& op)
+{
+    const QString id   = op["id"].toString();
+    const QString text = op["text"].toString();
+
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applySetSystemText: unknown id" << id;
+        return false;
+    }
+
+    SystemText* st = dynamic_cast<SystemText*>(m_uuidToElement.value(id));
+    if (!st) {
+        LOGW() << "[editude] applySetSystemText: element is not SystemText" << id;
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Set system text"));
+    st->undoChangeProperty(Pid::TEXT, PropertyValue(String(text)));
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveSystemText(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveSystemText: unknown id" << id;
+        return false;
+    }
+
+    SystemText* st = dynamic_cast<SystemText*>(m_uuidToElement.value(id));
+    if (!st) {
+        LOGW() << "[editude] applyRemoveSystemText: element is not SystemText" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(st);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove system text"));
+    score->undoRemoveElement(st);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 — rehearsal marks (score-global)
+// ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applyAddRehearsalMark(Score* score, const QJsonObject& op)
+{
+    const QString id   = op["id"].toString();
+    const QString text = op["text"].toString();
+    const QJsonObject beat = op["beat"].toObject();
+
+    if (id.isEmpty()) {
+        LOGW() << "[editude] applyAddRehearsalMark: missing id";
+        return false;
+    }
+
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyAddRehearsalMark: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+
+    score->startCmd(TranslatableString("undoableAction", "Add rehearsal mark"));
+    RehearsalMark* rm = Factory::createRehearsalMark(seg);
+    rm->setParent(seg);
+    rm->setTrack(0);
+    rm->setPlainText(String(text));
+    score->undoAddElement(rm);
+    score->endCmd();
+
+    m_uuidToElement[id] = rm;
+    m_elementToUuid[rm] = id;
+    return true;
+}
+
+bool ScoreApplicator::applySetRehearsalMark(Score* score, const QJsonObject& op)
+{
+    const QString id   = op["id"].toString();
+    const QString text = op["text"].toString();
+
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applySetRehearsalMark: unknown id" << id;
+        return false;
+    }
+
+    RehearsalMark* rm = dynamic_cast<RehearsalMark*>(m_uuidToElement.value(id));
+    if (!rm) {
+        LOGW() << "[editude] applySetRehearsalMark: element is not RehearsalMark" << id;
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Set rehearsal mark"));
+    rm->undoChangeProperty(Pid::TEXT, PropertyValue(String(text)));
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveRehearsalMark(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveRehearsalMark: unknown id" << id;
+        return false;
+    }
+
+    RehearsalMark* rm = dynamic_cast<RehearsalMark*>(m_uuidToElement.value(id));
+    if (!rm) {
+        LOGW() << "[editude] applyRemoveRehearsalMark: element is not RehearsalMark" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(rm);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove rehearsal mark"));
+    score->undoRemoveElement(rm);
     score->endCmd();
     return true;
 }

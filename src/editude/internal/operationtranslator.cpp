@@ -47,6 +47,9 @@
 #include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
 #include "engraving/dom/tuplet.h"
+#include "engraving/dom/rehearsalmark.h"
+#include "engraving/dom/stafftext.h"
+#include "engraving/dom/systemtext.h"
 #include "engraving/dom/volta.h"
 #include "engraving/dom/rest.h"
 #include "engraving/types/bps.h"
@@ -926,7 +929,104 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 20: InsertBeats / DeleteBeats ───────────────────────────────
+    // ── Pass 20: Staff Text (part-scoped) ──────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::STAFF_TEXT) {
+            continue;
+        }
+        auto* staffText = static_cast<StaffText*>(obj);
+        Part* textPart = static_cast<EngravingItem*>(staffText)->part();
+        if (!textPart) {
+            // After undo the parent chain may be broken; use track-based fallback.
+            const staff_idx_t staffIdx = staffText->track() / VOICES;
+            for (auto it = m_knownPartUuids.cbegin(); it != m_knownPartUuids.cend(); ++it) {
+                Part* p = it.key();
+                const staff_idx_t first = p->startTrack() / VOICES;
+                if (staffIdx >= first && staffIdx < first + static_cast<staff_idx_t>(p->nstaves())) {
+                    textPart = p;
+                    break;
+                }
+            }
+        }
+        if (!textPart) continue;
+        const QString textPartUuid = resolvePartUuid(textPart, lazyAddPartOps);
+        if (textPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[staffText]  = uuid;
+            m_localUuidToElement[uuid] = staffText;
+            ops.append(buildAddStaffText(staffText, uuid, textPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(staffText, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveStaffText(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(staffText);
+            }
+        } else if (cmds.count(CommandType::ChangeProperty)) {
+            const QString uuid = uuidForElement(staffText, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildSetStaffText(uuid, staffText->plainText().toQString()));
+            }
+        }
+    }
+
+    // ── Pass 21: System Text (score-global) ─────────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::SYSTEM_TEXT) {
+            continue;
+        }
+        auto* sysText = static_cast<SystemText*>(obj);
+
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[sysText]  = uuid;
+            m_localUuidToElement[uuid] = sysText;
+            ops.append(buildAddSystemText(sysText, uuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(sysText, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveSystemText(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(sysText);
+            }
+        } else if (cmds.count(CommandType::ChangeProperty)) {
+            const QString uuid = uuidForElement(sysText, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildSetSystemText(uuid, sysText->plainText().toQString()));
+            }
+        }
+    }
+
+    // ── Pass 22: Rehearsal Mark (score-global) ──────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::REHEARSAL_MARK) {
+            continue;
+        }
+        auto* mark = static_cast<RehearsalMark*>(obj);
+
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[mark]  = uuid;
+            m_localUuidToElement[uuid] = mark;
+            ops.append(buildAddRehearsalMark(mark, uuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(mark, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveRehearsalMark(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(mark);
+            }
+        } else if (cmds.count(CommandType::ChangeProperty)) {
+            const QString uuid = uuidForElement(mark, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildSetRehearsalMark(uuid, mark->plainText().toQString()));
+            }
+        }
+    }
+
+    // ── Pass 23: InsertBeats / DeleteBeats ───────────────────────────────
     // Collect MEASURE objects by their command type, sort by tick, then emit
     // a single InsertBeats or DeleteBeats covering the contiguous range.
     {
@@ -977,7 +1077,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 21: InsertVolta / RemoveVolta ───────────────────────────────
+    // ── Pass 24: InsertVolta / RemoveVolta ───────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::VOLTA) {
             continue;
@@ -998,7 +1098,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 22: InsertMarker / RemoveMarker ─────────────────────────────
+    // ── Pass 25: InsertMarker / RemoveMarker ─────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::MARKER) {
             continue;
@@ -1019,7 +1119,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 23: InsertJump / RemoveJump ─────────────────────────────────
+    // ── Pass 26: InsertJump / RemoveJump ─────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::JUMP) {
             continue;
@@ -1659,6 +1759,107 @@ QJsonObject OperationTranslator::buildRemoveLyric(const QString& uuid)
 {
     QJsonObject payload;
     payload["type"] = QStringLiteral("RemoveLyric");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — staff text
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddStaffText(EngravingObject* text,
+                                                    const QString& uuid,
+                                                    const QString& partId)
+{
+    auto* t = static_cast<StaffText*>(text);
+    QJsonObject payload;
+    payload["type"]    = QStringLiteral("AddStaffText");
+    payload["id"]      = uuid;
+    payload["part_id"] = partId;
+    payload["text"]    = t->plainText().toQString();
+    payload["beat"]    = beatJson(t->tick());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetStaffText(const QString& uuid, const QString& text)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("SetStaffText");
+    payload["id"]   = uuid;
+    payload["text"] = text;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveStaffText(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveStaffText");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — system text
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddSystemText(EngravingObject* text,
+                                                     const QString& uuid)
+{
+    auto* t = static_cast<SystemText*>(text);
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("AddSystemText");
+    payload["id"]   = uuid;
+    payload["text"] = t->plainText().toQString();
+    payload["beat"] = beatJson(t->tick());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetSystemText(const QString& uuid, const QString& text)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("SetSystemText");
+    payload["id"]   = uuid;
+    payload["text"] = text;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveSystemText(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveSystemText");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — rehearsal mark
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddRehearsalMark(EngravingObject* mark,
+                                                        const QString& uuid)
+{
+    auto* m = static_cast<RehearsalMark*>(mark);
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("AddRehearsalMark");
+    payload["id"]   = uuid;
+    payload["text"] = m->plainText().toQString();
+    payload["beat"] = beatJson(m->tick());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetRehearsalMark(const QString& uuid, const QString& text)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("SetRehearsalMark");
+    payload["id"]   = uuid;
+    payload["text"] = text;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveRehearsalMark(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveRehearsalMark");
     payload["id"]   = uuid;
     return payload;
 }

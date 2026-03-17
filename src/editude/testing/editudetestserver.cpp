@@ -41,6 +41,9 @@
 #include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
 #include "engraving/dom/tuplet.h"
+#include "engraving/dom/rehearsalmark.h"
+#include "engraving/dom/stafftext.h"
+#include "engraving/dom/systemtext.h"
 #include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"
 
@@ -234,10 +237,19 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("remove_slur"))         return actionRemoveSlur(body);
     if (action == QLatin1String("add_hairpin"))         return actionAddHairpin(body);
     if (action == QLatin1String("remove_hairpin"))      return actionRemoveHairpin(body);
-    if (action == QLatin1String("add_lyric"))           return actionAddLyric(body);
-    if (action == QLatin1String("set_lyric"))           return actionSetLyric(body);
-    if (action == QLatin1String("remove_lyric"))        return actionRemoveLyric(body);
-    if (action == QLatin1String("insert_volta"))        return actionInsertVolta(body);
+    if (action == QLatin1String("add_lyric"))             return actionAddLyric(body);
+    if (action == QLatin1String("set_lyric"))             return actionSetLyric(body);
+    if (action == QLatin1String("remove_lyric"))          return actionRemoveLyric(body);
+    if (action == QLatin1String("add_staff_text"))        return actionAddStaffText(body);
+    if (action == QLatin1String("set_staff_text"))        return actionSetStaffText(body);
+    if (action == QLatin1String("remove_staff_text"))     return actionRemoveStaffText(body);
+    if (action == QLatin1String("add_system_text"))       return actionAddSystemText(body);
+    if (action == QLatin1String("set_system_text"))       return actionSetSystemText(body);
+    if (action == QLatin1String("remove_system_text"))    return actionRemoveSystemText(body);
+    if (action == QLatin1String("add_rehearsal_mark"))    return actionAddRehearsalMark(body);
+    if (action == QLatin1String("set_rehearsal_mark"))    return actionSetRehearsalMark(body);
+    if (action == QLatin1String("remove_rehearsal_mark")) return actionRemoveRehearsalMark(body);
+    if (action == QLatin1String("insert_volta"))          return actionInsertVolta(body);
     if (action == QLatin1String("remove_volta"))        return actionRemoveVolta(body);
     if (action == QLatin1String("insert_marker"))       return actionInsertMarker(body);
     if (action == QLatin1String("remove_marker"))       return actionRemoveMarker(body);
@@ -535,6 +547,8 @@ QJsonObject EditudeTestServer::serializeScore()
         { "metric_grid",      serializeMetricGrid() },
         { "tempo_map",        serializeTempoMap() },
         { "chord_symbols",    serializeScoreChordSymbols() },
+        { "system_texts",     serializeScoreSystemTexts() },
+        { "rehearsal_marks",  serializeScoreRehearsalMarks() },
         { "repeat_barlines",  QJsonArray() },
         { "voltas",           serializeScoreVoltas() },
         { "markers",          serializeScoreMarkers() },
@@ -577,6 +591,7 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
         { "hairpins",      serializePartHairpins(part) },
         { "tuplets",       QJsonObject() },
         { "lyrics",        serializePartLyricsMap(part) },
+        { "staff_texts",   serializePartStaffTexts(part) },
     };
 }
 
@@ -1675,6 +1690,270 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveLyric(const QJsonObject&
 }
 
 // ---------------------------------------------------------------------------
+// Staff text action handlers
+// ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionAddStaffText(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const QString text = body["text"].toString();
+    if (text.isEmpty()) {
+        return errorResponse(422, "text required");
+    }
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(422, "beat not found in score");
+    }
+
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+    score->startCmd(TranslatableString("test", "add staff text"));
+    StaffText* st = Factory::createStaffText(seg, TextStyleType::STAFF);
+    st->setParent(seg);
+    st->setTrack(part->startTrack());
+    st->setPlainText(String(text));
+    score->undoAddElement(st);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetStaffText(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "staff text not found");
+    }
+
+    StaffText* st = dynamic_cast<StaffText*>(obj);
+    if (!st) {
+        return errorResponse(422, "element is not StaffText");
+    }
+
+    const QString text = body["text"].toString();
+    score->startCmd(TranslatableString("test", "set staff text"));
+    st->undoChangeProperty(Pid::TEXT, PropertyValue(String(text)));
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveStaffText(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "staff text not found");
+    }
+
+    StaffText* st = dynamic_cast<StaffText*>(obj);
+    if (!st) {
+        return errorResponse(422, "element is not StaffText");
+    }
+
+    score->startCmd(TranslatableString("test", "remove staff text"));
+    score->undoRemoveElement(st);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
+// System text action handlers
+// ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionAddSystemText(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const QString text = body["text"].toString();
+    if (text.isEmpty()) {
+        return errorResponse(422, "text required");
+    }
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(422, "beat not found in score");
+    }
+
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+    score->startCmd(TranslatableString("test", "add system text"));
+    SystemText* st = Factory::createSystemText(seg, TextStyleType::SYSTEM);
+    st->setParent(seg);
+    st->setTrack(0);
+    st->setPlainText(String(text));
+    score->undoAddElement(st);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetSystemText(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "system text not found");
+    }
+
+    SystemText* st = dynamic_cast<SystemText*>(obj);
+    if (!st) {
+        return errorResponse(422, "element is not SystemText");
+    }
+
+    const QString text = body["text"].toString();
+    score->startCmd(TranslatableString("test", "set system text"));
+    st->undoChangeProperty(Pid::TEXT, PropertyValue(String(text)));
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveSystemText(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "system text not found");
+    }
+
+    SystemText* st = dynamic_cast<SystemText*>(obj);
+    if (!st) {
+        return errorResponse(422, "element is not SystemText");
+    }
+
+    score->startCmd(TranslatableString("test", "remove system text"));
+    score->undoRemoveElement(st);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Rehearsal mark action handlers
+// ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionAddRehearsalMark(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const QString text = body["text"].toString();
+    if (text.isEmpty()) {
+        return errorResponse(422, "text required");
+    }
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(422, "beat not found in score");
+    }
+
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+    score->startCmd(TranslatableString("test", "add rehearsal mark"));
+    RehearsalMark* rm = Factory::createRehearsalMark(seg);
+    rm->setParent(seg);
+    rm->setTrack(0);
+    rm->setPlainText(String(text));
+    score->undoAddElement(rm);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetRehearsalMark(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "rehearsal mark not found");
+    }
+
+    RehearsalMark* rm = dynamic_cast<RehearsalMark*>(obj);
+    if (!rm) {
+        return errorResponse(422, "element is not RehearsalMark");
+    }
+
+    const QString text = body["text"].toString();
+    score->startCmd(TranslatableString("test", "set rehearsal mark"));
+    rm->undoChangeProperty(Pid::TEXT, PropertyValue(String(text)));
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveRehearsalMark(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "rehearsal mark not found");
+    }
+
+    RehearsalMark* rm = dynamic_cast<RehearsalMark*>(obj);
+    if (!rm) {
+        return errorResponse(422, "element is not RehearsalMark");
+    }
+
+    score->startCmd(TranslatableString("test", "remove rehearsal mark"));
+    score->undoRemoveElement(rm);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
 // Tier 4 action handlers
 // ---------------------------------------------------------------------------
 
@@ -2528,6 +2807,87 @@ QJsonObject EditudeTestServer::serializeScoreChordSymbols()
                     { "id",   uuid },
                     { "beat", beatJson(seg->tick()) },
                     { "name", harmony->harmonyName().toQString() },
+                };
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartStaffTexts(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(); seg; seg = seg->next()) {
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::STAFF_TEXT) {
+                    continue;
+                }
+                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) {
+                    continue;
+                }
+                StaffText* st = static_cast<StaffText*>(el);
+                const QString uuid = uuidForElement(st);
+                if (uuid.isEmpty()) {
+                    continue;
+                }
+                result[uuid] = QJsonObject{
+                    { "id",   uuid },
+                    { "beat", beatJson(seg->tick()) },
+                    { "text", st->plainText().toQString() },
+                };
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializeScoreSystemTexts()
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(); seg; seg = seg->next()) {
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::SYSTEM_TEXT) {
+                    continue;
+                }
+                SystemText* st = static_cast<SystemText*>(el);
+                const QString uuid = uuidForElement(st);
+                if (uuid.isEmpty()) {
+                    continue;
+                }
+                result[uuid] = QJsonObject{
+                    { "id",   uuid },
+                    { "beat", beatJson(seg->tick()) },
+                    { "text", st->plainText().toQString() },
+                };
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializeScoreRehearsalMarks()
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(); seg; seg = seg->next()) {
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::REHEARSAL_MARK) {
+                    continue;
+                }
+                RehearsalMark* rm = static_cast<RehearsalMark*>(el);
+                const QString uuid = uuidForElement(rm);
+                if (uuid.isEmpty()) {
+                    continue;
+                }
+                result[uuid] = QJsonObject{
+                    { "id",   uuid },
+                    { "beat", beatJson(seg->tick()) },
+                    { "text", rm->plainText().toQString() },
                 };
             }
         }

@@ -133,6 +133,21 @@ private:
     bool applySetChordSymbol(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveChordSymbol(mu::engraving::Score* score, const QJsonObject& payload);
 
+    // Tier 3 — staff text (part-scoped)
+    bool applyAddStaffText(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetStaffText(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveStaffText(mu::engraving::Score* score, const QJsonObject& payload);
+
+    // Tier 3 — system text (score-global)
+    bool applyAddSystemText(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetSystemText(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveSystemText(mu::engraving::Score* score, const QJsonObject& payload);
+
+    // Tier 3 — rehearsal marks (score-global)
+    bool applyAddRehearsalMark(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetRehearsalMark(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveRehearsalMark(mu::engraving::Score* score, const QJsonObject& payload);
+
     // Tier 4 — navigation marks
     bool applyInsertVolta(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveVolta(mu::engraving::Score* score, const QJsonObject& payload);

@@ -204,6 +204,24 @@ private:
                                      const QString& text, const QString& syllabic);
     static QJsonObject buildRemoveLyric(const QString& uuid);
 
+    // Tier 3 builders — staff text (part-scoped).
+    static QJsonObject buildAddStaffText(mu::engraving::EngravingObject* text,
+                                         const QString& uuid, const QString& partId);
+    static QJsonObject buildSetStaffText(const QString& uuid, const QString& text);
+    static QJsonObject buildRemoveStaffText(const QString& uuid);
+
+    // Tier 3 builders — system text (score-global).
+    static QJsonObject buildAddSystemText(mu::engraving::EngravingObject* text,
+                                          const QString& uuid);
+    static QJsonObject buildSetSystemText(const QString& uuid, const QString& text);
+    static QJsonObject buildRemoveSystemText(const QString& uuid);
+
+    // Tier 3 builders — rehearsal marks (score-global).
+    static QJsonObject buildAddRehearsalMark(mu::engraving::EngravingObject* mark,
+                                             const QString& uuid);
+    static QJsonObject buildSetRehearsalMark(const QString& uuid, const QString& text);
+    static QJsonObject buildRemoveRehearsalMark(const QString& uuid);
+
     // Tier 4 builders — volta.
     static QJsonObject buildInsertVolta(mu::engraving::EngravingObject* volta,
                                         const QString& uuid);
