@@ -244,6 +244,12 @@ private:
                                           const QString& uuid, const QString& partId);
     static QJsonObject buildRemoveTrillLine(const QString& uuid);
 
+    // Tier 3 builders — arpeggios.
+    static QJsonObject buildAddArpeggio(mu::engraving::EngravingObject* arp,
+                                         const QString& uuid, const QString& partId,
+                                         const QString& eventUuid);
+    static QJsonObject buildRemoveArpeggio(const QString& uuid);
+
     // Tier 4 builders — volta.
     static QJsonObject buildInsertVolta(mu::engraving::EngravingObject* volta,
                                         const QString& uuid);

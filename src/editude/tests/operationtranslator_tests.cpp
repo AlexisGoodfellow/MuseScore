@@ -56,6 +56,16 @@ static const QString PART_ID("test-part-id");
 
 class Editude_OperationTranslatorTests : public ::testing::Test {};
 
+// Create a translator with the default part pre-registered.
+static OperationTranslator makeTranslator(Score* score)
+{
+    OperationTranslator t;
+    if (score && !score->parts().empty()) {
+        t.registerKnownPart(score->parts().front(), PART_ID);
+    }
+    return t;
+}
+
 // ---------------------------------------------------------------------------
 // Helper: apply a remote InsertNote via ScoreApplicator and return the UUID.
 // ---------------------------------------------------------------------------
@@ -108,7 +118,7 @@ TEST_F(Editude_OperationTranslatorTests, emptyChanges_returnsEmpty)
 {
     OperationTranslator translator;
     QHash<EngravingObject*, QString> emptyMap;
-    const auto ops = translator.translateAll({}, {}, PART_ID, emptyMap);
+    const auto ops = translator.translateAll({}, {}, emptyMap);
     EXPECT_TRUE(ops.isEmpty());
 }
 
@@ -119,7 +129,7 @@ TEST_F(Editude_OperationTranslatorTests, unknownCommandType_returnsEmpty)
     // Use a dummy non-null EngravingObject* that doesn't match any handled type.
     // Pass a null pointer — should be skipped gracefully.
     ChangedMap changed = { { nullptr, { CommandType::ChangeStyle } } };
-    const auto ops = translator.translateAll(changed, {}, PART_ID, emptyMap);
+    const auto ops = translator.translateAll(changed, {}, emptyMap);
     EXPECT_TRUE(ops.isEmpty());
 }
 
@@ -155,8 +165,8 @@ TEST_F(Editude_OperationTranslatorTests, insertNote_fromLocalEdit_emitsInsertNot
         { note,  { CommandType::AddElement } },
     };
 
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "InsertNote");
@@ -191,15 +201,15 @@ TEST_F(Editude_OperationTranslatorTests, insertNote_localUuidTracked_forSubseque
         { chord, { CommandType::AddElement } },
         { note,  { CommandType::AddElement } },
     };
-    OperationTranslator translator;
-    auto insertOps = translator.translateAll(insertChange, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    auto insertOps = translator.translateAll(insertChange, {}, applicator.elementToUuid());
     ASSERT_EQ(insertOps.size(), 1);
     const QString assignedUuid = insertOps[0]["id"].toString();
     ASSERT_FALSE(assignedUuid.isEmpty());
 
     // Now simulate ChangePitch on the same note — translator should find the UUID.
     ChangedMap pitchChange = { { note, { CommandType::ChangePitch } } };
-    const auto pitchOps = translator.translateAll(pitchChange, {}, PART_ID, applicator.elementToUuid());
+    const auto pitchOps = translator.translateAll(pitchChange, {}, applicator.elementToUuid());
     ASSERT_EQ(pitchOps.size(), 1);
     EXPECT_EQ(pitchOps[0]["type"].toString(), "SetPitch");
     EXPECT_EQ(pitchOps[0]["event_id"].toString(), assignedUuid);
@@ -246,8 +256,8 @@ TEST_F(Editude_OperationTranslatorTests, insertChord_twoPitches_emitsInsertChord
         changed[n] = { CommandType::AddElement };
     }
 
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "InsertChord");
@@ -282,8 +292,8 @@ TEST_F(Editude_OperationTranslatorTests, insertRest_emitsInsertRest)
     Rest* rest = toRest(el);
 
     ChangedMap changed = { { rest, { CommandType::AddElement } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "InsertRest");
@@ -318,8 +328,8 @@ TEST_F(Editude_OperationTranslatorTests, deleteEvent_remoteNote_emitsDeleteEvent
         { note,  { CommandType::RemoveElement } },
     };
 
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "DeleteEvent");
@@ -349,8 +359,8 @@ TEST_F(Editude_OperationTranslatorTests, deleteEvent_unknownNote_emitsNothing)
         { note,  { CommandType::RemoveElement } },
     };
 
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, emptyMap);
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, emptyMap);
     EXPECT_TRUE(ops.isEmpty());
 
     delete score;
@@ -374,8 +384,8 @@ TEST_F(Editude_OperationTranslatorTests, setPitch_remoteNote_emitsSetPitch)
     Note* note = toChord(seg->cr(0))->notes().front();
 
     ChangedMap changed = { { note, { CommandType::ChangePitch } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "SetPitch");
@@ -399,8 +409,8 @@ TEST_F(Editude_OperationTranslatorTests, setPitch_unknownNote_emitsNothing)
 
     QHash<EngravingObject*, QString> emptyMap;
     ChangedMap changed = { { note, { CommandType::ChangePitch } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, emptyMap);
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, emptyMap);
     EXPECT_TRUE(ops.isEmpty());
 
     delete score;
@@ -426,8 +436,8 @@ TEST_F(Editude_OperationTranslatorTests, setTrack_remoteNote_emitsSetTrack)
     ChangedMap changed = { { note, { CommandType::ChangeProperty } } };
     PropertyIdSet propIds = { Pid::TRACK };
 
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, propIds, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, propIds, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "SetTrack");
@@ -452,8 +462,8 @@ TEST_F(Editude_OperationTranslatorTests, setTrack_noTrackInPropertyIdSet_emitsNo
     ChangedMap changed = { { note, { CommandType::ChangeProperty } } };
     PropertyIdSet propIds = { Pid::COLOR }; // not TRACK
 
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, propIds, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, propIds, applicator.elementToUuid());
     EXPECT_TRUE(ops.isEmpty());
 
     delete score;
@@ -492,7 +502,7 @@ static QString registerPartInTranslator(OperationTranslator& translator, Part* p
                                         const QHash<EngravingObject*, QString>& remoteMap)
 {
     ChangedMap partChange = { { part, { CommandType::AddElement } } };
-    const auto partOps = translator.translateAll(partChange, {}, PART_ID, remoteMap);
+    const auto partOps = translator.translateAll(partChange, {}, remoteMap);
     if (partOps.size() != 1 || partOps[0]["type"].toString() != QLatin1String("AddPart")) {
         return {};
     }
@@ -546,8 +556,8 @@ TEST_F(Editude_OperationTranslatorTests, addArticulation_onSingleNoteEvent_emits
     // Simulate AddElement on the articulation locally (not in remote map).
     // The translator must find the parent UUID via the Note* fallback path.
     ChangedMap changed = { { art, { CommandType::AddElement } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "AddArticulation");
@@ -585,8 +595,8 @@ TEST_F(Editude_OperationTranslatorTests, addArticulation_unknownParent_emitsNoth
     // Pass empty remote map — parent UUID not findable, so the pass skips.
     QHash<EngravingObject*, QString> emptyMap;
     ChangedMap changed = { { art, { CommandType::AddElement } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, emptyMap);
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, emptyMap);
     EXPECT_TRUE(ops.isEmpty());
 
     delete score;
@@ -617,16 +627,16 @@ TEST_F(Editude_OperationTranslatorTests, removeArticulation_knownElement_emitsRe
     auto* art = static_cast<Articulation*>(chord->articulations().front());
 
     // First, Add (registers art* in translator's local map).
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     ChangedMap addChange = { { art, { CommandType::AddElement } } };
-    auto addOps = translator.translateAll(addChange, {}, PART_ID, applicator.elementToUuid());
+    auto addOps = translator.translateAll(addChange, {}, applicator.elementToUuid());
     ASSERT_EQ(addOps.size(), 1);
     const QString artUuid = addOps[0]["id"].toString();
     ASSERT_FALSE(artUuid.isEmpty());
 
     // Then Remove — translator finds UUID in its own local map.
     ChangedMap removeChange = { { art, { CommandType::RemoveElement } } };
-    const auto removeOps = translator.translateAll(removeChange, {}, PART_ID, applicator.elementToUuid());
+    const auto removeOps = translator.translateAll(removeChange, {}, applicator.elementToUuid());
     ASSERT_EQ(removeOps.size(), 1);
     EXPECT_EQ(removeOps[0]["type"].toString(), "RemoveArticulation");
     EXPECT_EQ(removeOps[0]["id"].toString(), artUuid);
@@ -660,11 +670,13 @@ TEST_F(Editude_OperationTranslatorTests, addDynamic_unknownPart_emitsNothing)
                                                          ElementType::DYNAMIC));
     ASSERT_TRUE(dyn);
 
-    // Translator has no part registered → silently skips.
+    // Translator lazily registers unknown part → emits AddPart + AddDynamic.
     OperationTranslator translator;
     ChangedMap changed = { { dyn, { CommandType::AddElement } } };
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
-    EXPECT_TRUE(ops.isEmpty());
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
+    ASSERT_EQ(ops.size(), 2);
+    EXPECT_EQ(ops[0]["type"].toString(), "AddPart");
+    EXPECT_EQ(ops[1]["type"].toString(), "AddDynamic");
 
     delete score;
 }
@@ -691,12 +703,12 @@ TEST_F(Editude_OperationTranslatorTests, addDynamic_registeredPart_emitsAddDynam
                                                          ElementType::DYNAMIC));
     ASSERT_TRUE(dyn);
 
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     // Register the part in the translator before testing the dynamic.
     ASSERT_FALSE(registerPartInTranslator(translator, testPart, applicator.elementToUuid()).isEmpty());
 
     ChangedMap changed = { { dyn, { CommandType::AddElement } } };
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "AddDynamic");
@@ -729,18 +741,18 @@ TEST_F(Editude_OperationTranslatorTests, setDynamic_changeProperty_emitsSetDynam
                                                          ElementType::DYNAMIC));
     ASSERT_TRUE(dyn);
 
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     ASSERT_FALSE(registerPartInTranslator(translator, testPart, applicator.elementToUuid()).isEmpty());
 
     // Register the dynamic locally via Add first.
     ChangedMap addChange = { { dyn, { CommandType::AddElement } } };
-    auto addOps = translator.translateAll(addChange, {}, PART_ID, applicator.elementToUuid());
+    auto addOps = translator.translateAll(addChange, {}, applicator.elementToUuid());
     ASSERT_EQ(addOps.size(), 1);
     const QString dynUuid = addOps[0]["id"].toString();
 
     // Simulate ChangeProperty (DynamicType changed) — translator emits SetDynamic.
     ChangedMap setPropChange = { { dyn, { CommandType::ChangeProperty } } };
-    const auto setOps = translator.translateAll(setPropChange, {}, PART_ID, applicator.elementToUuid());
+    const auto setOps = translator.translateAll(setPropChange, {}, applicator.elementToUuid());
     ASSERT_EQ(setOps.size(), 1);
     EXPECT_EQ(setOps[0]["type"].toString(), "SetDynamic");
     EXPECT_EQ(setOps[0]["id"].toString(), dynUuid);
@@ -776,8 +788,8 @@ TEST_F(Editude_OperationTranslatorTests, addSlur_singleNoteEndpoints_emitsAddSlu
     ASSERT_TRUE(slur);
 
     ChangedMap changed = { { slur, { CommandType::AddElement } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "AddSlur");
@@ -813,8 +825,8 @@ TEST_F(Editude_OperationTranslatorTests, addSlur_unknownEndpoints_emitsNothing)
     // Empty remote map — translator cannot resolve endpoint UUIDs.
     QHash<EngravingObject*, QString> emptyMap;
     ChangedMap changed = { { slur, { CommandType::AddElement } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, emptyMap);
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, emptyMap);
     EXPECT_TRUE(ops.isEmpty());
 
     delete score;
@@ -846,11 +858,13 @@ TEST_F(Editude_OperationTranslatorTests, addHairpin_unknownPart_emitsNothing)
                                                          ElementType::HAIRPIN));
     ASSERT_TRUE(hp);
 
-    // No part registered in translator → skips.
+    // Translator lazily registers unknown part → emits AddPart + AddHairpin.
     OperationTranslator translator;
     ChangedMap changed = { { hp, { CommandType::AddElement } } };
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
-    EXPECT_TRUE(ops.isEmpty());
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
+    ASSERT_EQ(ops.size(), 2);
+    EXPECT_EQ(ops[0]["type"].toString(), "AddPart");
+    EXPECT_EQ(ops[1]["type"].toString(), "AddHairpin");
 
     delete score;
 }
@@ -877,11 +891,11 @@ TEST_F(Editude_OperationTranslatorTests, addHairpin_crescendo_emitsAddHairpin)
                                                          ElementType::HAIRPIN));
     ASSERT_TRUE(hp);
 
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     ASSERT_FALSE(registerPartInTranslator(translator, testPart, applicator.elementToUuid()).isEmpty());
 
     ChangedMap changed = { { hp, { CommandType::AddElement } } };
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "AddHairpin");
@@ -921,8 +935,8 @@ TEST_F(Editude_OperationTranslatorTests, addLyric_singleNoteEvent_emitsAddLyric)
     ASSERT_TRUE(lyr);
 
     ChangedMap changed = { { lyr, { CommandType::AddElement } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "AddLyric");
@@ -957,16 +971,16 @@ TEST_F(Editude_OperationTranslatorTests, setLyric_changeProperty_emitsSetLyric)
                                                          ElementType::LYRICS));
     ASSERT_TRUE(lyr);
 
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     // Register lyric locally.
     ChangedMap addChange = { { lyr, { CommandType::AddElement } } };
-    auto addOps = translator.translateAll(addChange, {}, PART_ID, applicator.elementToUuid());
+    auto addOps = translator.translateAll(addChange, {}, applicator.elementToUuid());
     ASSERT_EQ(addOps.size(), 1);
     const QString lyrUuid = addOps[0]["id"].toString();
 
     // Simulate ChangeProperty (text changed).
     ChangedMap setPropChange = { { lyr, { CommandType::ChangeProperty } } };
-    const auto setOps = translator.translateAll(setPropChange, {}, PART_ID, applicator.elementToUuid());
+    const auto setOps = translator.translateAll(setPropChange, {}, applicator.elementToUuid());
     ASSERT_EQ(setOps.size(), 1);
     EXPECT_EQ(setOps[0]["type"].toString(), "SetLyric");
     EXPECT_EQ(setOps[0]["id"].toString(), lyrUuid);
@@ -997,14 +1011,14 @@ TEST_F(Editude_OperationTranslatorTests, removeLyric_knownElement_emitsRemoveLyr
                                                          ElementType::LYRICS));
     ASSERT_TRUE(lyr);
 
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     ChangedMap addChange = { { lyr, { CommandType::AddElement } } };
-    auto addOps = translator.translateAll(addChange, {}, PART_ID, applicator.elementToUuid());
+    auto addOps = translator.translateAll(addChange, {}, applicator.elementToUuid());
     ASSERT_EQ(addOps.size(), 1);
     const QString lyrUuid = addOps[0]["id"].toString();
 
     ChangedMap removeChange = { { lyr, { CommandType::RemoveElement } } };
-    const auto removeOps = translator.translateAll(removeChange, {}, PART_ID, applicator.elementToUuid());
+    const auto removeOps = translator.translateAll(removeChange, {}, applicator.elementToUuid());
     ASSERT_EQ(removeOps.size(), 1);
     EXPECT_EQ(removeOps[0]["type"].toString(), "RemoveLyric");
     EXPECT_EQ(removeOps[0]["id"].toString(), lyrUuid);
@@ -1023,12 +1037,12 @@ TEST_F(Editude_OperationTranslatorTests, insertBeats_measureWithInsertMeasuresCm
 
     Measure* measure = score->firstMeasure();
     ASSERT_TRUE(measure);
-    const Fraction expectedDuration = measure->ticks();
+    const Fraction expectedDuration = measure->ticks().reduced();
 
     ChangedMap changed = { { measure, { CommandType::InsertMeasures } } };
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     QHash<EngravingObject*, QString> emptyMap;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, emptyMap);
+    const auto ops = translator.translateAll(changed, {}, emptyMap);
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "InsertBeats");
@@ -1048,9 +1062,9 @@ TEST_F(Editude_OperationTranslatorTests, deleteBeats_measureWithRemoveMeasuresCm
     ASSERT_TRUE(measure);
 
     ChangedMap changed = { { measure, { CommandType::RemoveMeasures } } };
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     QHash<EngravingObject*, QString> emptyMap;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, emptyMap);
+    const auto ops = translator.translateAll(changed, {}, emptyMap);
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "DeleteBeats");
@@ -1085,8 +1099,8 @@ TEST_F(Editude_OperationTranslatorTests, insertVolta_fromLocalEdit_emitsInsertVo
     ASSERT_TRUE(volta);
 
     ChangedMap changed = { { volta, { CommandType::AddElement } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "InsertVolta");
@@ -1118,15 +1132,15 @@ TEST_F(Editude_OperationTranslatorTests, removeVolta_knownElement_emitsRemoveVol
     ASSERT_TRUE(volta);
 
     // Add locally first.
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     ChangedMap addChange = { { volta, { CommandType::AddElement } } };
-    auto addOps = translator.translateAll(addChange, {}, PART_ID, applicator.elementToUuid());
+    auto addOps = translator.translateAll(addChange, {}, applicator.elementToUuid());
     ASSERT_EQ(addOps.size(), 1);
     const QString voltaUuid = addOps[0]["id"].toString();
 
     // Now remove.
     ChangedMap removeChange = { { volta, { CommandType::RemoveElement } } };
-    const auto removeOps = translator.translateAll(removeChange, {}, PART_ID, applicator.elementToUuid());
+    const auto removeOps = translator.translateAll(removeChange, {}, applicator.elementToUuid());
     ASSERT_EQ(removeOps.size(), 1);
     EXPECT_EQ(removeOps[0]["type"].toString(), "RemoveVolta");
     EXPECT_EQ(removeOps[0]["id"].toString(), voltaUuid);
@@ -1158,8 +1172,8 @@ TEST_F(Editude_OperationTranslatorTests, insertMarker_segno_emitsInsertMarker)
     ASSERT_TRUE(marker);
 
     ChangedMap changed = { { marker, { CommandType::AddElement } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "InsertMarker");
@@ -1187,14 +1201,14 @@ TEST_F(Editude_OperationTranslatorTests, removeMarker_knownElement_emitsRemoveMa
                                                             ElementType::MARKER));
     ASSERT_TRUE(marker);
 
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     ChangedMap addChange = { { marker, { CommandType::AddElement } } };
-    auto addOps = translator.translateAll(addChange, {}, PART_ID, applicator.elementToUuid());
+    auto addOps = translator.translateAll(addChange, {}, applicator.elementToUuid());
     ASSERT_EQ(addOps.size(), 1);
     const QString markerUuid = addOps[0]["id"].toString();
 
     ChangedMap removeChange = { { marker, { CommandType::RemoveElement } } };
-    const auto removeOps = translator.translateAll(removeChange, {}, PART_ID, applicator.elementToUuid());
+    const auto removeOps = translator.translateAll(removeChange, {}, applicator.elementToUuid());
     ASSERT_EQ(removeOps.size(), 1);
     EXPECT_EQ(removeOps[0]["type"].toString(), "RemoveMarker");
     EXPECT_EQ(removeOps[0]["id"].toString(), markerUuid);
@@ -1228,8 +1242,8 @@ TEST_F(Editude_OperationTranslatorTests, insertJump_fromLocalEdit_emitsInsertJum
     ASSERT_TRUE(jump);
 
     ChangedMap changed = { { jump, { CommandType::AddElement } } };
-    OperationTranslator translator;
-    const auto ops = translator.translateAll(changed, {}, PART_ID, applicator.elementToUuid());
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {}, applicator.elementToUuid());
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "InsertJump");
@@ -1259,14 +1273,14 @@ TEST_F(Editude_OperationTranslatorTests, removeJump_knownElement_emitsRemoveJump
                                                         ElementType::JUMP));
     ASSERT_TRUE(jump);
 
-    OperationTranslator translator;
+    auto translator = makeTranslator(score);
     ChangedMap addChange = { { jump, { CommandType::AddElement } } };
-    auto addOps = translator.translateAll(addChange, {}, PART_ID, applicator.elementToUuid());
+    auto addOps = translator.translateAll(addChange, {}, applicator.elementToUuid());
     ASSERT_EQ(addOps.size(), 1);
     const QString jumpUuid = addOps[0]["id"].toString();
 
     ChangedMap removeChange = { { jump, { CommandType::RemoveElement } } };
-    const auto removeOps = translator.translateAll(removeChange, {}, PART_ID, applicator.elementToUuid());
+    const auto removeOps = translator.translateAll(removeChange, {}, applicator.elementToUuid());
     ASSERT_EQ(removeOps.size(), 1);
     EXPECT_EQ(removeOps[0]["type"].toString(), "RemoveJump");
     EXPECT_EQ(removeOps[0]["id"].toString(), jumpUuid);
@@ -1286,7 +1300,7 @@ TEST_F(Editude_OperationTranslatorTests, setScoreMetadata_titleChange_emitsOpWit
     QMap<QString, QString> metaChanges;
     metaChanges["workTitle"] = "Symphony No. 1";
 
-    const auto ops = translator.translateAll({}, {}, PART_ID, emptyMap, metaChanges);
+    const auto ops = translator.translateAll({}, {}, emptyMap, metaChanges);
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["type"].toString(), "SetScoreMetadata");
@@ -1303,7 +1317,7 @@ TEST_F(Editude_OperationTranslatorTests, setScoreMetadata_multipleFields_emitsOn
     metaChanges["composer"] = "Beethoven";
     metaChanges["subtitle"] = "Op. 125";
 
-    const auto ops = translator.translateAll({}, {}, PART_ID, emptyMap, metaChanges);
+    const auto ops = translator.translateAll({}, {}, emptyMap, metaChanges);
 
     ASSERT_EQ(ops.size(), 2);
     // Collect emitted fields (order not guaranteed).
@@ -1323,7 +1337,7 @@ TEST_F(Editude_OperationTranslatorTests, setScoreMetadata_emptyDelta_emitsNothin
     OperationTranslator translator;
     QHash<EngravingObject*, QString> emptyMap;
 
-    const auto ops = translator.translateAll({}, {}, PART_ID, emptyMap, {});
+    const auto ops = translator.translateAll({}, {}, emptyMap, {});
     EXPECT_TRUE(ops.isEmpty());
 }
 
@@ -1335,7 +1349,7 @@ TEST_F(Editude_OperationTranslatorTests, setScoreMetadata_unmappedTag_usesTagNam
     QMap<QString, QString> metaChanges;
     metaChanges["customProjectCode"] = "PROJ-42";
 
-    const auto ops = translator.translateAll({}, {}, PART_ID, emptyMap, metaChanges);
+    const auto ops = translator.translateAll({}, {}, emptyMap, metaChanges);
 
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["field"].toString(), "customProjectCode");

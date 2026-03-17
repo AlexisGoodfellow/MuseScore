@@ -28,6 +28,7 @@
 #include <QUuid>
 
 #include "engraving/dom/accidental.h"
+#include "engraving/dom/arpeggio.h"
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
@@ -1185,6 +1186,37 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
+    // ── Pass 26b: Arpeggios (event-UUID anchored) ─────────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::ARPEGGIO) {
+            continue;
+        }
+        auto* arp = static_cast<Arpeggio*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            Chord* ch = arp->chord();
+            if (!ch) continue;
+            const QString eventUuid = uuidForChordRest(ch, remoteElementToUuid);
+            if (eventUuid.isEmpty()) {
+                LOGD() << "[editude] translateAll: AddArpeggio: parent chord UUID unknown, skipping";
+                continue;
+            }
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[arp]  = uuid;
+            m_localUuidToElement[uuid] = arp;
+            Part* arpPart = ch->staff() ? ch->staff()->part() : nullptr;
+            const QString arpPartUuid = resolvePartUuid(arpPart, lazyAddPartOps);
+            if (arpPartUuid.isEmpty()) continue;
+            ops.append(buildAddArpeggio(arp, uuid, arpPartUuid, eventUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(arp, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveArpeggio(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(arp);
+            }
+        }
+    }
+
     // ── Pass 27: InsertBeats / DeleteBeats ───────────────────────────────
     // Collect MEASURE objects by their command type, sort by tick, then emit
     // a single InsertBeats or DeleteBeats covering the contiguous range.
@@ -2167,6 +2199,46 @@ QJsonObject OperationTranslator::buildRemoveTrillLine(const QString& uuid)
 {
     QJsonObject payload;
     payload["type"] = QStringLiteral("RemoveTrillLine");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3 builders — arpeggios
+// ---------------------------------------------------------------------------
+
+static QString arpeggioTypeName(ArpeggioType t)
+{
+    switch (t) {
+    case ArpeggioType::NORMAL:        return QStringLiteral("normal");
+    case ArpeggioType::UP:            return QStringLiteral("up");
+    case ArpeggioType::DOWN:          return QStringLiteral("down");
+    case ArpeggioType::BRACKET:       return QStringLiteral("bracket");
+    case ArpeggioType::UP_STRAIGHT:   return QStringLiteral("up_straight");
+    case ArpeggioType::DOWN_STRAIGHT: return QStringLiteral("down_straight");
+    }
+    return QStringLiteral("normal");
+}
+
+QJsonObject OperationTranslator::buildAddArpeggio(EngravingObject* arp,
+                                                    const QString& uuid,
+                                                    const QString& partId,
+                                                    const QString& eventUuid)
+{
+    auto* a = static_cast<Arpeggio*>(arp);
+    QJsonObject payload;
+    payload["type"]      = QStringLiteral("AddArpeggio");
+    payload["id"]        = uuid;
+    payload["part_id"]   = partId;
+    payload["event_id"]  = eventUuid;
+    payload["direction"] = arpeggioTypeName(a->arpeggioType());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveArpeggio(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveArpeggio");
     payload["id"]   = uuid;
     return payload;
 }

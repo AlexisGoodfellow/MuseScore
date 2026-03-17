@@ -23,6 +23,7 @@
 #include "engraving/types/types.h"
 #include "engraving/types/typesconv.h"
 
+#include "engraving/dom/arpeggio.h"
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/clef.h"
@@ -252,6 +253,8 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("remove_pedal_line"))    return actionRemovePedalLine(body);
     if (action == QLatin1String("add_trill_line"))       return actionAddTrillLine(body);
     if (action == QLatin1String("remove_trill_line"))    return actionRemoveTrillLine(body);
+    if (action == QLatin1String("add_arpeggio"))         return actionAddArpeggio(body);
+    if (action == QLatin1String("remove_arpeggio"))      return actionRemoveArpeggio(body);
     if (action == QLatin1String("add_lyric"))             return actionAddLyric(body);
     if (action == QLatin1String("set_lyric"))             return actionSetLyric(body);
     if (action == QLatin1String("remove_lyric"))          return actionRemoveLyric(body);
@@ -611,6 +614,7 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
         { "tuplets",       QJsonObject() },
         { "lyrics",        serializePartLyricsMap(part) },
         { "staff_texts",   serializePartStaffTexts(part) },
+        { "arpeggios",     serializePartArpeggios(part) },
     };
 }
 
@@ -1011,6 +1015,52 @@ QJsonObject EditudeTestServer::serializePartArticulations(Part* part)
                         { "articulation", articulationNameFromSymId(art->symId()) },
                     };
                 }
+            }
+        }
+    }
+    return result;
+}
+
+static QString arpeggioDirectionName(ArpeggioType t)
+{
+    static const QHash<ArpeggioType, QString> s_map = {
+        { ArpeggioType::NORMAL,        QStringLiteral("normal") },
+        { ArpeggioType::UP,            QStringLiteral("up") },
+        { ArpeggioType::DOWN,          QStringLiteral("down") },
+        { ArpeggioType::BRACKET,       QStringLiteral("bracket") },
+        { ArpeggioType::UP_STRAIGHT,   QStringLiteral("up_straight") },
+        { ArpeggioType::DOWN_STRAIGHT, QStringLiteral("down_straight") },
+    };
+    return s_map.value(t, QStringLiteral("normal"));
+}
+
+QJsonObject EditudeTestServer::serializePartArpeggios(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(SegmentType::ChordRest); seg;
+             seg = seg->next(SegmentType::ChordRest)) {
+            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+                EngravingItem* el = seg->element(track);
+                if (!el || !el->isChord()) {
+                    continue;
+                }
+                Chord* chord = toChord(el);
+                Arpeggio* arp = chord->arpeggio();
+                if (!arp) {
+                    continue;
+                }
+                const QString arpUuid = uuidForElement(arp);
+                if (arpUuid.isEmpty()) {
+                    continue;
+                }
+                const QString eventUuid = uuidForChordRest(chord);
+                result[arpUuid] = QJsonObject{
+                    { "id",        arpUuid },
+                    { "event_id",  eventUuid },
+                    { "direction", arpeggioDirectionName(arp->arpeggioType()) },
+                };
             }
         }
     }
@@ -1562,6 +1612,77 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveArticulation(const QJson
 
     score->startCmd(TranslatableString("test", "remove articulation"));
     score->undoRemoveElement(art);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionAddArpeggio(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString eventId  = body["event_id"].toString();
+    const QString dirName  = body["direction"].toString();
+
+    EngravingObject* obj = findByUuid(eventId);
+    if (!obj) {
+        return errorResponse(404, "event not found");
+    }
+
+    Chord* chord = nullptr;
+    if (obj->isNote()) {
+        chord = toNote(static_cast<EngravingItem*>(obj))->chord();
+    } else if (obj->isChord()) {
+        chord = toChord(static_cast<EngravingItem*>(obj));
+    }
+    if (!chord) {
+        return errorResponse(422, "event is not a note or chord");
+    }
+
+    static const QHash<QString, ArpeggioType> s_arpMap = {
+        { QStringLiteral("normal"),        ArpeggioType::NORMAL },
+        { QStringLiteral("up"),            ArpeggioType::UP },
+        { QStringLiteral("down"),          ArpeggioType::DOWN },
+        { QStringLiteral("bracket"),       ArpeggioType::BRACKET },
+        { QStringLiteral("up_straight"),   ArpeggioType::UP_STRAIGHT },
+        { QStringLiteral("down_straight"), ArpeggioType::DOWN_STRAIGHT },
+    };
+    const ArpeggioType arpType = s_arpMap.value(dirName, ArpeggioType::NORMAL);
+
+    score->startCmd(TranslatableString("test", "add arpeggio"));
+    Arpeggio* arp = Factory::createArpeggio(chord);
+    arp->setArpeggioType(arpType);
+    arp->setParent(chord);
+    arp->setTrack(chord->track());
+    score->undoAddElement(arp);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveArpeggio(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "arpeggio not found");
+    }
+
+    Arpeggio* arp = dynamic_cast<Arpeggio*>(obj);
+    if (!arp) {
+        return errorResponse(422, "element is not an Arpeggio");
+    }
+
+    score->startCmd(TranslatableString("test", "remove arpeggio"));
+    score->undoRemoveElement(arp);
     score->endCmd();
 
     return okResponse();

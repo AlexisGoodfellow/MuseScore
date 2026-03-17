@@ -160,6 +160,9 @@ private:
     // Advanced spanners — trill lines
     bool applyAddTrillLine(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveTrillLine(mu::engraving::Score* score, const QJsonObject& payload);
+    // Arpeggios
+    bool applyAddArpeggio(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveArpeggio(mu::engraving::Score* score, const QJsonObject& payload);
 
     // Tier 4 — navigation marks
     bool applyInsertVolta(mu::engraving::Score* score, const QJsonObject& payload);

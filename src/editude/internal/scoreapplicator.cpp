@@ -56,6 +56,7 @@
 #include "engraving/dom/stafftext.h"
 #include "engraving/dom/systemtext.h"
 #include "engraving/dom/accidental.h"
+#include "engraving/dom/arpeggio.h"
 #include "engraving/dom/glissando.h"
 #include "engraving/dom/ornament.h"
 #include "engraving/dom/ottava.h"
@@ -1095,6 +1096,9 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     // Advanced spanners — trill lines
     if (type == QLatin1String("AddTrillLine"))    return applyAddTrillLine(score, payload);
     if (type == QLatin1String("RemoveTrillLine")) return applyRemoveTrillLine(score, payload);
+    // Arpeggios
+    if (type == QLatin1String("AddArpeggio"))    return applyAddArpeggio(score, payload);
+    if (type == QLatin1String("RemoveArpeggio")) return applyRemoveArpeggio(score, payload);
 
     // Tier 4 — navigation marks
     if (type == QLatin1String("InsertVolta"))  return applyInsertVolta(score, payload);
@@ -2367,6 +2371,88 @@ bool ScoreApplicator::applyRemoveTrillLine(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Remove trill line"));
     score->undoRemoveElement(trill);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Arpeggios
+// ---------------------------------------------------------------------------
+
+static ArpeggioType arpeggioTypeFromName(const QString& name)
+{
+    static const QHash<QString, ArpeggioType> s_map = {
+        { QStringLiteral("normal"),        ArpeggioType::NORMAL },
+        { QStringLiteral("up"),            ArpeggioType::UP },
+        { QStringLiteral("down"),          ArpeggioType::DOWN },
+        { QStringLiteral("bracket"),       ArpeggioType::BRACKET },
+        { QStringLiteral("up_straight"),   ArpeggioType::UP_STRAIGHT },
+        { QStringLiteral("down_straight"), ArpeggioType::DOWN_STRAIGHT },
+    };
+    return s_map.value(name, ArpeggioType::NORMAL);
+}
+
+
+bool ScoreApplicator::applyAddArpeggio(Score* score, const QJsonObject& op)
+{
+    const QString id       = op["id"].toString();
+    const QString eventId  = op["event_id"].toString();
+    const QString dirName  = op["direction"].toString();
+
+    if (id.isEmpty() || eventId.isEmpty()) {
+        LOGW() << "[editude] applyAddArpeggio: missing id or event_id";
+        return false;
+    }
+
+    EngravingObject* evObj = m_uuidToElement.value(eventId);
+    if (!evObj) {
+        LOGW() << "[editude] applyAddArpeggio: unknown event_id" << eventId;
+        return false;
+    }
+
+    Chord* chord = nullptr;
+    if (evObj->isNote()) {
+        chord = toNote(static_cast<EngravingItem*>(evObj))->chord();
+    } else if (evObj->isChord()) {
+        chord = toChord(static_cast<EngravingItem*>(evObj));
+    }
+    if (!chord) {
+        LOGW() << "[editude] applyAddArpeggio: event is not a note/chord" << eventId;
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add arpeggio"));
+    Arpeggio* arp = Factory::createArpeggio(chord);
+    arp->setArpeggioType(arpeggioTypeFromName(dirName));
+    arp->setParent(chord);
+    arp->setTrack(chord->track());
+    score->undoAddElement(arp);
+    score->endCmd();
+
+    m_uuidToElement[id] = arp;
+    m_elementToUuid[arp] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveArpeggio(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveArpeggio: unknown id" << id;
+        return false;
+    }
+
+    Arpeggio* arp = dynamic_cast<Arpeggio*>(m_uuidToElement.value(id));
+    if (!arp) {
+        LOGW() << "[editude] applyRemoveArpeggio: element is not Arpeggio" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(arp);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove arpeggio"));
+    score->undoRemoveElement(arp);
     score->endCmd();
     return true;
 }

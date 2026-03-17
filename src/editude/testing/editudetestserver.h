@@ -79,6 +79,10 @@ private:
     Reply actionAddArticulation(const QJsonObject& body);
     Reply actionRemoveArticulation(const QJsonObject& body);
 
+    // Tier 3 — arpeggios
+    Reply actionAddArpeggio(const QJsonObject& body);
+    Reply actionRemoveArpeggio(const QJsonObject& body);
+
     // Tier 3 — dynamics
     Reply actionAddDynamic(const QJsonObject& body);
     Reply actionSetDynamic(const QJsonObject& body);
@@ -157,6 +161,7 @@ private:
                                const QString& uuid,
                                const mu::engraving::Fraction& tick);
     QJsonObject serializePartArticulations(mu::engraving::Part* part);
+    QJsonObject serializePartArpeggios(mu::engraving::Part* part);
     QJsonObject serializePartDynamics(mu::engraving::Part* part);
     QJsonObject serializePartSlurs(mu::engraving::Part* part);
     QJsonObject serializePartHairpins(mu::engraving::Part* part);
