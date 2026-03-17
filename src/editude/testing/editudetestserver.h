@@ -69,6 +69,9 @@ private:
     Reply actionSetPartName(const QJsonObject& body);
     Reply actionSetStaffCount(const QJsonObject& body);
     Reply actionSetPartInstrument(const QJsonObject& body);
+    Reply actionSetStringData(const QJsonObject& body);
+    Reply actionSetCapo(const QJsonObject& body);
+    Reply actionSetTabNote(const QJsonObject& body);
 
     // Tier 3 — chord symbols
     Reply actionAddChordSymbol(const QJsonObject& body);

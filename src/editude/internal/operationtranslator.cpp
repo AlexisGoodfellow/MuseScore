@@ -38,6 +38,7 @@
 #include "engraving/dom/glissando.h"
 #include "engraving/dom/harmony.h"
 #include "engraving/dom/hairpin.h"
+#include "engraving/dom/instrument.h"
 #include "engraving/dom/jump.h"
 #include "engraving/dom/keysig.h"
 #include "engraving/dom/lyrics.h"
@@ -546,6 +547,25 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             continue;
         }
         ops.append(buildSetPitch(uuid, static_cast<Note*>(obj)));
+    }
+
+    // ── Pass 7b: ChangeProperty + Pid::FRET/STRING → SetTabNote ──────────
+    // A fret/string change at constant pitch is a distinct user intent from a
+    // pitch change — it represents changing the voicing on a fretted instrument.
+    if (changedPropertyIdSet.count(Pid::FRET) || changedPropertyIdSet.count(Pid::STRING)) {
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || obj->type() != ElementType::NOTE) {
+                continue;
+            }
+            if (!cmds.count(CommandType::ChangeProperty)) {
+                continue;
+            }
+            const QString uuid = uuidForElement(obj, remoteElementToUuid);
+            if (uuid.isEmpty()) {
+                continue;
+            }
+            ops.append(buildSetTabNote(uuid, static_cast<Note*>(obj)));
+        }
     }
 
     // ── Pass 8: ChangeProperty + Pid::TRACK → SetTrack ───────────────────
@@ -1439,6 +1459,12 @@ QJsonObject OperationTranslator::buildInsertNote(Note* note, const QString& uuid
     payload["track"]    = static_cast<int>(note->track());
     payload["pitch"]    = pitchJson(note->tpc1(), note->octave());
     payload["tie"]      = QJsonValue::Null;
+
+    // Tab fields: include fret/string if the note carries tab data.
+    if (note->fret() >= 0 && note->string() >= 0) {
+        payload["fret"]   = note->fret();
+        payload["string"] = note->string();
+    }
     return payload;
 }
 
@@ -1526,6 +1552,16 @@ QJsonObject OperationTranslator::buildSetPitch(const QString& uuid, Note* note)
     payload["type"]     = "SetPitch";
     payload["event_id"] = uuid;
     payload["pitch"]    = pitchJson(note->tpc1(), note->octave());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetTabNote(const QString& uuid, Note* note)
+{
+    QJsonObject payload;
+    payload["type"]     = QStringLiteral("SetTabNote");
+    payload["event_id"] = uuid;
+    payload["fret"]     = note->fret();
+    payload["string"]   = note->string();
     return payload;
 }
 
@@ -1687,6 +1723,26 @@ QJsonObject OperationTranslator::buildSetPartInstrument(const QString& uuid, Par
     instr["musescore_id"] = part->instrumentId().toQString();
     instr["name"]         = part->longName().toQString();
     instr["short_name"]   = part->shortName().toQString();
+
+    // Serialise StringData if the instrument has fretted-instrument string data.
+    const Instrument* inst = part->instrument();
+    if (inst) {
+        const StringData* sd = inst->stringData();
+        if (sd && !sd->stringList().empty()) {
+            QJsonArray strings;
+            for (const instrString& s : sd->stringList()) {
+                QJsonObject sObj;
+                sObj["pitch"]      = s.pitch;
+                sObj["open"]       = s.open;
+                sObj["start_fret"] = s.startFret;
+                strings.append(sObj);
+            }
+            QJsonObject sdObj;
+            sdObj["frets"]   = sd->frets();
+            sdObj["strings"] = strings;
+            instr["string_data"] = sdObj;
+        }
+    }
 
     QJsonObject payload;
     payload["type"]       = QStringLiteral("SetPartInstrument");

@@ -101,6 +101,9 @@ private:
     bool applyAddPart(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemovePart(mu::engraving::Score* score, const QJsonObject& payload);
     bool applySetPartInstrument(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetStringData(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetCapo(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetTabNote(mu::engraving::Score* score, const QJsonObject& payload);
 
     // Tier 3 — articulations
     bool applyAddArticulation(mu::engraving::Score* score, const QJsonObject& payload);

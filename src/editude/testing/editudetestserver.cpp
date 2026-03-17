@@ -31,6 +31,7 @@
 #include "engraving/dom/harmony.h"
 #include "engraving/dom/hairpin.h"
 #include "engraving/dom/instrument.h"
+#include "engraving/dom/stringdata.h"
 #include "engraving/dom/jump.h"
 #include "engraving/dom/keysig.h"
 #include "engraving/dom/lyrics.h"
@@ -233,6 +234,9 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("set_part_name")) return actionSetPartName(body);
     if (action == QLatin1String("set_staff_count")) return actionSetStaffCount(body);
     if (action == QLatin1String("set_part_instrument")) return actionSetPartInstrument(body);
+    if (action == QLatin1String("set_string_data"))    return actionSetStringData(body);
+    if (action == QLatin1String("set_capo"))            return actionSetCapo(body);
+    if (action == QLatin1String("set_tab_note"))       return actionSetTabNote(body);
     if (action == QLatin1String("add_chord_symbol"))    return actionAddChordSymbol(body);
     if (action == QLatin1String("set_chord_symbol"))    return actionSetChordSymbol(body);
     if (action == QLatin1String("remove_chord_symbol")) return actionRemoveChordSymbol(body);
@@ -587,11 +591,31 @@ QJsonObject EditudeTestServer::serializeScore()
 
 QJsonObject EditudeTestServer::serializePart(Part* part)
 {
-    const QJsonObject instrument{
+    QJsonObject instrument{
         { "musescore_id", part->instrumentId().toQString() },
         { "name",         part->longName().toQString() },
         { "short_name",   part->shortName().toQString() },
     };
+
+    // Serialise StringData if the instrument has fretted-instrument string data.
+    const Instrument* inst = part->instrument();
+    if (inst) {
+        const StringData* sd = inst->stringData();
+        if (sd && !sd->stringList().empty()) {
+            QJsonArray strings;
+            for (const instrString& s : sd->stringList()) {
+                QJsonObject sObj;
+                sObj["pitch"]      = s.pitch;
+                sObj["open"]       = s.open;
+                sObj["start_fret"] = s.startFret;
+                strings.append(sObj);
+            }
+            QJsonObject sdObj;
+            sdObj["frets"]   = sd->frets();
+            sdObj["strings"] = strings;
+            instrument["string_data"] = sdObj;
+        }
+    }
 
     const QString partUuid = uuidForPart(part);
 
@@ -666,7 +690,7 @@ QJsonArray EditudeTestServer::serializePartEvents(Part* part)
 QJsonObject EditudeTestServer::serializeNote(Note* note, const QString& uuid,
                                               const Fraction& tick)
 {
-    return QJsonObject{
+    QJsonObject obj{
         { "kind",     "note" },
         { "id",       uuid },
         { "beat",     beatJson(tick) },
@@ -678,6 +702,13 @@ QJsonObject EditudeTestServer::serializeNote(Note* note, const QString& uuid,
         { "tie",      QJsonValue::Null },
         { "track",    static_cast<int>(note->track()) },
     };
+
+    // Tab fields: include fret/string if the note carries tab data.
+    if (note->fret() >= 0 && note->string() >= 0) {
+        obj["fret"]   = note->fret();
+        obj["string"] = note->string();
+    }
+    return obj;
 }
 
 QJsonObject EditudeTestServer::serializeRest(Rest* rest, const QString& uuid,
@@ -1527,6 +1558,87 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPartInstrument(const QJsonO
     part->setLongNameAll(String(longName));
     part->setShortNameAll(String(shortName));
     part->undoChangeProperty(Pid::STAFF_LONG_NAME, PropertyValue(String(longName)));
+    score->endCmd();
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetStringData(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(-1);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject sdObj = body["string_data"].toObject();
+    if (sdObj.isEmpty()) {
+        return errorResponse(422, "string_data required");
+    }
+
+    Instrument* inst = part->instrument();
+    if (!inst) {
+        return errorResponse(422, "part has no instrument");
+    }
+
+    const QJsonArray strings = sdObj["strings"].toArray();
+    std::vector<instrString> table;
+    for (const QJsonValue& v : strings) {
+        const QJsonObject s = v.toObject();
+        table.emplace_back(s["pitch"].toInt(), s["open"].toBool(false),
+                           s["start_fret"].toInt(0));
+    }
+    StringData sd(sdObj["frets"].toInt(), table);
+
+    score->startCmd(TranslatableString("test", "set string data"));
+    inst->setStringData(sd);
+    // setStringData() does not go through the undo system, so the translator
+    // sees no changes.  Trigger a STAFF_LONG_NAME property change (identity)
+    // so Pass 10 fires and emits SetPartInstrument with the updated string_data.
+    part->undoChangeProperty(Pid::STAFF_LONG_NAME, PropertyValue(String(part->longName())));
+    score->endCmd();
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetCapo(const QJsonObject& body)
+{
+    // Capo is tracked in the Python model.  The C++ test server acknowledges
+    // the action without modifying the score — this mirrors the applicator's
+    // behaviour and ensures the op round-trips cleanly in e2e tests.
+    Q_UNUSED(body);
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetTabNote(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString eventId = body["event_id"].toString();
+    const int fret   = body["fret"].toInt(-1);
+    const int string = body["string"].toInt(-1);
+    if (fret < 0 || string < 0) {
+        return errorResponse(422, "fret and string required");
+    }
+
+    EngravingObject* obj = findByUuid(eventId);
+    if (!obj) {
+        return errorResponse(422, "event not found");
+    }
+    Note* note = dynamic_cast<Note*>(obj);
+    if (!note) {
+        return errorResponse(422, "event is not a Note");
+    }
+
+    score->startCmd(TranslatableString("test", "set tab note"));
+    note->undoChangeProperty(Pid::FRET, fret);
+    note->undoChangeProperty(Pid::STRING, string);
     score->endCmd();
     return okResponse();
 }

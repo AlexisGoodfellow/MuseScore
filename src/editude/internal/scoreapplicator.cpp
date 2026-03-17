@@ -28,6 +28,7 @@
 #include "engraving/dom/engravingitem.h"
 #include "engraving/dom/factory.h"
 #include "engraving/dom/instrument.h"
+#include "engraving/dom/stringdata.h"
 #include "engraving/dom/measure.h"
 #include "engraving/dom/note.h"
 #include "engraving/dom/noteval.h"
@@ -165,6 +166,10 @@ bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
 
     // Register the UUID ↔ element mapping so that subsequent DeleteEvent /
     // SetPitch ops targeting this note can look it up by UUID.
+    // Optional tab fields — set fret/string if provided by the op.
+    const int tabFret   = op.value("fret").toInt(-1);
+    const int tabString = op.value("string").toInt(-1);
+
     if (!noteUuid.isEmpty()) {
         Segment* seg2 = score->tick2segment(tick, false, SegmentType::ChordRest);
         if (seg2) {
@@ -176,6 +181,11 @@ bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
                     if (n->pitch() == midi) {
                         m_uuidToElement[noteUuid] = n;
                         m_elementToUuid[n]        = noteUuid;
+                        // Apply tab data if present.
+                        if (tabFret >= 0 && tabString >= 0) {
+                            n->setFret(tabFret);
+                            n->setString(tabString);
+                        }
                         break;
                     }
                 }
@@ -983,10 +993,102 @@ bool ScoreApplicator::applySetPartInstrument(Score* score, const QJsonObject& op
         existing->setId(String(msId));
         existing->setLongName(String(longName));
         existing->setShortName(String(shortName));
+
+        // Apply optional StringData override from the instrument payload.
+        const QJsonObject sdObj = instr["string_data"].toObject();
+        if (!sdObj.isEmpty()) {
+            const QJsonArray strings = sdObj["strings"].toArray();
+            std::vector<instrString> table;
+            for (const QJsonValue& v : strings) {
+                const QJsonObject s = v.toObject();
+                table.emplace_back(s["pitch"].toInt(), s["open"].toBool(false),
+                                   s["start_fret"].toInt(0));
+            }
+            StringData sd(sdObj["frets"].toInt(), table);
+            existing->setStringData(sd);
+        }
     }
     part->setPartName(String(longName));
     part->setLongNameAll(String(longName));
     part->setShortNameAll(String(shortName));
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applySetStringData(Score* score, const QJsonObject& op)
+{
+    const QString uuid = op["part_id"].toString();
+    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
+        LOGW() << "[editude] applySetStringData: unknown part_id" << uuid;
+        return false;
+    }
+    Part* part = m_partUuidToPart.value(uuid);
+    Instrument* inst = part->instrument();
+    if (!inst) {
+        LOGW() << "[editude] applySetStringData: part has no instrument";
+        return false;
+    }
+
+    const QJsonObject sdObj = op["string_data"].toObject();
+    score->startCmd(TranslatableString("undoableAction", "Set string data"));
+    if (sdObj.isEmpty()) {
+        // Clearing string data — set empty StringData.
+        inst->setStringData(StringData());
+    } else {
+        const QJsonArray strings = sdObj["strings"].toArray();
+        std::vector<instrString> table;
+        for (const QJsonValue& v : strings) {
+            const QJsonObject s = v.toObject();
+            table.emplace_back(s["pitch"].toInt(), s["open"].toBool(false),
+                               s["start_fret"].toInt(0));
+        }
+        StringData sd(sdObj["frets"].toInt(), table);
+        inst->setStringData(sd);
+    }
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applySetCapo(Score* score, const QJsonObject& op)
+{
+    const QString uuid = op["part_id"].toString();
+    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
+        LOGW() << "[editude] applySetCapo: unknown part_id" << uuid;
+        return false;
+    }
+    // Capo is stored as staff-level property in MuseScore.  For now we
+    // acknowledge the op without applying it to the C++ model — the Python
+    // server tracks capo state, and the C++ side will consume it when
+    // tab rendering is fully wired.  This ensures the op round-trips
+    // without error.
+    Q_UNUSED(score);
+    return true;
+}
+
+bool ScoreApplicator::applySetTabNote(Score* score, const QJsonObject& op)
+{
+    const QString uuid = op["event_id"].toString();
+    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
+        LOGW() << "[editude] applySetTabNote: unknown uuid" << uuid;
+        return false;
+    }
+
+    Note* note = dynamic_cast<Note*>(m_uuidToElement.value(uuid));
+    if (!note) {
+        LOGW() << "[editude] applySetTabNote: element is not a Note";
+        return false;
+    }
+
+    const int fret   = op["fret"].toInt(-1);
+    const int string = op["string"].toInt(-1);
+    if (fret < 0 || string < 0) {
+        LOGW() << "[editude] applySetTabNote: invalid fret/string";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Set tab note"));
+    note->undoChangeProperty(Pid::FRET, fret);
+    note->undoChangeProperty(Pid::STRING, string);
     score->endCmd();
     return true;
 }
@@ -1037,6 +1139,9 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("AddPart"))            return applyAddPart(score, payload);
     if (type == QLatin1String("RemovePart"))         return applyRemovePart(score, payload);
     if (type == QLatin1String("SetPartInstrument")) return applySetPartInstrument(score, payload);
+    if (type == QLatin1String("SetStringData"))     return applySetStringData(score, payload);
+    if (type == QLatin1String("SetCapo"))            return applySetCapo(score, payload);
+    if (type == QLatin1String("SetTabNote"))         return applySetTabNote(score, payload);
 
     // Tier 3 — articulations
     if (type == QLatin1String("AddArticulation"))    return applyAddArticulation(score, payload);
