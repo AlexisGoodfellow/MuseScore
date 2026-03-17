@@ -92,6 +92,22 @@ private:
     Reply actionAddHairpin(const QJsonObject& body);
     Reply actionRemoveHairpin(const QJsonObject& body);
 
+    // Advanced spanners — octave lines
+    Reply actionAddOctaveLine(const QJsonObject& body);
+    Reply actionRemoveOctaveLine(const QJsonObject& body);
+
+    // Advanced spanners — glissandos
+    Reply actionAddGlissando(const QJsonObject& body);
+    Reply actionRemoveGlissando(const QJsonObject& body);
+
+    // Advanced spanners — pedal lines
+    Reply actionAddPedalLine(const QJsonObject& body);
+    Reply actionRemovePedalLine(const QJsonObject& body);
+
+    // Advanced spanners — trill lines
+    Reply actionAddTrillLine(const QJsonObject& body);
+    Reply actionRemoveTrillLine(const QJsonObject& body);
+
     // Tier 3 — lyrics
     Reply actionAddLyric(const QJsonObject& body);
     Reply actionSetLyric(const QJsonObject& body);
@@ -144,6 +160,10 @@ private:
     QJsonObject serializePartDynamics(mu::engraving::Part* part);
     QJsonObject serializePartSlurs(mu::engraving::Part* part);
     QJsonObject serializePartHairpins(mu::engraving::Part* part);
+    QJsonObject serializePartOctaveLines(mu::engraving::Part* part);
+    QJsonObject serializePartGlissandos(mu::engraving::Part* part);
+    QJsonObject serializePartPedalLines(mu::engraving::Part* part);
+    QJsonObject serializePartTrillLines(mu::engraving::Part* part);
     QJsonObject serializePartLyricsMap(mu::engraving::Part* part);
     QJsonArray  serializePartKeyChanges(mu::engraving::Part* part);
     QJsonArray  serializePartClefChanges(mu::engraving::Part* part);

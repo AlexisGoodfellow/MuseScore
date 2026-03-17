@@ -148,6 +148,19 @@ private:
     bool applySetRehearsalMark(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveRehearsalMark(mu::engraving::Score* score, const QJsonObject& payload);
 
+    // Advanced spanners — octave lines
+    bool applyAddOctaveLine(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveOctaveLine(mu::engraving::Score* score, const QJsonObject& payload);
+    // Advanced spanners — glissandos
+    bool applyAddGlissando(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveGlissando(mu::engraving::Score* score, const QJsonObject& payload);
+    // Advanced spanners — pedal lines
+    bool applyAddPedalLine(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemovePedalLine(mu::engraving::Score* score, const QJsonObject& payload);
+    // Advanced spanners — trill lines
+    bool applyAddTrillLine(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveTrillLine(mu::engraving::Score* score, const QJsonObject& payload);
+
     // Tier 4 — navigation marks
     bool applyInsertVolta(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveVolta(mu::engraving::Score* score, const QJsonObject& payload);

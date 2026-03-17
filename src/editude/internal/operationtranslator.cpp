@@ -27,12 +27,14 @@
 #include <QSet>
 #include <QUuid>
 
+#include "engraving/dom/accidental.h"
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/clef.h"
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/engravingitem.h"
+#include "engraving/dom/glissando.h"
 #include "engraving/dom/harmony.h"
 #include "engraving/dom/hairpin.h"
 #include "engraving/dom/jump.h"
@@ -40,12 +42,15 @@
 #include "engraving/dom/lyrics.h"
 #include "engraving/dom/marker.h"
 #include "engraving/dom/measure.h"
+#include "engraving/dom/ottava.h"
 #include "engraving/dom/part.h"
+#include "engraving/dom/pedal.h"
 #include "engraving/dom/slur.h"
 #include "engraving/dom/staff.h"
 #include "engraving/dom/tempotext.h"
 #include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
+#include "engraving/dom/trill.h"
 #include "engraving/dom/tuplet.h"
 #include "engraving/dom/rehearsalmark.h"
 #include "engraving/dom/stafftext.h"
@@ -1026,7 +1031,161 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 23: InsertBeats / DeleteBeats ───────────────────────────────
+    // ── Pass 23: Octave Lines (part-scoped, beat-range) ────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::OTTAVA) {
+            continue;
+        }
+        auto* ottava = static_cast<Ottava*>(obj);
+        Part* ottavaPart = static_cast<EngravingItem*>(ottava)->part();
+        if (!ottavaPart) {
+            // After undo the parent chain may be broken; use track-based fallback.
+            const staff_idx_t staffIdx = ottava->track() / VOICES;
+            for (auto it = m_knownPartUuids.cbegin(); it != m_knownPartUuids.cend(); ++it) {
+                Part* p = it.key();
+                const staff_idx_t first = p->startTrack() / VOICES;
+                if (staffIdx >= first && staffIdx < first + static_cast<staff_idx_t>(p->nstaves())) {
+                    ottavaPart = p;
+                    break;
+                }
+            }
+        }
+        if (!ottavaPart) continue;
+        const QString ottavaPartUuid = resolvePartUuid(ottavaPart, lazyAddPartOps);
+        if (ottavaPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[ottava]  = uuid;
+            m_localUuidToElement[uuid]    = ottava;
+            ops.append(buildAddOctaveLine(ottava, uuid, ottavaPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(ottava, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveOctaveLine(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(ottava);
+            }
+        }
+    }
+
+    // ── Pass 24: Glissandos (event-UUID anchored) ───────────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::GLISSANDO) {
+            continue;
+        }
+        auto* gliss = static_cast<Glissando*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            EngravingItem* startEl = gliss->startElement();
+            EngravingItem* endEl   = gliss->endElement();
+            // Glissandos anchor to Notes, not ChordRests.
+            Note* startNote = (startEl && startEl->isNote()) ? toNote(startEl) : nullptr;
+            Note* endNote   = (endEl && endEl->isNote())     ? toNote(endEl)   : nullptr;
+            if (!startNote || !endNote) continue;
+            // Look up the parent chord UUID for each note (same as slur pass).
+            ChordRest* startCr = startNote->chord();
+            ChordRest* endCr   = endNote->chord();
+            if (!startCr || !endCr) continue;
+            const QString startUuid = uuidForChordRest(startCr, remoteElementToUuid);
+            const QString endUuid   = uuidForChordRest(endCr,   remoteElementToUuid);
+            if (startUuid.isEmpty() || endUuid.isEmpty()) {
+                LOGD() << "[editude] translateAll: AddGlissando: start/end UUID unknown, skipping";
+                continue;
+            }
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[gliss]  = uuid;
+            m_localUuidToElement[uuid]   = gliss;
+            Part* glissPart = startCr->staff() ? startCr->staff()->part() : nullptr;
+            const QString glissPartUuid = resolvePartUuid(glissPart, lazyAddPartOps);
+            if (glissPartUuid.isEmpty()) continue;
+            ops.append(buildAddGlissando(gliss, uuid, glissPartUuid, startUuid, endUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(gliss, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveGlissando(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(gliss);
+            }
+        }
+    }
+
+    // ── Pass 25: Pedal Lines (part-scoped, beat-range) ──────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::PEDAL) {
+            continue;
+        }
+        auto* pedal = static_cast<Pedal*>(obj);
+        Part* pedalPart = static_cast<EngravingItem*>(pedal)->part();
+        if (!pedalPart) {
+            // After undo the parent chain may be broken; use track-based fallback.
+            const staff_idx_t staffIdx = pedal->track() / VOICES;
+            for (auto it = m_knownPartUuids.cbegin(); it != m_knownPartUuids.cend(); ++it) {
+                Part* p = it.key();
+                const staff_idx_t first = p->startTrack() / VOICES;
+                if (staffIdx >= first && staffIdx < first + static_cast<staff_idx_t>(p->nstaves())) {
+                    pedalPart = p;
+                    break;
+                }
+            }
+        }
+        if (!pedalPart) continue;
+        const QString pedalPartUuid = resolvePartUuid(pedalPart, lazyAddPartOps);
+        if (pedalPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[pedal]  = uuid;
+            m_localUuidToElement[uuid]   = pedal;
+            ops.append(buildAddPedalLine(pedal, uuid, pedalPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(pedal, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemovePedalLine(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(pedal);
+            }
+        }
+    }
+
+    // ── Pass 26: Trill Lines (part-scoped, beat-range) ──────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::TRILL) {
+            continue;
+        }
+        auto* trill = static_cast<Trill*>(obj);
+        Part* trillPart = static_cast<EngravingItem*>(trill)->part();
+        if (!trillPart) {
+            // After undo the parent chain may be broken; use track-based fallback.
+            const staff_idx_t staffIdx = trill->track() / VOICES;
+            for (auto it = m_knownPartUuids.cbegin(); it != m_knownPartUuids.cend(); ++it) {
+                Part* p = it.key();
+                const staff_idx_t first = p->startTrack() / VOICES;
+                if (staffIdx >= first && staffIdx < first + static_cast<staff_idx_t>(p->nstaves())) {
+                    trillPart = p;
+                    break;
+                }
+            }
+        }
+        if (!trillPart) continue;
+        const QString trillPartUuid = resolvePartUuid(trillPart, lazyAddPartOps);
+        if (trillPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[trill]  = uuid;
+            m_localUuidToElement[uuid]   = trill;
+            ops.append(buildAddTrillLine(trill, uuid, trillPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(trill, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveTrillLine(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(trill);
+            }
+        }
+    }
+
+    // ── Pass 27: InsertBeats / DeleteBeats ───────────────────────────────
     // Collect MEASURE objects by their command type, sort by tick, then emit
     // a single InsertBeats or DeleteBeats covering the contiguous range.
     {
@@ -1077,7 +1236,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 24: InsertVolta / RemoveVolta ───────────────────────────────
+    // ── Pass 28: InsertVolta / RemoveVolta ───────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::VOLTA) {
             continue;
@@ -1098,7 +1257,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 25: InsertMarker / RemoveMarker ─────────────────────────────
+    // ── Pass 29: InsertMarker / RemoveMarker ─────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::MARKER) {
             continue;
@@ -1119,7 +1278,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 26: InsertJump / RemoveJump ─────────────────────────────────
+    // ── Pass 30: InsertJump / RemoveJump ─────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::JUMP) {
             continue;
@@ -1140,7 +1299,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 24: SetScoreMetadata ─────────────────────────────────────────
+    // ── Pass 31: SetScoreMetadata ─────────────────────────────────────────
     // changedMetaTags contains only the tags that changed in this transaction
     // (pre/post diff performed in EditudeService::onScoreChanges).
     if (!changedMetaTags.isEmpty()) {
@@ -1860,6 +2019,154 @@ QJsonObject OperationTranslator::buildRemoveRehearsalMark(const QString& uuid)
 {
     QJsonObject payload;
     payload["type"] = QStringLiteral("RemoveRehearsalMark");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Advanced spanners — octave lines
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddOctaveLine(EngravingObject* ottava,
+                                                      const QString& uuid,
+                                                      const QString& partId)
+{
+    auto* o = static_cast<Ottava*>(ottava);
+
+    QString kind;
+    switch (o->ottavaType()) {
+    case OttavaType::OTTAVA_8VA:  kind = QStringLiteral("8va");  break;
+    case OttavaType::OTTAVA_8VB:  kind = QStringLiteral("8vb");  break;
+    case OttavaType::OTTAVA_15MA: kind = QStringLiteral("15ma"); break;
+    case OttavaType::OTTAVA_15MB: kind = QStringLiteral("15mb"); break;
+    case OttavaType::OTTAVA_22MA: kind = QStringLiteral("22ma"); break;
+    case OttavaType::OTTAVA_22MB: kind = QStringLiteral("22mb"); break;
+    default:                      kind = QStringLiteral("8va");  break;
+    }
+
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("AddOctaveLine");
+    payload["id"]         = uuid;
+    payload["part_id"]    = partId;
+    payload["kind"]       = kind;
+    payload["start_beat"] = beatJson(o->tick());
+    payload["end_beat"]   = beatJson(o->tick2());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveOctaveLine(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveOctaveLine");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Advanced spanners — glissandos
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddGlissando(EngravingObject* gliss,
+                                                     const QString& uuid,
+                                                     const QString& partId,
+                                                     const QString& startEventUuid,
+                                                     const QString& endEventUuid)
+{
+    auto* g = static_cast<Glissando*>(gliss);
+
+    const QString style = (g->glissandoType() == GlissandoType::WAVY)
+                          ? QStringLiteral("wavy")
+                          : QStringLiteral("straight");
+
+    QJsonObject payload;
+    payload["type"]           = QStringLiteral("AddGlissando");
+    payload["id"]             = uuid;
+    payload["part_id"]        = partId;
+    payload["start_event_id"] = startEventUuid;
+    payload["end_event_id"]   = endEventUuid;
+    payload["style"]          = style;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveGlissando(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveGlissando");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Advanced spanners — pedal lines
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddPedalLine(EngravingObject* pedal,
+                                                     const QString& uuid,
+                                                     const QString& partId)
+{
+    auto* p = static_cast<Pedal*>(pedal);
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("AddPedalLine");
+    payload["id"]         = uuid;
+    payload["part_id"]    = partId;
+    payload["start_beat"] = beatJson(p->tick());
+    payload["end_beat"]   = beatJson(p->tick2());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemovePedalLine(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemovePedalLine");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Advanced spanners — trill lines
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddTrillLine(EngravingObject* trill,
+                                                     const QString& uuid,
+                                                     const QString& partId)
+{
+    auto* t = static_cast<Trill*>(trill);
+
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("AddTrillLine");
+    payload["id"]         = uuid;
+    payload["part_id"]    = partId;
+    payload["start_beat"] = beatJson(t->tick());
+    payload["end_beat"]   = beatJson(t->tick2());
+
+    // Include accidental if the trill has one.
+    if (t->accidental()) {
+        AccidentalType at = t->accidental()->accidentalType();
+        QString accName;
+        switch (at) {
+        case AccidentalType::FLAT:         accName = QStringLiteral("flat");         break;
+        case AccidentalType::SHARP:        accName = QStringLiteral("sharp");        break;
+        case AccidentalType::NATURAL:      accName = QStringLiteral("natural");      break;
+        case AccidentalType::FLAT2:        accName = QStringLiteral("double-flat");  break;
+        case AccidentalType::SHARP2:       accName = QStringLiteral("double-sharp"); break;
+        default:                           accName = QString();                      break;
+        }
+        if (!accName.isEmpty()) {
+            payload["accidental"] = accName;
+        } else {
+            payload["accidental"] = QJsonValue::Null;
+        }
+    } else {
+        payload["accidental"] = QJsonValue::Null;
+    }
+
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveTrillLine(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveTrillLine");
     payload["id"]   = uuid;
     return payload;
 }

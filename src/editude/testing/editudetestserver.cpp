@@ -44,6 +44,12 @@
 #include "engraving/dom/rehearsalmark.h"
 #include "engraving/dom/stafftext.h"
 #include "engraving/dom/systemtext.h"
+#include "engraving/dom/accidental.h"
+#include "engraving/dom/glissando.h"
+#include "engraving/dom/ornament.h"
+#include "engraving/dom/ottava.h"
+#include "engraving/dom/pedal.h"
+#include "engraving/dom/trill.h"
 #include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"
 
@@ -237,6 +243,14 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("remove_slur"))         return actionRemoveSlur(body);
     if (action == QLatin1String("add_hairpin"))         return actionAddHairpin(body);
     if (action == QLatin1String("remove_hairpin"))      return actionRemoveHairpin(body);
+    if (action == QLatin1String("add_octave_line"))      return actionAddOctaveLine(body);
+    if (action == QLatin1String("remove_octave_line"))   return actionRemoveOctaveLine(body);
+    if (action == QLatin1String("add_glissando"))        return actionAddGlissando(body);
+    if (action == QLatin1String("remove_glissando"))     return actionRemoveGlissando(body);
+    if (action == QLatin1String("add_pedal_line"))       return actionAddPedalLine(body);
+    if (action == QLatin1String("remove_pedal_line"))    return actionRemovePedalLine(body);
+    if (action == QLatin1String("add_trill_line"))       return actionAddTrillLine(body);
+    if (action == QLatin1String("remove_trill_line"))    return actionRemoveTrillLine(body);
     if (action == QLatin1String("add_lyric"))             return actionAddLyric(body);
     if (action == QLatin1String("set_lyric"))             return actionSetLyric(body);
     if (action == QLatin1String("remove_lyric"))          return actionRemoveLyric(body);
@@ -589,6 +603,10 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
         { "dynamics",      serializePartDynamics(part) },
         { "slurs",         serializePartSlurs(part) },
         { "hairpins",      serializePartHairpins(part) },
+        { "octave_lines",  serializePartOctaveLines(part) },
+        { "glissandos",    serializePartGlissandos(part) },
+        { "pedal_lines",   serializePartPedalLines(part) },
+        { "trill_lines",   serializePartTrillLines(part) },
         { "tuplets",       QJsonObject() },
         { "lyrics",        serializePartLyricsMap(part) },
         { "staff_texts",   serializePartStaffTexts(part) },
@@ -1081,6 +1099,154 @@ QJsonObject EditudeTestServer::serializePartHairpins(Part* part)
             { "start_beat", beatJson(hp->tick()) },
             { "end_beat",   beatJson(hp->tick2()) },
             { "kind",       kind },
+        };
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartOctaveLines(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isOttava()) {
+            continue;
+        }
+        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
+            continue;
+        }
+        const QString uuid = uuidForElement(sp);
+        if (uuid.isEmpty()) {
+            continue;
+        }
+        Ottava* ot = toOttava(sp);
+        QString kind;
+        switch (ot->ottavaType()) {
+        case OttavaType::OTTAVA_8VA:  kind = QStringLiteral("8va");  break;
+        case OttavaType::OTTAVA_8VB:  kind = QStringLiteral("8vb");  break;
+        case OttavaType::OTTAVA_15MA: kind = QStringLiteral("15ma"); break;
+        case OttavaType::OTTAVA_15MB: kind = QStringLiteral("15mb"); break;
+        default:                      kind = QStringLiteral("8va");  break;
+        }
+        result[uuid] = QJsonObject{
+            { "id",         uuid },
+            { "start_beat", beatJson(ot->tick()) },
+            { "end_beat",   beatJson(ot->tick2()) },
+            { "kind",       kind },
+        };
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartGlissandos(Part* part)
+{
+    // Glissandos are NOTE-anchored spanners stored on Note::spannerFor(),
+    // NOT in score->spanner().  Iterate notes in the part to find them.
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(SegmentType::ChordRest); seg;
+             seg = seg->next(SegmentType::ChordRest)) {
+            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+                EngravingItem* el = seg->element(track);
+                if (!el || !el->isChord()) {
+                    continue;
+                }
+                Chord* chord = toChord(el);
+                for (Note* note : chord->notes()) {
+                    for (Spanner* sp : note->spannerFor()) {
+                        if (!sp->isGlissando()) {
+                            continue;
+                        }
+                        const QString uuid = uuidForElement(sp);
+                        if (uuid.isEmpty()) {
+                            continue;
+                        }
+                        Glissando* gl = toGlissando(sp);
+                        const QString style = (gl->glissandoType() == GlissandoType::WAVY)
+                            ? QStringLiteral("wavy")
+                            : QStringLiteral("straight");
+                        const QString startUuid = uuidForChordRest(chord);
+                        EngravingItem* endEl = sp->endElement();
+                        ChordRest* endCR = nullptr;
+                        if (endEl && endEl->isNote()) {
+                            endCR = toNote(endEl)->chord();
+                        }
+                        const QString endUuid = endCR ? uuidForChordRest(endCR) : QString();
+                        result[uuid] = QJsonObject{
+                            { "id",             uuid      },
+                            { "start_event_id", startUuid },
+                            { "end_event_id",   endUuid   },
+                            { "style",          style     },
+                        };
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartPedalLines(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isPedal()) {
+            continue;
+        }
+        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
+            continue;
+        }
+        const QString uuid = uuidForElement(sp);
+        if (uuid.isEmpty()) {
+            continue;
+        }
+        result[uuid] = QJsonObject{
+            { "id",         uuid },
+            { "start_beat", beatJson(sp->tick()) },
+            { "end_beat",   beatJson(sp->tick2()) },
+        };
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartTrillLines(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isTrill()) {
+            continue;
+        }
+        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
+            continue;
+        }
+        const QString uuid = uuidForElement(sp);
+        if (uuid.isEmpty()) {
+            continue;
+        }
+        Trill* tr = toTrill(sp);
+        QJsonValue accVal = QJsonValue::Null;
+        if (tr->accidental()) {
+            AccidentalType at = tr->accidental()->accidentalType();
+            switch (at) {
+            case AccidentalType::FLAT:    accVal = QStringLiteral("flat");         break;
+            case AccidentalType::SHARP:   accVal = QStringLiteral("sharp");        break;
+            case AccidentalType::NATURAL: accVal = QStringLiteral("natural");      break;
+            case AccidentalType::FLAT2:   accVal = QStringLiteral("double-flat");  break;
+            case AccidentalType::SHARP2:  accVal = QStringLiteral("double-sharp"); break;
+            default:                      break;
+            }
+        }
+        result[uuid] = QJsonObject{
+            { "id",         uuid },
+            { "start_beat", beatJson(sp->tick()) },
+            { "end_beat",   beatJson(sp->tick2()) },
+            { "accidental", accVal },
         };
     }
     return result;
@@ -1579,6 +1745,307 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveHairpin(const QJsonObjec
 
     score->startCmd(TranslatableString("test", "remove hairpin"));
     score->undoRemoveElement(hp);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Advanced spanners — octave lines
+// ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionAddOctaveLine(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503,
+                             "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422,
+                             "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject sb = body["start_beat"].toObject();
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+
+    const QString kindStr = body["kind"].toString();
+    OttavaType otType = OttavaType::OTTAVA_8VA;
+    if (kindStr == QLatin1String("8vb"))       otType = OttavaType::OTTAVA_8VB;
+    else if (kindStr == QLatin1String("15ma")) otType = OttavaType::OTTAVA_15MA;
+    else if (kindStr == QLatin1String("15mb")) otType = OttavaType::OTTAVA_15MB;
+
+    score->startCmd(TranslatableString("test", "add octave line"));
+    Ottava* ottava = Factory::createOttava(score->dummy());
+    ottava->setOttavaType(otType);
+    ottava->setTrack(part->startTrack());
+    ottava->setTick(startTick);
+    ottava->setTick2(endTick);
+    score->undoAddElement(ottava);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveOctaveLine(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "octave line not found");
+    }
+
+    Ottava* ottava = dynamic_cast<Ottava*>(obj);
+    if (!ottava) {
+        return errorResponse(422,
+                             "element is not an Ottava");
+    }
+
+    score->startCmd(TranslatableString("test", "remove octave line"));
+    score->undoRemoveElement(ottava);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Advanced spanners — glissandos
+// ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionAddGlissando(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503,
+                             "score not ready");
+    }
+
+    const QString startId = body["start_event_id"].toString();
+    const QString endId   = body["end_event_id"].toString();
+
+    EngravingObject* startObj = findByUuid(startId);
+    EngravingObject* endObj   = findByUuid(endId);
+    if (!startObj || !endObj) {
+        return errorResponse(404, "event not found");
+    }
+
+    auto toCR = [](EngravingObject* o) -> ChordRest* {
+        if (o->isNote()) return toNote(static_cast<EngravingItem*>(o))->chord();
+        if (o->isChordRest()) return toChordRest(static_cast<EngravingItem*>(o));
+        return nullptr;
+    };
+    ChordRest* startCR = toCR(startObj);
+    ChordRest* endCR   = toCR(endObj);
+    if (!startCR || !endCR) {
+        return errorResponse(422,
+                             "event is not a note or chordrest");
+    }
+
+    // Glissandos anchor to Notes, not ChordRests.
+    Note* startNote = startCR->isChord() ? toChord(startCR)->upNote() : nullptr;
+    Note* endNote   = endCR->isChord()   ? toChord(endCR)->upNote()   : nullptr;
+    if (!startNote || !endNote) {
+        return errorResponse(422, "glissando requires chord (note) endpoints");
+    }
+
+    const bool isWavy = (body["style"].toString() == QStringLiteral("wavy"));
+    const GlissandoType glType = isWavy ? GlissandoType::WAVY : GlissandoType::STRAIGHT;
+
+    score->startCmd(TranslatableString("test", "add glissando"));
+    Glissando* gliss = Factory::createGlissando(score->dummy());
+    gliss->setGlissandoType(glType);
+    gliss->setAnchor(Spanner::Anchor::NOTE);
+    gliss->setTrack(startNote->track());
+    gliss->setTrack2(endNote->track());
+    gliss->setTick(startNote->tick());
+    gliss->setTick2(endNote->tick());
+    gliss->setStartElement(startNote);
+    gliss->setEndElement(endNote);
+    gliss->setParent(startNote);
+    score->undoAddElement(gliss);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveGlissando(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "glissando not found");
+    }
+
+    Glissando* gliss = dynamic_cast<Glissando*>(obj);
+    if (!gliss) {
+        return errorResponse(422,
+                             "element is not a Glissando");
+    }
+
+    score->startCmd(TranslatableString("test", "remove glissando"));
+    score->undoRemoveElement(gliss);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Advanced spanners — pedal lines
+// ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionAddPedalLine(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503,
+                             "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422,
+                             "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject sb = body["start_beat"].toObject();
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+
+    score->startCmd(TranslatableString("test", "add pedal line"));
+    Pedal* pedal = Factory::createPedal(score->dummy());
+    pedal->setTrack(part->startTrack());
+    pedal->setTick(startTick);
+    pedal->setTick2(endTick);
+    score->undoAddElement(pedal);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemovePedalLine(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "pedal line not found");
+    }
+
+    Pedal* pedal = dynamic_cast<Pedal*>(obj);
+    if (!pedal) {
+        return errorResponse(422,
+                             "element is not a Pedal");
+    }
+
+    score->startCmd(TranslatableString("test", "remove pedal line"));
+    score->undoRemoveElement(pedal);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Advanced spanners — trill lines
+// ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionAddTrillLine(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503,
+                             "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422,
+                             "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject sb = body["start_beat"].toObject();
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+
+    score->startCmd(TranslatableString("test", "add trill line"));
+    Trill* trill = Factory::createTrill(score->dummy());
+    trill->setTrillType(TrillType::TRILL_LINE);
+    trill->setTrack(part->startTrack());
+    trill->setTick(startTick);
+    trill->setTick2(endTick);
+
+    // Set accidental on the Ornament (created by setTrillType) so that
+    // layout propagates it to trill->m_accidental during endCmd().
+    const QJsonValue accVal = body.value("accidental");
+    if (accVal.isString()) {
+        const QString accStr = accVal.toString();
+        AccidentalType accType = AccidentalType::NONE;
+        if (accStr == QLatin1String("flat"))              accType = AccidentalType::FLAT;
+        else if (accStr == QLatin1String("sharp"))        accType = AccidentalType::SHARP;
+        else if (accStr == QLatin1String("natural"))      accType = AccidentalType::NATURAL;
+        else if (accStr == QLatin1String("double-flat"))  accType = AccidentalType::FLAT2;
+        else if (accStr == QLatin1String("double-sharp")) accType = AccidentalType::SHARP2;
+        if (accType != AccidentalType::NONE && trill->ornament()) {
+            Accidental* acc = Factory::createAccidental(trill->ornament());
+            acc->setAccidentalType(accType);
+            trill->ornament()->setAccidentalAbove(acc);
+        }
+    }
+
+    score->undoAddElement(trill);
+
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveTrillLine(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503,
+                             "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "trill line not found");
+    }
+
+    Trill* trill = dynamic_cast<Trill*>(obj);
+    if (!trill) {
+        return errorResponse(422,
+                             "element is not a Trill");
+    }
+
+    score->startCmd(TranslatableString("test", "remove trill line"));
+    score->undoRemoveElement(trill);
     score->endCmd();
 
     return okResponse();

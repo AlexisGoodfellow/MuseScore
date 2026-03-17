@@ -55,6 +55,12 @@
 #include "engraving/dom/rehearsalmark.h"
 #include "engraving/dom/stafftext.h"
 #include "engraving/dom/systemtext.h"
+#include "engraving/dom/accidental.h"
+#include "engraving/dom/glissando.h"
+#include "engraving/dom/ornament.h"
+#include "engraving/dom/ottava.h"
+#include "engraving/dom/pedal.h"
+#include "engraving/dom/trill.h"
 #include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
@@ -1076,6 +1082,19 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("SetRehearsalMark"))    return applySetRehearsalMark(score, payload);
     if (type == QLatin1String("RemoveRehearsalMark")) return applyRemoveRehearsalMark(score, payload);
 
+    // Advanced spanners — octave lines
+    if (type == QLatin1String("AddOctaveLine"))    return applyAddOctaveLine(score, payload);
+    if (type == QLatin1String("RemoveOctaveLine")) return applyRemoveOctaveLine(score, payload);
+    // Advanced spanners — glissandos
+    if (type == QLatin1String("AddGlissando"))    return applyAddGlissando(score, payload);
+    if (type == QLatin1String("RemoveGlissando")) return applyRemoveGlissando(score, payload);
+    // Advanced spanners — pedal lines
+    if (type == QLatin1String("AddPedalLine"))    return applyAddPedalLine(score, payload);
+    if (type == QLatin1String("RemovePedalLine")) return applyRemovePedalLine(score, payload);
+    // Advanced spanners — trill lines
+    if (type == QLatin1String("AddTrillLine"))    return applyAddTrillLine(score, payload);
+    if (type == QLatin1String("RemoveTrillLine")) return applyRemoveTrillLine(score, payload);
+
     // Tier 4 — navigation marks
     if (type == QLatin1String("InsertVolta"))  return applyInsertVolta(score, payload);
     if (type == QLatin1String("RemoveVolta"))  return applyRemoveVolta(score, payload);
@@ -1992,6 +2011,295 @@ bool ScoreApplicator::applyRemoveRehearsalMark(Score* score, const QJsonObject& 
 
     score->startCmd(TranslatableString("undoableAction", "Remove rehearsal mark"));
     score->undoRemoveElement(rm);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Advanced spanners — octave lines, glissandos, pedal lines, trill lines
+// ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applyAddOctaveLine(Score* score, const QJsonObject& op)
+{
+    const QString id       = op["id"].toString();
+    const QString partId   = op["part_id"].toString();
+    const QString kind     = op["kind"].toString();
+    const QJsonObject sb   = op["start_beat"].toObject();
+    const QJsonObject eb   = op["end_beat"].toObject();
+
+    if (id.isEmpty() || partId.isEmpty()) {
+        LOGW() << "[editude] applyAddOctaveLine: missing id or part_id";
+        return false;
+    }
+
+    if (!m_partUuidToPart.contains(partId)) {
+        LOGW() << "[editude] applyAddOctaveLine: unknown part_id" << partId;
+        return false;
+    }
+
+    OttavaType ottType = OttavaType::OTTAVA_8VA;
+    if (kind == QStringLiteral("8vb"))        ottType = OttavaType::OTTAVA_8VB;
+    else if (kind == QStringLiteral("15ma"))  ottType = OttavaType::OTTAVA_15MA;
+    else if (kind == QStringLiteral("15mb"))  ottType = OttavaType::OTTAVA_15MB;
+
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const track_idx_t track = m_partUuidToPart.value(partId)->startTrack();
+
+    score->startCmd(TranslatableString("undoableAction", "Add octave line"));
+    Ottava* ottava = Factory::createOttava(score->dummy());
+    ottava->setOttavaType(ottType);
+    ottava->setTrack(track);
+    ottava->setTick(startTick);
+    ottava->setTick2(endTick);
+    score->undoAddElement(ottava);
+    score->endCmd();
+
+    m_uuidToElement[id] = ottava;
+    m_elementToUuid[ottava] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveOctaveLine(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveOctaveLine: unknown id" << id;
+        return false;
+    }
+
+    Ottava* ottava = dynamic_cast<Ottava*>(m_uuidToElement.value(id));
+    if (!ottava) {
+        LOGW() << "[editude] applyRemoveOctaveLine: element is not an Ottava" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(ottava);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove octave line"));
+    score->undoRemoveElement(ottava);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyAddGlissando(Score* score, const QJsonObject& op)
+{
+    const QString id           = op["id"].toString();
+    const QString startEventId = op["start_event_id"].toString();
+    const QString endEventId   = op["end_event_id"].toString();
+    const QString style        = op["style"].toString();
+
+    if (id.isEmpty() || startEventId.isEmpty() || endEventId.isEmpty()) {
+        LOGW() << "[editude] applyAddGlissando: missing id, start_event_id, or end_event_id";
+        return false;
+    }
+
+    EngravingObject* startObj = m_uuidToElement.value(startEventId);
+    EngravingObject* endObj   = m_uuidToElement.value(endEventId);
+    if (!startObj || !endObj) {
+        LOGW() << "[editude] applyAddGlissando: unknown start or end event_id";
+        return false;
+    }
+
+    // Resolve to Note* — glissandos anchor to notes, not chord-rests.
+    Note* startNote = nullptr;
+    Note* endNote   = nullptr;
+    if (startObj->isNote()) {
+        startNote = toNote(static_cast<EngravingItem*>(startObj));
+    } else if (startObj->isChord()) {
+        startNote = toChord(static_cast<EngravingItem*>(startObj))->upNote();
+    }
+    if (endObj->isNote()) {
+        endNote = toNote(static_cast<EngravingItem*>(endObj));
+    } else if (endObj->isChord()) {
+        endNote = toChord(static_cast<EngravingItem*>(endObj))->upNote();
+    }
+    if (!startNote || !endNote) {
+        LOGW() << "[editude] applyAddGlissando: start or end is not a note/chord";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add glissando"));
+    Glissando* gliss = Factory::createGlissando(score->dummy());
+    gliss->setGlissandoType(style == QStringLiteral("wavy")
+                            ? GlissandoType::WAVY
+                            : GlissandoType::STRAIGHT);
+    gliss->setAnchor(Spanner::Anchor::NOTE);
+    gliss->setTrack(startNote->track());
+    gliss->setTrack2(endNote->track());
+    gliss->setTick(startNote->tick());
+    gliss->setTick2(endNote->tick());
+    gliss->setStartElement(startNote);
+    gliss->setEndElement(endNote);
+    gliss->setParent(startNote);
+    score->undoAddElement(gliss);
+    score->endCmd();
+
+    m_uuidToElement[id] = gliss;
+    m_elementToUuid[gliss] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveGlissando(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveGlissando: unknown id" << id;
+        return false;
+    }
+
+    Glissando* gliss = dynamic_cast<Glissando*>(m_uuidToElement.value(id));
+    if (!gliss) {
+        LOGW() << "[editude] applyRemoveGlissando: element is not a Glissando" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(gliss);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove glissando"));
+    score->undoRemoveElement(gliss);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyAddPedalLine(Score* score, const QJsonObject& op)
+{
+    const QString id       = op["id"].toString();
+    const QString partId   = op["part_id"].toString();
+    const QJsonObject sb   = op["start_beat"].toObject();
+    const QJsonObject eb   = op["end_beat"].toObject();
+
+    if (id.isEmpty() || partId.isEmpty()) {
+        LOGW() << "[editude] applyAddPedalLine: missing id or part_id";
+        return false;
+    }
+
+    if (!m_partUuidToPart.contains(partId)) {
+        LOGW() << "[editude] applyAddPedalLine: unknown part_id" << partId;
+        return false;
+    }
+
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const track_idx_t track = m_partUuidToPart.value(partId)->startTrack();
+
+    score->startCmd(TranslatableString("undoableAction", "Add pedal line"));
+    Pedal* pedal = Factory::createPedal(score->dummy());
+    pedal->setTrack(track);
+    pedal->setTick(startTick);
+    pedal->setTick2(endTick);
+    score->undoAddElement(pedal);
+    score->endCmd();
+
+    m_uuidToElement[id] = pedal;
+    m_elementToUuid[pedal] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemovePedalLine(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemovePedalLine: unknown id" << id;
+        return false;
+    }
+
+    Pedal* pedal = dynamic_cast<Pedal*>(m_uuidToElement.value(id));
+    if (!pedal) {
+        LOGW() << "[editude] applyRemovePedalLine: element is not a Pedal" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(pedal);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove pedal line"));
+    score->undoRemoveElement(pedal);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyAddTrillLine(Score* score, const QJsonObject& op)
+{
+    const QString id       = op["id"].toString();
+    const QString partId   = op["part_id"].toString();
+    const QString kind     = op["kind"].toString();
+    const QJsonObject sb   = op["start_beat"].toObject();
+    const QJsonObject eb   = op["end_beat"].toObject();
+
+    if (id.isEmpty() || partId.isEmpty()) {
+        LOGW() << "[editude] applyAddTrillLine: missing id or part_id";
+        return false;
+    }
+
+    if (!m_partUuidToPart.contains(partId)) {
+        LOGW() << "[editude] applyAddTrillLine: unknown part_id" << partId;
+        return false;
+    }
+
+    TrillType trType = TrillType::TRILL_LINE;
+    if (kind == QStringLiteral("upprall"))         trType = TrillType::UPPRALL_LINE;
+    else if (kind == QStringLiteral("downprall"))  trType = TrillType::DOWNPRALL_LINE;
+    else if (kind == QStringLiteral("prallprall")) trType = TrillType::PRALLPRALL_LINE;
+
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const track_idx_t track = m_partUuidToPart.value(partId)->startTrack();
+
+    score->startCmd(TranslatableString("undoableAction", "Add trill line"));
+    Trill* trill = Factory::createTrill(score->dummy());
+    trill->setTrillType(trType);
+    trill->setTrack(track);
+    trill->setTick(startTick);
+    trill->setTick2(endTick);
+
+    // Set accidental on the Ornament (created by setTrillType) so that
+    // layout propagates it to trill->m_accidental during endCmd().
+    const QJsonValue accVal = op.value("accidental");
+    if (accVal.isString()) {
+        const QString accStr = accVal.toString();
+        AccidentalType accType = AccidentalType::NONE;
+        if (accStr == QStringLiteral("flat"))              accType = AccidentalType::FLAT;
+        else if (accStr == QStringLiteral("sharp"))        accType = AccidentalType::SHARP;
+        else if (accStr == QStringLiteral("natural"))      accType = AccidentalType::NATURAL;
+        else if (accStr == QStringLiteral("double-flat"))  accType = AccidentalType::FLAT2;
+        else if (accStr == QStringLiteral("double-sharp")) accType = AccidentalType::SHARP2;
+        if (accType != AccidentalType::NONE && trill->ornament()) {
+            Accidental* acc = Factory::createAccidental(trill->ornament());
+            acc->setAccidentalType(accType);
+            trill->ornament()->setAccidentalAbove(acc);
+        }
+    }
+
+    score->undoAddElement(trill);
+    score->endCmd();
+
+    m_uuidToElement[id] = trill;
+    m_elementToUuid[trill] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveTrillLine(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveTrillLine: unknown id" << id;
+        return false;
+    }
+
+    Trill* trill = dynamic_cast<Trill*>(m_uuidToElement.value(id));
+    if (!trill) {
+        LOGW() << "[editude] applyRemoveTrillLine: element is not a Trill" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(trill);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove trill line"));
+    score->undoRemoveElement(trill);
     score->endCmd();
     return true;
 }

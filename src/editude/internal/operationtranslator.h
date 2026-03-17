@@ -222,6 +222,28 @@ private:
     static QJsonObject buildSetRehearsalMark(const QString& uuid, const QString& text);
     static QJsonObject buildRemoveRehearsalMark(const QString& uuid);
 
+    // Advanced spanners — octave lines.
+    static QJsonObject buildAddOctaveLine(mu::engraving::EngravingObject* ottava,
+                                           const QString& uuid, const QString& partId);
+    static QJsonObject buildRemoveOctaveLine(const QString& uuid);
+
+    // Advanced spanners — glissandos.
+    static QJsonObject buildAddGlissando(mu::engraving::EngravingObject* gliss,
+                                          const QString& uuid, const QString& partId,
+                                          const QString& startEventUuid,
+                                          const QString& endEventUuid);
+    static QJsonObject buildRemoveGlissando(const QString& uuid);
+
+    // Advanced spanners — pedal lines.
+    static QJsonObject buildAddPedalLine(mu::engraving::EngravingObject* pedal,
+                                          const QString& uuid, const QString& partId);
+    static QJsonObject buildRemovePedalLine(const QString& uuid);
+
+    // Advanced spanners — trill lines.
+    static QJsonObject buildAddTrillLine(mu::engraving::EngravingObject* trill,
+                                          const QString& uuid, const QString& partId);
+    static QJsonObject buildRemoveTrillLine(const QString& uuid);
+
     // Tier 4 builders — volta.
     static QJsonObject buildInsertVolta(mu::engraving::EngravingObject* volta,
                                         const QString& uuid);
