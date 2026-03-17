@@ -11,6 +11,7 @@
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/marker.h"
 #include "engraving/types/symnames.h"
+#include "engraving/types/types.h"
 
 namespace mu::editude::internal {
 
@@ -153,6 +154,122 @@ inline QString markerKindName(mu::engraving::MarkerType mt)
     case MarkerType::VARSEGNO: return QStringLiteral("segno_var");
     default:                   return QStringLiteral("segno");
     }
+}
+
+// ---------------------------------------------------------------------------
+// NoteHeadGroup ↔ string
+// ---------------------------------------------------------------------------
+
+inline QString noteheadGroupToString(mu::engraving::NoteHeadGroup g)
+{
+    using mu::engraving::NoteHeadGroup;
+    switch (g) {
+    case NoteHeadGroup::HEAD_NORMAL:         return QStringLiteral("normal");
+    case NoteHeadGroup::HEAD_CROSS:          return QStringLiteral("cross");
+    case NoteHeadGroup::HEAD_PLUS:           return QStringLiteral("plus");
+    case NoteHeadGroup::HEAD_XCIRCLE:        return QStringLiteral("xcircle");
+    case NoteHeadGroup::HEAD_WITHX:          return QStringLiteral("withx");
+    case NoteHeadGroup::HEAD_TRIANGLE_UP:    return QStringLiteral("triangle_up");
+    case NoteHeadGroup::HEAD_TRIANGLE_DOWN:  return QStringLiteral("triangle_down");
+    case NoteHeadGroup::HEAD_SLASHED1:       return QStringLiteral("slashed1");
+    case NoteHeadGroup::HEAD_SLASHED2:       return QStringLiteral("slashed2");
+    case NoteHeadGroup::HEAD_DIAMOND:        return QStringLiteral("diamond");
+    case NoteHeadGroup::HEAD_DIAMOND_OLD:    return QStringLiteral("diamond_old");
+    case NoteHeadGroup::HEAD_CIRCLED:        return QStringLiteral("circled");
+    case NoteHeadGroup::HEAD_CIRCLED_LARGE:  return QStringLiteral("circled_large");
+    case NoteHeadGroup::HEAD_LARGE_ARROW:    return QStringLiteral("large_arrow");
+    case NoteHeadGroup::HEAD_BREVIS_ALT:     return QStringLiteral("brevis_alt");
+    case NoteHeadGroup::HEAD_SLASH:          return QStringLiteral("slash");
+    case NoteHeadGroup::HEAD_LARGE_DIAMOND:  return QStringLiteral("large_diamond");
+    case NoteHeadGroup::HEAD_HEAVY_CROSS:    return QStringLiteral("heavy_cross");
+    case NoteHeadGroup::HEAD_HEAVY_CROSS_HAT: return QStringLiteral("heavy_cross_hat");
+    default:                                 return QStringLiteral("normal");
+    }
+}
+
+inline mu::engraving::NoteHeadGroup noteheadGroupFromString(const QString& s)
+{
+    using mu::engraving::NoteHeadGroup;
+    static const QHash<QString, NoteHeadGroup> m = {
+        { QStringLiteral("normal"),          NoteHeadGroup::HEAD_NORMAL         },
+        { QStringLiteral("cross"),           NoteHeadGroup::HEAD_CROSS          },
+        { QStringLiteral("plus"),            NoteHeadGroup::HEAD_PLUS           },
+        { QStringLiteral("xcircle"),         NoteHeadGroup::HEAD_XCIRCLE        },
+        { QStringLiteral("withx"),           NoteHeadGroup::HEAD_WITHX          },
+        { QStringLiteral("triangle_up"),     NoteHeadGroup::HEAD_TRIANGLE_UP    },
+        { QStringLiteral("triangle_down"),   NoteHeadGroup::HEAD_TRIANGLE_DOWN  },
+        { QStringLiteral("slashed1"),        NoteHeadGroup::HEAD_SLASHED1       },
+        { QStringLiteral("slashed2"),        NoteHeadGroup::HEAD_SLASHED2       },
+        { QStringLiteral("diamond"),         NoteHeadGroup::HEAD_DIAMOND        },
+        { QStringLiteral("diamond_old"),     NoteHeadGroup::HEAD_DIAMOND_OLD    },
+        { QStringLiteral("circled"),         NoteHeadGroup::HEAD_CIRCLED        },
+        { QStringLiteral("circled_large"),   NoteHeadGroup::HEAD_CIRCLED_LARGE  },
+        { QStringLiteral("large_arrow"),     NoteHeadGroup::HEAD_LARGE_ARROW    },
+        { QStringLiteral("brevis_alt"),      NoteHeadGroup::HEAD_BREVIS_ALT     },
+        { QStringLiteral("slash"),           NoteHeadGroup::HEAD_SLASH          },
+        { QStringLiteral("large_diamond"),   NoteHeadGroup::HEAD_LARGE_DIAMOND  },
+        { QStringLiteral("heavy_cross"),     NoteHeadGroup::HEAD_HEAVY_CROSS    },
+        { QStringLiteral("heavy_cross_hat"), NoteHeadGroup::HEAD_HEAVY_CROSS_HAT },
+    };
+    return m.value(s, NoteHeadGroup::HEAD_NORMAL);
+}
+
+// ---------------------------------------------------------------------------
+// StemDirection (DirectionV) ↔ string
+// ---------------------------------------------------------------------------
+
+inline QString stemDirectionToString(mu::engraving::DirectionV d)
+{
+    using mu::engraving::DirectionV;
+    switch (d) {
+    case DirectionV::UP:   return QStringLiteral("up");
+    case DirectionV::DOWN: return QStringLiteral("down");
+    default:               return QStringLiteral("auto");
+    }
+}
+
+inline mu::engraving::DirectionV stemDirectionFromString(const QString& s)
+{
+    using mu::engraving::DirectionV;
+    if (s == QLatin1String("up"))   return DirectionV::UP;
+    if (s == QLatin1String("down")) return DirectionV::DOWN;
+    return DirectionV::AUTO;
+}
+
+// ---------------------------------------------------------------------------
+// TremoloType ↔ string (for DrumInstrumentVariant)
+// ---------------------------------------------------------------------------
+
+inline QString tremoloTypeToString(mu::engraving::TremoloType t)
+{
+    using mu::engraving::TremoloType;
+    switch (t) {
+    case TremoloType::R8:         return QStringLiteral("r8");
+    case TremoloType::R16:        return QStringLiteral("r16");
+    case TremoloType::R32:        return QStringLiteral("r32");
+    case TremoloType::R64:        return QStringLiteral("r64");
+    case TremoloType::BUZZ_ROLL:  return QStringLiteral("buzz_roll");
+    case TremoloType::C8:         return QStringLiteral("c8");
+    case TremoloType::C16:        return QStringLiteral("c16");
+    case TremoloType::C32:        return QStringLiteral("c32");
+    case TremoloType::C64:        return QStringLiteral("c64");
+    default:                      return QString();
+    }
+}
+
+inline mu::engraving::TremoloType tremoloTypeFromString(const QString& s)
+{
+    using mu::engraving::TremoloType;
+    if (s == QLatin1String("r8"))        return TremoloType::R8;
+    if (s == QLatin1String("r16"))       return TremoloType::R16;
+    if (s == QLatin1String("r32"))       return TremoloType::R32;
+    if (s == QLatin1String("r64"))       return TremoloType::R64;
+    if (s == QLatin1String("buzz_roll")) return TremoloType::BUZZ_ROLL;
+    if (s == QLatin1String("c8"))        return TremoloType::C8;
+    if (s == QLatin1String("c16"))       return TremoloType::C16;
+    if (s == QLatin1String("c32"))       return TremoloType::C32;
+    if (s == QLatin1String("c64"))       return TremoloType::C64;
+    return TremoloType::INVALID_TREMOLO;
 }
 
 } // namespace mu::editude::internal

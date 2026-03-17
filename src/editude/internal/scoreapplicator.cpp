@@ -28,6 +28,7 @@
 #include "engraving/dom/engravingitem.h"
 #include "engraving/dom/factory.h"
 #include "engraving/dom/instrument.h"
+#include "engraving/dom/drumset.h"
 #include "engraving/dom/stringdata.h"
 #include "engraving/dom/measure.h"
 #include "engraving/dom/note.h"
@@ -169,6 +170,9 @@ bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
     // Optional tab fields — set fret/string if provided by the op.
     const int tabFret   = op.value("fret").toInt(-1);
     const int tabString = op.value("string").toInt(-1);
+    // Optional notehead — set head group if provided (percussion / manual override).
+    const QString noteheadStr = op.value("notehead").toString();
+    const bool hasNotehead = !noteheadStr.isEmpty();
 
     if (!noteUuid.isEmpty()) {
         Segment* seg2 = score->tick2segment(tick, false, SegmentType::ChordRest);
@@ -185,6 +189,10 @@ bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
                         if (tabFret >= 0 && tabString >= 0) {
                             n->setFret(tabFret);
                             n->setString(tabString);
+                        }
+                        // Apply notehead if present.
+                        if (hasNotehead) {
+                            n->setHeadGroup(noteheadGroupFromString(noteheadStr));
                         }
                         break;
                     }
@@ -1007,6 +1015,46 @@ bool ScoreApplicator::applySetPartInstrument(Score* score, const QJsonObject& op
             StringData sd(sdObj["frets"].toInt(), table);
             existing->setStringData(sd);
         }
+
+        // Apply optional drumset override from the instrument payload.
+        const bool useDrumset = instr["use_drumset"].toBool(false);
+        if (useDrumset) {
+            existing->setUseDrumset(true);
+            const QJsonObject dsOverrides = instr["drumset_overrides"].toObject();
+            if (!dsOverrides.isEmpty()) {
+                const QJsonObject dsInstruments = dsOverrides["instruments"].toObject();
+                Drumset drumset;
+                for (auto it = dsInstruments.begin(); it != dsInstruments.end(); ++it) {
+                    const int pitch = it.key().toInt();
+                    const QJsonObject entry = it.value().toObject();
+                    drumset.drum(pitch).name = String(entry["name"].toString());
+                    drumset.drum(pitch).notehead = noteheadGroupFromString(
+                        entry["notehead"].toString());
+                    drumset.drum(pitch).line = entry["line"].toInt();
+                    drumset.drum(pitch).stemDirection = stemDirectionFromString(
+                        entry["stem_direction"].toString());
+                    drumset.drum(pitch).voice = entry["voice"].toInt();
+                    drumset.drum(pitch).shortcut = String(entry["shortcut"].toString());
+
+                    const QJsonArray varArr = entry["variants"].toArray();
+                    std::vector<DrumInstrumentVariant> variants;
+                    for (const QJsonValue& vv : varArr) {
+                        const QJsonObject vObj = vv.toObject();
+                        DrumInstrumentVariant var;
+                        var.pitch = vObj["pitch"].toInt();
+                        const QString tt = vObj["tremolo_type"].toString();
+                        if (!tt.isEmpty()) {
+                            var.tremolo = tremoloTypeFromString(tt);
+                        }
+                        var.articulationName = String(
+                            vObj["articulation_name"].toString());
+                        variants.push_back(var);
+                    }
+                    drumset.drum(pitch).variants = std::move(variants);
+                }
+                existing->setDrumset(&drumset);
+            }
+        }
     }
     part->setPartName(String(longName));
     part->setLongNameAll(String(longName));
@@ -1093,6 +1141,87 @@ bool ScoreApplicator::applySetTabNote(Score* score, const QJsonObject& op)
     return true;
 }
 
+bool ScoreApplicator::applySetDrumset(Score* score, const QJsonObject& op)
+{
+    const QString partUuid = op["part_id"].toString();
+    Part* part = m_partUuidToPart.value(partUuid);
+    if (!part) {
+        LOGW() << "[editude] applySetDrumset: unknown part_id" << partUuid;
+        return false;
+    }
+
+    Instrument* inst = part->instrument();
+    if (!inst) {
+        LOGW() << "[editude] applySetDrumset: part has no instrument";
+        return false;
+    }
+
+    const QJsonObject dsObj = op["drumset"].toObject();
+    if (dsObj.isEmpty()) {
+        // Clear drumset overrides — reset to template default.
+        return true;
+    }
+
+    const QJsonObject instruments = dsObj["instruments"].toObject();
+    Drumset drumset;
+    for (auto it = instruments.begin(); it != instruments.end(); ++it) {
+        const int pitch = it.key().toInt();
+        const QJsonObject entry = it.value().toObject();
+        drumset.drum(pitch).name      = String(entry["name"].toString());
+        drumset.drum(pitch).notehead  = noteheadGroupFromString(entry["notehead"].toString());
+        drumset.drum(pitch).line      = entry["line"].toInt();
+        drumset.drum(pitch).stemDirection = stemDirectionFromString(
+            entry["stem_direction"].toString());
+        drumset.drum(pitch).voice     = entry["voice"].toInt();
+        drumset.drum(pitch).shortcut  = String(entry["shortcut"].toString());
+
+        const QJsonArray varArr = entry["variants"].toArray();
+        std::vector<DrumInstrumentVariant> variants;
+        for (const QJsonValue& vv : varArr) {
+            const QJsonObject vObj = vv.toObject();
+            DrumInstrumentVariant var;
+            var.pitch = vObj["pitch"].toInt();
+            const QString tt = vObj["tremolo_type"].toString();
+            if (!tt.isEmpty()) {
+                var.tremolo = tremoloTypeFromString(tt);
+            }
+            var.articulationName = String(vObj["articulation_name"].toString());
+            variants.push_back(var);
+        }
+        drumset.drum(pitch).variants = std::move(variants);
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Set drumset"));
+    inst->setDrumset(&drumset);
+    inst->setUseDrumset(true);
+    // Trigger Pass 10 via identity STAFF_LONG_NAME change.
+    part->undoChangeProperty(Pid::STAFF_LONG_NAME, PropertyValue(String(part->longName())));
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applySetNoteHead(Score* score, const QJsonObject& op)
+{
+    const QString uuid = op["event_id"].toString();
+    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
+        LOGW() << "[editude] applySetNoteHead: unknown uuid" << uuid;
+        return false;
+    }
+
+    Note* note = dynamic_cast<Note*>(m_uuidToElement.value(uuid));
+    if (!note) {
+        LOGW() << "[editude] applySetNoteHead: element is not a Note";
+        return false;
+    }
+
+    const NoteHeadGroup headGroup = noteheadGroupFromString(op["notehead"].toString());
+
+    score->startCmd(TranslatableString("undoableAction", "Set notehead"));
+    note->undoChangeProperty(Pid::HEAD_GROUP, int(headGroup));
+    score->endCmd();
+    return true;
+}
+
 bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
 {
     const QString type = payload["type"].toString();
@@ -1142,6 +1271,8 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("SetStringData"))     return applySetStringData(score, payload);
     if (type == QLatin1String("SetCapo"))            return applySetCapo(score, payload);
     if (type == QLatin1String("SetTabNote"))         return applySetTabNote(score, payload);
+    if (type == QLatin1String("SetDrumset"))         return applySetDrumset(score, payload);
+    if (type == QLatin1String("SetNoteHead"))        return applySetNoteHead(score, payload);
 
     // Tier 3 — articulations
     if (type == QLatin1String("AddArticulation"))    return applyAddArticulation(score, payload);

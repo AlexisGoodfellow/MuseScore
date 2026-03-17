@@ -72,6 +72,8 @@ private:
     Reply actionSetStringData(const QJsonObject& body);
     Reply actionSetCapo(const QJsonObject& body);
     Reply actionSetTabNote(const QJsonObject& body);
+    Reply actionSetDrumset(const QJsonObject& body);
+    Reply actionSetNoteHead(const QJsonObject& body);
 
     // Tier 3 — chord symbols
     Reply actionAddChordSymbol(const QJsonObject& body);

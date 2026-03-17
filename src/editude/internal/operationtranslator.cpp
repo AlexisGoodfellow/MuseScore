@@ -33,6 +33,7 @@
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/clef.h"
+#include "engraving/dom/drumset.h"
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/engravingitem.h"
 #include "engraving/dom/glissando.h"
@@ -565,6 +566,23 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 continue;
             }
             ops.append(buildSetTabNote(uuid, static_cast<Note*>(obj)));
+        }
+    }
+
+    // ── Pass 7c: ChangeProperty + Pid::HEAD_GROUP → SetNoteHead ─────────
+    if (changedPropertyIdSet.count(Pid::HEAD_GROUP)) {
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || obj->type() != ElementType::NOTE) {
+                continue;
+            }
+            if (!cmds.count(CommandType::ChangeProperty)) {
+                continue;
+            }
+            const QString uuid = uuidForElement(obj, remoteElementToUuid);
+            if (uuid.isEmpty()) {
+                continue;
+            }
+            ops.append(buildSetNoteHead(uuid, static_cast<Note*>(obj)));
         }
     }
 
@@ -1465,6 +1483,11 @@ QJsonObject OperationTranslator::buildInsertNote(Note* note, const QString& uuid
         payload["fret"]   = note->fret();
         payload["string"] = note->string();
     }
+
+    // Percussion: include notehead if non-default.
+    if (note->headGroup() != NoteHeadGroup::HEAD_NORMAL) {
+        payload["notehead"] = noteheadGroupToString(note->headGroup());
+    }
     return payload;
 }
 
@@ -1562,6 +1585,15 @@ QJsonObject OperationTranslator::buildSetTabNote(const QString& uuid, Note* note
     payload["event_id"] = uuid;
     payload["fret"]     = note->fret();
     payload["string"]   = note->string();
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetNoteHead(const QString& uuid, Note* note)
+{
+    QJsonObject payload;
+    payload["type"]     = QStringLiteral("SetNoteHead");
+    payload["event_id"] = uuid;
+    payload["notehead"] = noteheadGroupToString(note->headGroup());
     return payload;
 }
 
@@ -1741,6 +1773,48 @@ QJsonObject OperationTranslator::buildSetPartInstrument(const QString& uuid, Par
             sdObj["frets"]   = sd->frets();
             sdObj["strings"] = strings;
             instr["string_data"] = sdObj;
+        }
+
+        // Percussion: serialize use_drumset and drumset_overrides.
+        instr["use_drumset"] = inst->useDrumset();
+        if (inst->useDrumset() && inst->drumset()) {
+            const Drumset* ds = inst->drumset();
+            QJsonObject instruments;
+            for (int pitch = 0; pitch < 128; ++pitch) {
+                if (!ds->isValid(pitch)) {
+                    continue;
+                }
+                QJsonObject entry;
+                entry["name"]           = ds->name(pitch).toQString();
+                entry["notehead"]       = noteheadGroupToString(ds->noteHead(pitch));
+                entry["line"]           = ds->line(pitch);
+                entry["stem_direction"] = stemDirectionToString(ds->stemDirection(pitch));
+                entry["voice"]          = ds->voice(pitch);
+                entry["shortcut"]       = ds->shortcut(pitch).toQString();
+
+                // Serialize variants for this pitch.
+                const auto& variants = ds->variants(pitch);
+                if (!variants.empty()) {
+                    QJsonArray varArr;
+                    for (const DrumInstrumentVariant& v : variants) {
+                        QJsonObject vObj;
+                        vObj["pitch"] = v.pitch;
+                        if (v.tremolo != TremoloType::INVALID_TREMOLO) {
+                            vObj["tremolo_type"] = tremoloTypeToString(v.tremolo);
+                        }
+                        if (!v.articulationName.isEmpty()) {
+                            vObj["articulation_name"] = v.articulationName.toQString();
+                        }
+                        varArr.append(vObj);
+                    }
+                    entry["variants"] = varArr;
+                }
+
+                instruments[QString::number(pitch)] = entry;
+            }
+            QJsonObject dsObj;
+            dsObj["instruments"] = instruments;
+            instr["drumset_overrides"] = dsObj;
         }
     }
 

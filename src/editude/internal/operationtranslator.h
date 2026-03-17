@@ -137,6 +137,7 @@ private:
     static QJsonObject buildDeleteEvent(const QString& uuid);
     static QJsonObject buildSetPitch(const QString& uuid, mu::engraving::Note* note);
     static QJsonObject buildSetTabNote(const QString& uuid, mu::engraving::Note* note);
+    static QJsonObject buildSetNoteHead(const QString& uuid, mu::engraving::Note* note);
     static QJsonObject buildSetTrack(const QString& uuid, mu::engraving::EngravingItem* item);
 
     // Directive builders.

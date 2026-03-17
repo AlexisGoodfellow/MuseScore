@@ -27,6 +27,7 @@
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/clef.h"
+#include "engraving/dom/drumset.h"
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/harmony.h"
 #include "engraving/dom/hairpin.h"
@@ -237,6 +238,8 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("set_string_data"))    return actionSetStringData(body);
     if (action == QLatin1String("set_capo"))            return actionSetCapo(body);
     if (action == QLatin1String("set_tab_note"))       return actionSetTabNote(body);
+    if (action == QLatin1String("set_drumset"))        return actionSetDrumset(body);
+    if (action == QLatin1String("set_note_head"))      return actionSetNoteHead(body);
     if (action == QLatin1String("add_chord_symbol"))    return actionAddChordSymbol(body);
     if (action == QLatin1String("set_chord_symbol"))    return actionSetChordSymbol(body);
     if (action == QLatin1String("remove_chord_symbol")) return actionRemoveChordSymbol(body);
@@ -615,6 +618,47 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
             sdObj["strings"] = strings;
             instrument["string_data"] = sdObj;
         }
+
+        // Percussion: serialize use_drumset and drumset_overrides.
+        instrument["use_drumset"] = inst->useDrumset();
+        if (inst->useDrumset() && inst->drumset()) {
+            const Drumset* ds = inst->drumset();
+            QJsonObject instruments;
+            for (int pitch = 0; pitch < 128; ++pitch) {
+                if (!ds->isValid(pitch)) {
+                    continue;
+                }
+                QJsonObject entry;
+                entry["name"]           = ds->name(pitch).toQString();
+                entry["notehead"]       = noteheadGroupToString(ds->noteHead(pitch));
+                entry["line"]           = ds->line(pitch);
+                entry["stem_direction"] = stemDirectionToString(ds->stemDirection(pitch));
+                entry["voice"]          = ds->voice(pitch);
+                entry["shortcut"]       = ds->shortcut(pitch).toQString();
+
+                const auto& variants = ds->variants(pitch);
+                if (!variants.empty()) {
+                    QJsonArray varArr;
+                    for (const DrumInstrumentVariant& v : variants) {
+                        QJsonObject vObj;
+                        vObj["pitch"] = v.pitch;
+                        if (v.tremolo != TremoloType::INVALID_TREMOLO) {
+                            vObj["tremolo_type"] = tremoloTypeToString(v.tremolo);
+                        }
+                        if (!v.articulationName.isEmpty()) {
+                            vObj["articulation_name"] = v.articulationName.toQString();
+                        }
+                        varArr.append(vObj);
+                    }
+                    entry["variants"] = varArr;
+                }
+
+                instruments[QString::number(pitch)] = entry;
+            }
+            QJsonObject dsObj;
+            dsObj["instruments"] = instruments;
+            instrument["drumset_overrides"] = dsObj;
+        }
     }
 
     const QString partUuid = uuidForPart(part);
@@ -707,6 +751,11 @@ QJsonObject EditudeTestServer::serializeNote(Note* note, const QString& uuid,
     if (note->fret() >= 0 && note->string() >= 0) {
         obj["fret"]   = note->fret();
         obj["string"] = note->string();
+    }
+
+    // Percussion: include notehead if non-default.
+    if (note->headGroup() != NoteHeadGroup::HEAD_NORMAL) {
+        obj["notehead"] = noteheadGroupToString(note->headGroup());
     }
     return obj;
 }
@@ -1639,6 +1688,92 @@ EditudeTestServer::Reply EditudeTestServer::actionSetTabNote(const QJsonObject& 
     score->startCmd(TranslatableString("test", "set tab note"));
     note->undoChangeProperty(Pid::FRET, fret);
     note->undoChangeProperty(Pid::STRING, string);
+    score->endCmd();
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetDrumset(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(-1);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject dsObj = body["drumset"].toObject();
+    const QJsonObject instruments = dsObj["instruments"].toObject();
+
+    Drumset* ds = new Drumset();
+    for (auto it = instruments.begin(); it != instruments.end(); ++it) {
+        const int pitch = it.key().toInt();
+        if (pitch < 0 || pitch > 127) {
+            continue;
+        }
+        const QJsonObject entry = it.value().toObject();
+        DrumInstrument di;
+        di.name          = String::fromQString(entry["name"].toString());
+        di.notehead      = noteheadGroupFromString(entry["notehead"].toString());
+        di.line          = entry["line"].toInt();
+        di.stemDirection = stemDirectionFromString(entry["stem_direction"].toString());
+        di.voice         = entry["voice"].toInt();
+        di.shortcut      = String::fromQString(entry["shortcut"].toString());
+
+        const QJsonArray varArr = entry["variants"].toArray();
+        for (const QJsonValue& vv : varArr) {
+            const QJsonObject vObj = vv.toObject();
+            DrumInstrumentVariant v;
+            v.pitch            = vObj["pitch"].toInt(INVALID_PITCH);
+            v.tremolo          = vObj.contains("tremolo_type")
+                                     ? tremoloTypeFromString(vObj["tremolo_type"].toString())
+                                     : TremoloType::INVALID_TREMOLO;
+            v.articulationName = String::fromQString(
+                vObj["articulation_name"].toString());
+            di.addVariant(v);
+        }
+        ds->drum(pitch) = di;
+    }
+
+    score->startCmd(TranslatableString("test", "set drumset"));
+    Instrument* inst = part->instrument();
+    inst->setUseDrumset(true);
+    inst->setDrumset(ds);
+    // Trigger translator Pass 10 via identity property change.
+    part->undoChangeProperty(Pid::STAFF_LONG_NAME, part->longName().toQString());
+    score->endCmd();
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetNoteHead(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString eventId = body["event_id"].toString();
+    const QString headStr = body["notehead"].toString();
+    if (headStr.isEmpty()) {
+        return errorResponse(422, "notehead required");
+    }
+
+    EngravingObject* obj = findByUuid(eventId);
+    if (!obj) {
+        return errorResponse(422, "event not found");
+    }
+    Note* note = dynamic_cast<Note*>(obj);
+    if (!note) {
+        return errorResponse(422, "event is not a Note");
+    }
+
+    const NoteHeadGroup headGroup = noteheadGroupFromString(headStr);
+
+    score->startCmd(TranslatableString("test", "set note head"));
+    note->undoChangeProperty(Pid::HEAD_GROUP, int(headGroup));
     score->endCmd();
     return okResponse();
 }
