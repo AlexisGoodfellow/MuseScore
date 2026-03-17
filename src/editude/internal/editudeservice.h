@@ -37,6 +37,7 @@
 #include "engraving/dom/score.h"
 #include "notation/inotation.h"
 #include "project/iprojectfilescontroller.h"
+#include "audio/main/iplayback.h"
 #include "playback/iplaybackcontroller.h"
 
 #include "operationtranslator.h"
@@ -109,6 +110,7 @@ private:
 
     muse::ContextInject<mu::project::IProjectFilesController> m_projectFiles{ iocContext() };
     muse::ContextInject<mu::playback::IPlaybackController> m_playbackController{ iocContext() };
+    muse::ContextInject<muse::audio::IPlayback> m_audioPlayback{ iocContext() };
 
     QWebSocket* m_socket = nullptr;
     QNetworkAccessManager m_nam;

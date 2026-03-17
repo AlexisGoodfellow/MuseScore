@@ -50,6 +50,7 @@
 #include "engraving/dom/marker.h"
 #include "engraving/dom/slur.h"
 #include "engraving/dom/tie.h"
+#include "engraving/dom/tempotext.h"
 #include "engraving/dom/timesig.h"
 #include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"
@@ -627,8 +628,19 @@ bool ScoreApplicator::applySetTempo(Score* score, const QJsonObject& op)
         return false;
     }
 
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applySetTempo: no measure at tick" << tick.toString();
+        return false;
+    }
+    Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
+
     score->startCmd(TranslatableString("undoableAction", "Set tempo"));
-    score->setTempo(tick, BeatsPerSecond(bpm / 60.0));
+    TempoText* tt = Factory::createTempoText(seg);
+    tt->setTempo(BeatsPerSecond(bpm / 60.0));
+    tt->setParent(seg);
+    tt->setTrack(0);
+    score->undoAddElement(tt);
     score->endCmd();
     return true;
 }
@@ -663,8 +675,29 @@ bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
 
     const QJsonValue ksSigVal = op["key_signature"];
     if (ksSigVal.isNull() || ksSigVal.isUndefined()) {
-        // Remove not yet implemented — silently accept.
-        LOGD() << "[editude] applySetKeySignature: null (remove) not yet implemented";
+        // Remove the key signature at the given beat for this part.
+        const QJsonObject beat = op["beat"].toObject();
+        const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+        Measure* measure = score->tick2measure(tick);
+        if (!measure) {
+            return true; // nothing to remove
+        }
+        Segment* seg = measure->findSegment(SegmentType::KeySig, tick);
+        if (!seg) {
+            return true; // no KeySig segment at this tick
+        }
+        Part* part = m_partUuidToPart.value(uuid);
+        const staff_idx_t firstStaff = part->startTrack() / VOICES;
+        const staff_idx_t nStaves    = static_cast<staff_idx_t>(part->nstaves());
+        score->startCmd(TranslatableString("undoableAction", "Remove key signature"));
+        for (staff_idx_t i = 0; i < nStaves; ++i) {
+            const track_idx_t track = (firstStaff + i) * VOICES;
+            EngravingItem* el = seg->element(track);
+            if (el && el->isKeySig()) {
+                score->undoRemoveElement(el);
+            }
+        }
+        score->endCmd();
         return true;
     }
 
@@ -695,7 +728,7 @@ bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
         KeySig* ks = Factory::createKeySig(seg);
         ks->setTrack(track);
         ks->setKey(key);
-        seg->add(ks);
+        ks->setParent(seg);
         score->undoAddElement(ks);
     }
     score->endCmd();
@@ -712,8 +745,26 @@ bool ScoreApplicator::applySetClef(Score* score, const QJsonObject& op)
 
     const QJsonValue clefVal = op["clef"];
     if (clefVal.isNull() || clefVal.isUndefined()) {
-        // Remove not yet implemented — silently accept.
-        LOGD() << "[editude] applySetClef: null (remove) not yet implemented";
+        // Remove the clef at the given beat/staff for this part.
+        const QJsonObject beat = op["beat"].toObject();
+        const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+        const int staffIdx = op["staff"].toInt(0);
+        Measure* measure = score->tick2measure(tick);
+        if (!measure) {
+            return true; // nothing to remove
+        }
+        Segment* seg = measure->findSegment(SegmentType::Clef, tick);
+        if (!seg) {
+            return true; // no Clef segment at this tick
+        }
+        Part* part = m_partUuidToPart.value(uuid);
+        const track_idx_t track = (part->startTrack() / VOICES + staffIdx) * VOICES;
+        EngravingItem* el = seg->element(track);
+        if (el && el->isClef()) {
+            score->startCmd(TranslatableString("undoableAction", "Remove clef"));
+            score->undoRemoveElement(el);
+            score->endCmd();
+        }
         return true;
     }
 
@@ -797,7 +848,7 @@ bool ScoreApplicator::applySetStaffCount(Score* score, const QJsonObject& op)
     if (target > current) {
         for (int i = current; i < target; ++i) {
             Staff* staff = Factory::createStaff(part);
-            score->appendStaff(staff);
+            score->undoInsertStaff(staff, static_cast<staff_idx_t>(i), false);
         }
     } else {
         // Remove from the tail of this part's staves.

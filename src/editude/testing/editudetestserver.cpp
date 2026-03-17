@@ -566,7 +566,7 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
                              ? QString::fromStdString(part->id().toStdString())
                              : partUuid },
         { "instrument",  instrument },
-        { "name",        QJsonValue::Null },
+        { "name",        part->partName().toQString() },
         { "staff_count", static_cast<int>(part->nstaves()) },
         { "events",      serializePartEvents(part) },
         { "clef_changes", serializePartClefChanges(part) },
@@ -929,14 +929,15 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStaffCount(const QJsonObjec
 
     score->startCmd(TranslatableString("test", "set staff count"));
     if (target > current) {
-        const staff_idx_t partStart = part->startTrack() / VOICES;
         for (int i = current; i < target; ++i) {
             Staff* staff = Factory::createStaff(part);
-            score->undoInsertStaff(staff, static_cast<staff_idx_t>(partStart + i), false);
+            // ridx is relative to the part, not absolute
+            score->undoInsertStaff(staff, static_cast<staff_idx_t>(i), false);
         }
     } else {
         const staff_idx_t partStart = part->startTrack() / VOICES;
         for (int i = current; i > target; --i) {
+            // cmdRemoveStaff takes an absolute staff index
             score->cmdRemoveStaff(static_cast<staff_idx_t>(partStart + i - 1));
         }
     }

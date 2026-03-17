@@ -345,6 +345,10 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     // adding a part creates staves whose TimeSig/KeySig/Clef elements
     // appear in the same batch.  Without this, the TimeSig early return
     // would suppress the AddPart op entirely.
+    //
+    // Track newly-added Parts: Pass 10b must skip SetStaffCount for these
+    // because AddPart already carries the staff_count field.
+    QSet<Part*> newlyAddedParts;
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::PART) {
             continue;
@@ -354,6 +358,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_knownPartUuids[part] = uuid;
             ops.append(buildAddPart(part, uuid));
+            newlyAddedParts.insert(part);
         } else if (cmds.count(CommandType::RemoveElement) || cmds.count(CommandType::RemovePart)) {
             const QString uuid = m_knownPartUuids.value(part);
             if (!uuid.isEmpty()) {
@@ -366,18 +371,54 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     // ── Pass 5b: SetTimeSignature & SetTempo ─────────────────────────────
     // A TimeSig may appear with AddElement (new time sig added) OR
     // ChangeProperty (existing time sig modified by cmdAddTimeSig).
+    //
+    // Important: when a staff is added (InsertStaff/InsertPart), MuseScore's
+    // cmdAddStaves replicates the existing TimeSig to the new staff via
+    // undoAddElement(timesig).  This is a REPLICATION, not a genuine time
+    // signature change.  We must NOT emit SetTimeSignature or trigger the
+    // compound-op early return for these replications — doing so suppresses
+    // the real ops in the batch (SetStaffCount, SetKeySignature, etc.) and
+    // also inflates the revision count, breaking subsequent wait_revision
+    // expectations.
+    bool batchHasStaffInsert = false;
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj) {
+            continue;
+        }
+        if (obj->type() == ElementType::STAFF
+            && (cmds.count(CommandType::InsertStaff)
+                || cmds.count(CommandType::RemoveStaff))) {
+            batchHasStaffInsert = true;
+            break;
+        }
+        if (obj->type() == ElementType::PART
+            && (cmds.count(CommandType::InsertPart)
+                || cmds.count(CommandType::AddElement))) {
+            batchHasStaffInsert = true;
+            break;
+        }
+    }
+
     bool emittedTimeSig = false;
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj) {
             continue;
         }
-        if (obj->type() == ElementType::TIMESIG
-            && (cmds.count(CommandType::AddElement)
-                || cmds.count(CommandType::ChangeProperty))) {
-            auto* ts = toTimeSig(static_cast<EngravingItem*>(obj));
-            if (ts) {
-                ops.append(buildSetTimeSignature(ts));
-                emittedTimeSig = true;
+        if (obj->type() == ElementType::TIMESIG) {
+            // ChangeProperty always means a genuine time sig change
+            // (cmdAddTimeSig modifies an existing TimeSig element).
+            // AddElement without a staff insert is also genuine (new
+            // time sig at a previously empty position).
+            // AddElement WITH a staff insert is a replication — skip it.
+            const bool isGenuine =
+                cmds.count(CommandType::ChangeProperty)
+                || (cmds.count(CommandType::AddElement) && !batchHasStaffInsert);
+            if (isGenuine) {
+                auto* ts = toTimeSig(static_cast<EngravingItem*>(obj));
+                if (ts) {
+                    ops.append(buildSetTimeSignature(ts));
+                    emittedTimeSig = true;
+                }
             }
         }
         if (obj->type() == ElementType::TEMPO_TEXT
@@ -520,6 +561,9 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     }
 
     // ── Pass 10b: SetStaffCount (InsertStaff / RemoveStaff) ──────────────
+    // Skip parts that were just added in Pass 5a — AddPart already carries
+    // the staff_count, so a redundant SetStaffCount would only inflate the
+    // server revision count.
     {
         QSet<Part*> staffChangedParts;
         for (const auto& [obj, cmds] : changedObjects) {
@@ -532,7 +576,8 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             }
             auto* staff = static_cast<Staff*>(obj);
             Part* part = staff->part();
-            if (part && !staffChangedParts.contains(part)) {
+            if (part && !staffChangedParts.contains(part)
+                && !newlyAddedParts.contains(part)) {
                 staffChangedParts.insert(part);
                 const QString uuid = m_knownPartUuids.value(part);
                 if (!uuid.isEmpty()) {
@@ -590,28 +635,83 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     }
 
     // ── Pass 13: SetKeySignature & SetClef ───────────────────────────────
+    // AddElement → emit set op with the new value.
+    // RemoveElement → emit set op with null value (undo / removal).
     for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || !cmds.count(CommandType::AddElement)) {
+        if (!obj) {
+            continue;
+        }
+        const bool isAdd    = cmds.count(CommandType::AddElement) > 0;
+        const bool isRemove = cmds.count(CommandType::RemoveElement) > 0;
+        if (!isAdd && !isRemove) {
             continue;
         }
         if (obj->type() == ElementType::KEYSIG) {
             auto* ks = static_cast<KeySig*>(obj);
             Part* part = static_cast<EngravingItem*>(obj)->part();
+            if (!part) {
+                // After undo, the element's KeySig segment may have been
+                // removed from the Measure (undoGetSegment reversal), breaking
+                // the parent chain so element->part() returns nullptr.
+                // Fall back to a track-based lookup through m_knownPartUuids
+                // whose Part* pointers remain live in the score.
+                const staff_idx_t staffIdx = ks->track() / VOICES;
+                for (auto it = m_knownPartUuids.cbegin(); it != m_knownPartUuids.cend(); ++it) {
+                    Part* p = it.key();
+                    const staff_idx_t first = p->startTrack() / VOICES;
+                    if (staffIdx >= first && staffIdx < first + static_cast<staff_idx_t>(p->nstaves())) {
+                        part = p;
+                        break;
+                    }
+                }
+            }
             if (!part) continue;
             const QString partUuid = resolvePartUuid(part, lazyAddPartOps);
             if (partUuid.isEmpty()) continue;
-            ops.append(buildSetKeySignature(ks, partUuid));
+            if (isAdd) {
+                ops.append(buildSetKeySignature(ks, partUuid));
+            } else {
+                // Removal: emit SetKeySignature with null key_signature.
+                QJsonObject payload;
+                payload["type"]          = QStringLiteral("SetKeySignature");
+                payload["part_id"]       = partUuid;
+                payload["beat"]          = beatJson(ks->tick());
+                payload["key_signature"] = QJsonValue::Null;
+                ops.append(payload);
+            }
         } else if (obj->type() == ElementType::CLEF) {
             auto* clef = static_cast<Clef*>(obj);
             Part* part = static_cast<EngravingItem*>(obj)->part();
+            if (!part) {
+                // Same detached-element fallback as KEYSIG above.
+                const staff_idx_t staffIdx = clef->track() / VOICES;
+                for (auto it = m_knownPartUuids.cbegin(); it != m_knownPartUuids.cend(); ++it) {
+                    Part* p = it.key();
+                    const staff_idx_t first = p->startTrack() / VOICES;
+                    if (staffIdx >= first && staffIdx < first + static_cast<staff_idx_t>(p->nstaves())) {
+                        part = p;
+                        break;
+                    }
+                }
+            }
             if (!part) continue;
             const QString partUuid = resolvePartUuid(part, lazyAddPartOps);
             if (partUuid.isEmpty()) continue;
-            // Local staff index within the part.
             const staff_idx_t globalStaff = clef->track() / VOICES;
             const staff_idx_t firstStaff  = part->startTrack() / VOICES;
             const int staffIdx = static_cast<int>(globalStaff - firstStaff);
-            ops.append(buildSetClef(clef, partUuid, staffIdx));
+            if (isAdd) {
+                ops.append(buildSetClef(clef, partUuid, staffIdx));
+            } else {
+                // Removal: emit SetClef with null clef.
+                QJsonObject payload;
+                payload["type"]    = QStringLiteral("SetClef");
+                payload["part_id"] = partUuid;
+                payload["beat"]    = beatJson(clef->tick());
+                payload["staff"]   = staffIdx;
+                payload["clef"]    = QJsonValue::Null;
+                ops.append(payload);
+            }
         }
     }
 

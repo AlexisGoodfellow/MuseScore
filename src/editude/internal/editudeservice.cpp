@@ -35,6 +35,7 @@
 #include "project/types/projecttypes.h"
 
 #include "engraving/dom/engravingitem.h"
+#include "engraving/dom/masterscore.h"
 #include "engraving/dom/part.h"
 #include "notation/internal/igetscore.h"
 #include "log.h"
@@ -759,6 +760,9 @@ void EditudeService::connectToSession(const QString& sessionUrl)
         m_tokenRefreshTimer->stop();
     }
 
+    // Cancel any pending sequenceRemoved wait from a prior connectToSession call.
+    m_audioPlayback()->sequenceRemoved().disconnect(this);
+
     // Reset all state to match a fresh start()
     m_state = State::Disconnected;
     m_serverRevision = 0;
@@ -781,34 +785,18 @@ void EditudeService::connectToSession(const QString& sessionUrl)
     m_applicator.reset();
     m_lastKnownMetaTags.clear();
 
-    // Undo ALL local changes to restore the score to its pristine template
-    // state.  Each test session must start from a clean, known score —
-    // accumulated edits from previous tests (time-signature changes, added
-    // parts, etc.) would otherwise confound subsequent tests.
-    //
-    // Guard with m_applyingRemote: each undoRedo fires changesChannel →
-    // onScoreChanges → translateAll.  Without the guard, translateAll would
-    // lazily register the template part (resolvePartUuid), and bootstrap
-    // would then skip it — leaving the server without an AddPart for the
-    // template.  The guard causes onScoreChanges to return immediately.
-    if (m_score) {
-        m_applyingRemote = true;
-        while (m_score->undoStack()->canUndo()) {
-            m_score->undoRedo(true, nullptr);
-        }
-        m_applyingRemote = false;
-
-        // Re-populate the metaTags snapshot from the pristine score so the
-        // first onScoreChanges after this connectToSession doesn't see every
-        // existing tag as "changed" and emit spurious SetScoreMetadata ops.
-        // (onNotationChanged does this for first-time score load, but
-        // connectToSession bypasses onNotationChanged on reconnects.)
-        m_lastKnownMetaTags.clear();
-        for (const auto& [k, v] : m_score->metaTags()) {
-            m_lastKnownMetaTags[QString::fromStdU16String(k.toStdU16String())]
-                = QString::fromStdU16String(v.toStdU16String());
-        }
+    // Disconnect from the current score's changes channel before closing
+    // to prevent spurious onScoreChanges callbacks during teardown.
+    if (m_currentNotation) {
+        m_currentNotation->undoStack()->changesChannel().disconnect(this);
     }
+    // Mark the score as saved so closeOpenedProject() doesn't pop a save
+    // dialog (which would block in a headless test environment).
+    if (m_score) {
+        m_score->masterScore()->setSaved(true);
+    }
+    m_score = nullptr;
+    m_currentNotation = nullptr;
 
     // Set new session URL and trigger the bootstrap fetch — same logic as start()
     m_sessionUrl = sessionUrl;
@@ -853,21 +841,43 @@ void EditudeService::connectToSession(const QString& sessionUrl)
                     this, &EditudeService::onReconnectTimer);
         }
 
-        // Score is already loaded (undo-all above restored it to pristine
-        // state).  Connect the WebSocket immediately.
-        if (m_score != nullptr) {
-            m_wsEverConnected = true;
-            scheduleTokenRefresh();
-            _openWebSocket();
-            return;
-        }
-
-        // No score loaded yet (first /connect after startup).  Defer the
-        // openProject() call to the next event-loop iteration so it runs
-        // outside the QNetworkReply::finished callback stack — openProject()
-        // triggers QML navigation that must not be called re-entrantly.
+        // Close the current project and re-open the blank score from disk.
+        // This goes through MuseScore's full document lifecycle (audio engine
+        // teardown, layout cleanup, etc.) instead of manually undoing all
+        // operations — which caused heap corruption from a data race between
+        // the main thread's undo loop and the audio engine thread.
+        //
+        // closeOpenedProject triggers async audio teardown: the PlaybackController
+        // removes the current audio sequence via an RPC to the audio engine thread.
+        // We must wait for that removal to complete before opening a new project,
+        // otherwise PlaybackController::subscribeOnAudioParamsChanges fires while
+        // stale channel subscriptions from the old sequence are still being torn
+        // down, causing an assertion failure in ChannelImpl::addReceiver.
+        //
+        // IPlayback::sequenceRemoved() fires exactly when the removeSequence RPC
+        // round-trip completes — this is the deterministic signal that audio
+        // teardown is done.
+        //
+        // onNotationChanged() fires when the new score loads — it applies
+        // bootstrap ops, opens the WebSocket, and subscribes to changes.
         QTimer::singleShot(0, this, [this]() {
-            if (m_score == nullptr) {
+            auto oldSeqId = m_playbackController()->currentTrackSequenceId();
+            m_projectFiles()->closeOpenedProject(false);
+
+            if (oldSeqId >= 0) {
+                // Wait for the audio engine to finish removing the old sequence.
+                m_audioPlayback()->sequenceRemoved().onReceive(
+                    this,
+                    [this, oldSeqId](muse::audio::TrackSequenceId removedId) {
+                        if (removedId != oldSeqId) {
+                            return;  // not our sequence, keep waiting
+                        }
+                        m_audioPlayback()->sequenceRemoved().disconnect(this);
+                        openScoreForSession();
+                    },
+                    muse::async::Asyncable::Mode::SetReplace);
+            } else {
+                // No previous audio sequence — open immediately.
                 openScoreForSession();
             }
         });
