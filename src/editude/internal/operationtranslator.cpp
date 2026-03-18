@@ -252,6 +252,45 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
+    // ── Pre-scan: identify tuplets being fully removed ──────────────────
+    // cmdDeleteTuplet removes all member ChordRests (via removeChordRest),
+    // which empties the Tuplet's elements() list.  The Tuplet object itself
+    // does NOT get a RemoveElement entry — it's implicitly orphaned.
+    // Detect full removal by finding removed ChordRests whose tuplet()
+    // pointer references a now-empty Tuplet.  This feeds:
+    //   - Pass 3: suppress the replacement rest (created by setRest()),
+    //   - Pass 6: skip individual DeleteEvent ops for members,
+    //   - Pass 18: emit a single RemoveTuplet op and clean up member UUIDs.
+    QSet<Tuplet*> fullyRemovedTuplets;
+    QHash<Tuplet*, QVector<EngravingObject*>> removedTupletMembers;
+    {
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::RemoveElement)) {
+                continue;
+            }
+            if (obj->type() != ElementType::REST && obj->type() != ElementType::CHORD) {
+                continue;
+            }
+            auto* cr = static_cast<ChordRest*>(obj);
+            Tuplet* tup = cr->tuplet();
+            if (!tup) {
+                continue;
+            }
+            const QString tupUuid = uuidForElement(tup, remoteElementToUuid);
+            if (tupUuid.isEmpty()) {
+                continue;
+            }
+            removedTupletMembers[tup].append(const_cast<EngravingObject*>(obj));
+        }
+        // A tuplet whose elements() list is empty after the command has had
+        // all members removed — this is a full tuplet deletion.
+        for (auto it = removedTupletMembers.cbegin(); it != removedTupletMembers.cend(); ++it) {
+            if (it.key()->elements().empty()) {
+                fullyRemovedTuplets.insert(it.key());
+            }
+        }
+    }
+
     // ── Pass 3: InsertRest (with fill-rest suppression) ──────────────────
     //
     // setNoteRest() creates the target element AND "fill rests" to pad the
@@ -303,6 +342,36 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 if (durationTypeName(rest->durationType().type())
                     == QLatin1String("unknown")) {
                     continue;
+                }
+                // Skip rests inside tuplets — Pass 18 handles them.
+                if (rest->tuplet()) {
+                    continue;
+                }
+                // Skip replacement rests created by cmdDeleteTuplet —
+                // RemoveTuplet (Pass 18) recreates the replacement
+                // atomically on the peer.
+                {
+                    bool isTupletReplacement = false;
+                    for (auto it = removedTupletMembers.cbegin();
+                         it != removedTupletMembers.cend(); ++it) {
+                        if (!fullyRemovedTuplets.contains(it.key())) {
+                            continue;
+                        }
+                        for (EngravingObject* member : it.value()) {
+                            auto* memberCr = static_cast<ChordRest*>(member);
+                            if (rest->tick() == memberCr->tick()
+                                && rest->track() == memberCr->track()) {
+                                isTupletReplacement = true;
+                                break;
+                            }
+                        }
+                        if (isTupletReplacement) {
+                            break;
+                        }
+                    }
+                    if (isTupletReplacement) {
+                        continue;
+                    }
                 }
                 Part* restPart = rest->staff() ? rest->staff()->part()
                                                : nullptr;
@@ -492,6 +561,11 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             }
 
             if (chord && removedChordsAndRests.contains(chord)) {
+                // Skip chords that are members of a fully-removed tuplet —
+                // RemoveTuplet (Pass 18) handles them atomically.
+                if (chord->tuplet() && fullyRemovedTuplets.contains(chord->tuplet())) {
+                    continue;
+                }
                 // The whole chord is being removed. Emit one DeleteEvent per chord.
                 if (!emittedRemovals.contains(chord)) {
                     emittedRemovals.insert(chord);
@@ -521,6 +595,12 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
 
         if (obj->type() == ElementType::REST) {
+            // Skip rests that are members of a fully-removed tuplet —
+            // RemoveTuplet (Pass 18) handles them atomically.
+            Rest* rest = static_cast<Rest*>(obj);
+            if (rest->tuplet() && fullyRemovedTuplets.contains(rest->tuplet())) {
+                continue;
+            }
             const QString uuid = uuidForElement(obj, remoteElementToUuid);
             if (!uuid.isEmpty()) {
                 ops.append(buildDeleteEvent(uuid));
@@ -906,23 +986,47 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     }
 
     // ── Pass 18: Tuplets ─────────────────────────────────────────────────
-    // Must run after Passes 2/3 so member UUIDs are already registered.
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::TUPLET) {
-            continue;
-        }
-        auto* tup = static_cast<Tuplet*>(obj);
-        if (cmds.count(CommandType::AddElement)) {
+    // cmdCreateTuplet does NOT emit AddElement for the Tuplet itself —
+    // only for its member ChordRests (via undoAddCR).  So we detect new
+    // tuplets by scanning newly-added ChordRests for a tuplet() parent.
+    // Removal still appears as a direct Tuplet RemoveElement.
+    {
+        QSet<Tuplet*> handledTuplets;
+
+        // Detect new tuplets via their members.
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::AddElement)) {
+                continue;
+            }
+            if (obj->type() != ElementType::REST && obj->type() != ElementType::CHORD) {
+                continue;
+            }
+            auto* cr = static_cast<ChordRest*>(obj);
+            Tuplet* tup = cr->tuplet();
+            if (!tup || handledTuplets.contains(tup)) {
+                continue;
+            }
+            // Skip tuplets that already have a UUID (remotely applied).
+            if (!uuidForElement(tup, remoteElementToUuid).isEmpty()) {
+                continue;
+            }
+            handledTuplets.insert(tup);
+
             Part* tupPart = static_cast<EngravingItem*>(tup)->part();
             if (!tupPart) continue;
             const QString tupPartUuid = resolvePartUuid(tupPart, lazyAddPartOps);
             if (tupPartUuid.isEmpty()) continue;
 
-            // Collect member UUIDs (members must already be registered from Pass 2/3).
+            // Assign UUIDs to all members (Pass 3 skips tuplet members).
             QVector<QString> memberUuids;
             for (DurationElement* elem : tup->elements()) {
-                const QString memberUuid = uuidForElement(elem, remoteElementToUuid);
-                memberUuids.append(memberUuid); // may be empty if not tracked
+                QString memberUuid = uuidForElement(elem, remoteElementToUuid);
+                if (memberUuid.isEmpty()) {
+                    memberUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                    m_localElementToUuid[elem]       = memberUuid;
+                    m_localUuidToElement[memberUuid]  = elem;
+                }
+                memberUuids.append(memberUuid);
             }
             const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_localElementToUuid[tup]  = uuid;
@@ -930,21 +1034,33 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             ops.append(buildAddTuplet(tup, uuid, tupPartUuid, memberUuids,
                                       tup->ratio().numerator(),
                                       tup->ratio().denominator()));
-        } else if (cmds.count(CommandType::RemoveElement)) {
+        }
+
+        // Detect removed tuplets using the pre-scan's fullyRemovedTuplets
+        // set.  tup->elements() is empty by this point, so member UUID
+        // cleanup uses removedTupletMembers instead.
+        for (Tuplet* tup : fullyRemovedTuplets) {
+            if (handledTuplets.contains(tup)) {
+                continue;
+            }
             const QString uuid = uuidForElement(tup, remoteElementToUuid);
-            if (!uuid.isEmpty()) {
-                // Unregister members before emitting RemoveTuplet.
-                for (DurationElement* elem : tup->elements()) {
-                    const QString memberUuid = uuidForElement(elem, remoteElementToUuid);
+            if (uuid.isEmpty()) {
+                continue;
+            }
+            handledTuplets.insert(tup);
+            // Clean up member UUIDs from the pre-scan's collected members.
+            if (removedTupletMembers.contains(tup)) {
+                for (EngravingObject* member : removedTupletMembers[tup]) {
+                    const QString memberUuid = uuidForElement(member, remoteElementToUuid);
                     if (!memberUuid.isEmpty()) {
                         m_localUuidToElement.remove(memberUuid);
-                        m_localElementToUuid.remove(elem);
+                        m_localElementToUuid.remove(member);
                     }
                 }
-                ops.append(buildRemoveTuplet(uuid));
-                m_localUuidToElement.remove(uuid);
-                m_localElementToUuid.remove(tup);
             }
+            ops.append(buildRemoveTuplet(uuid));
+            m_localUuidToElement.remove(uuid);
+            m_localElementToUuid.remove(tup);
         }
     }
 
@@ -2072,10 +2188,43 @@ QJsonObject OperationTranslator::buildAddTuplet(EngravingObject* tup,
 {
     auto* t = static_cast<Tuplet*>(tup);
 
+    // Build full member payloads — the Python applicator needs kind, beat,
+    // duration, and track for each member, not just the UUID.
     QJsonArray members;
-    for (const QString& mid : memberUuids) {
+    const auto& elems = t->elements();
+    for (int i = 0; i < static_cast<int>(elems.size()); ++i) {
+        DurationElement* elem = elems[i];
+        if (!elem->isChordRest()) {
+            continue;
+        }
+        auto* cr = static_cast<ChordRest*>(elem);
         QJsonObject m;
-        m["id"] = mid;
+        m["id"] = (i < memberUuids.size()) ? memberUuids[i] : QString();
+        m["beat"] = beatJson(cr->tick());
+        m["track"] = static_cast<int>(cr->track() % VOICES);
+
+        QJsonObject dur;
+        dur["type"] = durationTypeName(cr->durationType().type());
+        dur["dots"] = cr->durationType().dots();
+        m["duration"] = dur;
+
+        if (cr->isChord()) {
+            Chord* chord = toChord(static_cast<EngravingItem*>(cr));
+            if (chord->notes().size() == 1) {
+                Note* n = chord->notes().front();
+                m["kind"] = QStringLiteral("note");
+                m["pitch"] = pitchJson(n->tpc1(), n->octave());
+            } else {
+                m["kind"] = QStringLiteral("chord");
+                QJsonArray pitches;
+                for (Note* n : chord->notes()) {
+                    pitches.append(pitchJson(n->tpc1(), n->octave()));
+                }
+                m["pitches"] = pitches;
+            }
+        } else {
+            m["kind"] = QStringLiteral("rest");
+        }
         members.append(m);
     }
 

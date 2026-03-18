@@ -262,6 +262,8 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("remove_trill_line"))    return actionRemoveTrillLine(body);
     if (action == QLatin1String("add_arpeggio"))         return actionAddArpeggio(body);
     if (action == QLatin1String("remove_arpeggio"))      return actionRemoveArpeggio(body);
+    if (action == QLatin1String("add_tuplet"))            return actionAddTuplet(body);
+    if (action == QLatin1String("remove_tuplet"))         return actionRemoveTuplet(body);
     if (action == QLatin1String("add_grace_note"))       return actionAddGraceNote(body);
     if (action == QLatin1String("remove_grace_note"))    return actionRemoveGraceNote(body);
     if (action == QLatin1String("add_breath_mark"))      return actionAddBreathMark(body);
@@ -685,7 +687,7 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
         { "glissandos",    serializePartGlissandos(part) },
         { "pedal_lines",   serializePartPedalLines(part) },
         { "trill_lines",   serializePartTrillLines(part) },
-        { "tuplets",       QJsonObject() },
+        { "tuplets",       serializePartTuplets(part) },
         { "lyrics",        serializePartLyricsMap(part) },
         { "staff_texts",   serializePartStaffTexts(part) },
         { "arpeggios",     serializePartArpeggios(part) },
@@ -1103,6 +1105,56 @@ QJsonObject EditudeTestServer::serializePartArticulations(Part* part)
                         { "articulation", articulationNameFromSymId(art->symId()) },
                     };
                 }
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartTuplets(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(SegmentType::ChordRest); seg;
+             seg = seg->next(SegmentType::ChordRest)) {
+            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+                EngravingItem* el = seg->element(track);
+                if (!el || !el->isChordRest()) {
+                    continue;
+                }
+                Tuplet* tup = toChordRest(el)->tuplet();
+                if (!tup) {
+                    continue;
+                }
+                const QString tupUuid = uuidForElement(tup);
+                if (tupUuid.isEmpty() || result.contains(tupUuid)) {
+                    continue;
+                }
+                QJsonArray memberIds;
+                bool allMembersValid = true;
+                for (DurationElement* member : tup->elements()) {
+                    const QString mid = uuidForChordRest(member);
+                    if (mid.isEmpty()) {
+                        allMembersValid = false;
+                        break;
+                    }
+                    memberIds.append(mid);
+                }
+                if (!allMembersValid) {
+                    continue;
+                }
+                QJsonObject baseDur;
+                baseDur["type"] = durationTypeName(tup->baseLen().type());
+                baseDur["dots"] = tup->baseLen().dots();
+                result[tupUuid] = QJsonObject{
+                    { "id",            tupUuid },
+                    { "beat",          beatJson(tup->tick()) },
+                    { "actual_notes",  tup->ratio().numerator() },
+                    { "normal_notes",  tup->ratio().denominator() },
+                    { "base_duration", baseDur },
+                    { "member_ids",    memberIds },
+                };
             }
         }
     }
@@ -2034,6 +2086,105 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveArpeggio(const QJsonObje
 
     score->startCmd(TranslatableString("test", "remove arpeggio"));
     score->undoRemoveElement(arp);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionAddTuplet(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int actualNotes = body["actual_notes"].toInt(0);
+    const int normalNotes = body["normal_notes"].toInt(0);
+    const QString baseType = body["base_duration"].toString();
+    const track_idx_t track = static_cast<track_idx_t>(body.value("track").toInt(0));
+
+    if (actualNotes <= 0 || normalNotes <= 0) {
+        return errorResponse(422, "actual_notes and normal_notes must be positive");
+    }
+
+    const DurationType dt = ScoreApplicator::parseDurationType(baseType);
+    if (dt == DurationType::V_INVALID) {
+        return errorResponse(422, QString("invalid base_duration: %1").arg(baseType));
+    }
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(422, "no measure at beat");
+    }
+
+    ChordRest* cr = nullptr;
+    for (Segment* seg = measure->first(SegmentType::ChordRest); seg;
+         seg = seg->next(SegmentType::ChordRest)) {
+        if (seg->tick() == tick) {
+            cr = toChordRest(seg->element(track));
+            break;
+        }
+    }
+    if (!cr) {
+        return errorResponse(422, "no chordrest at beat/track");
+    }
+
+    const TDuration baseLen(dt);
+    const Fraction totalTicks = baseLen.fraction() * normalNotes;
+
+    score->startCmd(TranslatableString("test", "add tuplet"));
+    Tuplet* tuplet = Factory::createTuplet(measure);
+    tuplet->setRatio(Fraction(actualNotes, normalNotes));
+    tuplet->setTicks(totalTicks);
+    tuplet->setBaseLen(baseLen);
+    tuplet->setTrack(track);
+    tuplet->setTick(tick);
+    tuplet->setParent(measure);
+    score->cmdCreateTuplet(cr, tuplet);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveTuplet(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const track_idx_t track = static_cast<track_idx_t>(body.value("track").toInt(0));
+
+    // Find the tuplet at the given beat/track by looking for a ChordRest inside one.
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(422, "no measure at beat");
+    }
+
+    Tuplet* tup = nullptr;
+    for (Segment* seg = measure->first(SegmentType::ChordRest); seg;
+         seg = seg->next(SegmentType::ChordRest)) {
+        if (seg->tick() >= tick) {
+            EngravingItem* el = seg->element(track);
+            if (el && el->isChordRest()) {
+                tup = toChordRest(el)->tuplet();
+                if (tup && tup->tick() == tick) {
+                    break;
+                }
+                tup = nullptr;
+            }
+        }
+    }
+    if (!tup) {
+        return errorResponse(422, "no tuplet at beat/track");
+    }
+
+    score->startCmd(TranslatableString("test", "remove tuplet"));
+    score->cmdDeleteTuplet(tup, /*replaceWithRest=*/true);
     score->endCmd();
 
     return okResponse();
