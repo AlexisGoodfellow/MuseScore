@@ -1354,6 +1354,12 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     // Breath marks / caesuras
     if (type == QLatin1String("AddBreathMark"))    return applyAddBreathMark(score, payload);
     if (type == QLatin1String("RemoveBreathMark")) return applyRemoveBreathMark(score, payload);
+    // Tremolos (single-note)
+    if (type == QLatin1String("AddTremolo"))    return applyAddTremolo(score, payload);
+    if (type == QLatin1String("RemoveTremolo")) return applyRemoveTremolo(score, payload);
+    // Two-note tremolos
+    if (type == QLatin1String("AddTwoNoteTremolo"))    return applyAddTwoNoteTremolo(score, payload);
+    if (type == QLatin1String("RemoveTwoNoteTremolo")) return applyRemoveTwoNoteTremolo(score, payload);
 
     // Tier 4 — navigation marks
     if (type == QLatin1String("InsertVolta"))  return applyInsertVolta(score, payload);
@@ -2915,6 +2921,152 @@ bool ScoreApplicator::applyRemoveBreathMark(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Remove breath mark"));
     score->undoRemoveElement(breath);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Single-note tremolos
+// ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applyAddTremolo(Score* score, const QJsonObject& op)
+{
+    const QString id       = op["id"].toString();
+    const QString eventId  = op["event_id"].toString();
+    const QString typeName = op["tremolo_type"].toString();
+
+    if (id.isEmpty() || eventId.isEmpty()) {
+        LOGW() << "[editude] applyAddTremolo: missing id or event_id";
+        return false;
+    }
+
+    EngravingObject* evObj = m_uuidToElement.value(eventId);
+    if (!evObj) {
+        LOGW() << "[editude] applyAddTremolo: unknown event_id" << eventId;
+        return false;
+    }
+
+    Chord* chord = nullptr;
+    if (evObj->isNote()) {
+        chord = toNote(static_cast<EngravingItem*>(evObj))->chord();
+    } else if (evObj->isChord()) {
+        chord = toChord(static_cast<EngravingItem*>(evObj));
+    }
+    if (!chord) {
+        LOGW() << "[editude] applyAddTremolo: event is not a note/chord" << eventId;
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add tremolo"));
+    TremoloSingleChord* trem = Factory::createTremoloSingleChord(chord);
+    trem->setTremoloType(tremoloTypeFromString(typeName));
+    trem->setParent(chord);
+    trem->setTrack(chord->track());
+    score->undoAddElement(trem);
+    score->endCmd();
+
+    m_uuidToElement[id] = trem;
+    m_elementToUuid[trem] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveTremolo(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveTremolo: unknown id" << id;
+        return false;
+    }
+
+    TremoloSingleChord* trem = dynamic_cast<TremoloSingleChord*>(m_uuidToElement.value(id));
+    if (!trem) {
+        LOGW() << "[editude] applyRemoveTremolo: element is not TremoloSingleChord" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(trem);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove tremolo"));
+    score->undoRemoveElement(trem);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Two-note tremolos
+// ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applyAddTwoNoteTremolo(Score* score, const QJsonObject& op)
+{
+    const QString id           = op["id"].toString();
+    const QString startEventId = op["start_event_id"].toString();
+    const QString endEventId   = op["end_event_id"].toString();
+    const QString typeName     = op["tremolo_type"].toString();
+
+    if (id.isEmpty() || startEventId.isEmpty() || endEventId.isEmpty()) {
+        LOGW() << "[editude] applyAddTwoNoteTremolo: missing id, start_event_id, or end_event_id";
+        return false;
+    }
+
+    EngravingObject* startObj = m_uuidToElement.value(startEventId);
+    EngravingObject* endObj   = m_uuidToElement.value(endEventId);
+    if (!startObj || !endObj) {
+        LOGW() << "[editude] applyAddTwoNoteTremolo: unknown start or end event_id";
+        return false;
+    }
+
+    // Resolve to Chord* — two-note tremolos require chords, not rests.
+    Chord* chord1 = nullptr;
+    Chord* chord2 = nullptr;
+    if (startObj->isNote()) {
+        chord1 = toNote(static_cast<EngravingItem*>(startObj))->chord();
+    } else if (startObj->isChord()) {
+        chord1 = toChord(static_cast<EngravingItem*>(startObj));
+    }
+    if (endObj->isNote()) {
+        chord2 = toNote(static_cast<EngravingItem*>(endObj))->chord();
+    } else if (endObj->isChord()) {
+        chord2 = toChord(static_cast<EngravingItem*>(endObj));
+    }
+    if (!chord1 || !chord2) {
+        LOGW() << "[editude] applyAddTwoNoteTremolo: start or end is not a note/chord";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add two-note tremolo"));
+    TremoloTwoChord* trem = Factory::createTremoloTwoChord(score->dummy());
+    trem->setTremoloType(tremoloTypeFromString(typeName));
+    trem->setChords(chord1, chord2);
+    trem->setParent(chord1);
+    trem->setTrack(chord1->track());
+    score->undoAddElement(trem);
+    score->endCmd();
+
+    m_uuidToElement[id] = trem;
+    m_elementToUuid[trem] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveTwoNoteTremolo(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveTwoNoteTremolo: unknown id" << id;
+        return false;
+    }
+
+    TremoloTwoChord* trem = dynamic_cast<TremoloTwoChord*>(m_uuidToElement.value(id));
+    if (!trem) {
+        LOGW() << "[editude] applyRemoveTwoNoteTremolo: element is not TremoloTwoChord" << id;
+        return false;
+    }
+
+    m_elementToUuid.remove(trem);
+    m_uuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove two-note tremolo"));
+    score->undoRemoveElement(trem);
     score->endCmd();
     return true;
 }

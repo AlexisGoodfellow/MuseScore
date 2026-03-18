@@ -149,6 +149,14 @@ private:
     Reply actionSetRehearsalMark(const QJsonObject& body);
     Reply actionRemoveRehearsalMark(const QJsonObject& body);
 
+    // Tier 3 — tremolos (single-note)
+    Reply actionAddTremolo(const QJsonObject& body);
+    Reply actionRemoveTremolo(const QJsonObject& body);
+
+    // Tier 3 — two-note tremolos
+    Reply actionAddTwoNoteTremolo(const QJsonObject& body);
+    Reply actionRemoveTwoNoteTremolo(const QJsonObject& body);
+
     // Tier 4 — navigation marks
     Reply actionInsertVolta(const QJsonObject& body);
     Reply actionRemoveVolta(const QJsonObject& body);
@@ -183,6 +191,8 @@ private:
     QJsonObject serializePartArpeggios(mu::engraving::Part* part);
     QJsonObject serializePartGraceNotes(mu::engraving::Part* part);
     QJsonObject serializePartBreaths(mu::engraving::Part* part);
+    QJsonObject serializePartTremolos(mu::engraving::Part* part);
+    QJsonObject serializePartTwoNoteTremolos(mu::engraving::Part* part);
     QJsonObject serializePartDynamics(mu::engraving::Part* part);
     QJsonObject serializePartSlurs(mu::engraving::Part* part);
     QJsonObject serializePartHairpins(mu::engraving::Part* part);

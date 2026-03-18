@@ -174,6 +174,12 @@ private:
     // Breath marks / caesuras
     bool applyAddBreathMark(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveBreathMark(mu::engraving::Score* score, const QJsonObject& payload);
+    // Tremolos (single-note)
+    bool applyAddTremolo(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveTremolo(mu::engraving::Score* score, const QJsonObject& payload);
+    // Two-note tremolos
+    bool applyAddTwoNoteTremolo(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveTwoNoteTremolo(mu::engraving::Score* score, const QJsonObject& payload);
 
     // Tier 4 — navigation marks
     bool applyInsertVolta(mu::engraving::Score* score, const QJsonObject& payload);

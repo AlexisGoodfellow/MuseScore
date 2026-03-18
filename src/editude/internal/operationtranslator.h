@@ -263,6 +263,19 @@ private:
                                            const QString& uuid, const QString& partId);
     static QJsonObject buildRemoveBreathMark(const QString& uuid);
 
+    // Tremolo builders (single-note).
+    static QJsonObject buildAddTremolo(mu::engraving::EngravingObject* trem,
+                                        const QString& uuid, const QString& partId,
+                                        const QString& eventUuid);
+    static QJsonObject buildRemoveTremolo(const QString& uuid);
+
+    // Two-note tremolo builders.
+    static QJsonObject buildAddTwoNoteTremolo(mu::engraving::EngravingObject* trem,
+                                               const QString& uuid, const QString& partId,
+                                               const QString& startEventUuid,
+                                               const QString& endEventUuid);
+    static QJsonObject buildRemoveTwoNoteTremolo(const QString& uuid);
+
     // Tier 4 builders — volta.
     static QJsonObject buildInsertVolta(mu::engraving::EngravingObject* volta,
                                         const QString& uuid);

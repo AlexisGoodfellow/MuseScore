@@ -268,6 +268,10 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("remove_grace_note"))    return actionRemoveGraceNote(body);
     if (action == QLatin1String("add_breath_mark"))      return actionAddBreathMark(body);
     if (action == QLatin1String("remove_breath_mark"))   return actionRemoveBreathMark(body);
+    if (action == QLatin1String("add_tremolo"))          return actionAddTremolo(body);
+    if (action == QLatin1String("remove_tremolo"))       return actionRemoveTremolo(body);
+    if (action == QLatin1String("add_two_note_tremolo"))  return actionAddTwoNoteTremolo(body);
+    if (action == QLatin1String("remove_two_note_tremolo")) return actionRemoveTwoNoteTremolo(body);
     if (action == QLatin1String("add_lyric"))             return actionAddLyric(body);
     if (action == QLatin1String("set_lyric"))             return actionSetLyric(body);
     if (action == QLatin1String("remove_lyric"))          return actionRemoveLyric(body);
@@ -693,6 +697,8 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
         { "arpeggios",     serializePartArpeggios(part) },
         { "grace_notes",   serializePartGraceNotes(part) },
         { "breaths",       serializePartBreaths(part) },
+        { "tremolos",          serializePartTremolos(part) },
+        { "two_note_tremolos", serializePartTwoNoteTremolos(part) },
     };
 }
 
@@ -1282,6 +1288,78 @@ QJsonObject EditudeTestServer::serializePartBreaths(Part* part)
                 entry["breath_type"] = breathTypeToString(breath->symId());
                 entry["pause"]       = breath->pause();
                 result[bUuid] = entry;
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartTremolos(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(SegmentType::ChordRest); seg;
+             seg = seg->next(SegmentType::ChordRest)) {
+            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+                EngravingItem* el = seg->element(track);
+                if (!el || !el->isChord()) {
+                    continue;
+                }
+                Chord* chord = toChord(el);
+                TremoloSingleChord* trem = chord->tremoloSingleChord();
+                if (!trem) {
+                    continue;
+                }
+                const QString tremUuid = uuidForElement(trem);
+                if (tremUuid.isEmpty()) {
+                    continue;
+                }
+                const QString eventUuid = uuidForChordRest(chord);
+                result[tremUuid] = QJsonObject{
+                    { "id",           tremUuid },
+                    { "event_id",     eventUuid },
+                    { "tremolo_type", tremoloTypeToString(trem->tremoloType()) },
+                };
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartTwoNoteTremolos(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(SegmentType::ChordRest); seg;
+             seg = seg->next(SegmentType::ChordRest)) {
+            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+                EngravingItem* el = seg->element(track);
+                if (!el || !el->isChord()) {
+                    continue;
+                }
+                Chord* chord = toChord(el);
+                TremoloTwoChord* trem = chord->tremoloTwoChord();
+                if (!trem) {
+                    continue;
+                }
+                // Serialize only when chord == trem->chord1() to avoid double-counting.
+                if (chord != trem->chord1()) {
+                    continue;
+                }
+                const QString tremUuid = uuidForElement(trem);
+                if (tremUuid.isEmpty()) {
+                    continue;
+                }
+                const QString startUuid = uuidForChordRest(trem->chord1());
+                const QString endUuid   = uuidForChordRest(trem->chord2());
+                result[tremUuid] = QJsonObject{
+                    { "id",             tremUuid },
+                    { "start_event_id", startUuid },
+                    { "end_event_id",   endUuid },
+                    { "tremolo_type",   tremoloTypeToString(trem->tremoloType()) },
+                };
             }
         }
     }
@@ -2348,6 +2426,145 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveBreathMark(const QJsonOb
 
     score->startCmd(TranslatableString("test", "remove breath mark"));
     score->undoRemoveElement(breath);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Tremolo actions (single-note)
+// ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionAddTremolo(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString eventId  = body["event_id"].toString();
+    const QString typeName = body["tremolo_type"].toString();
+
+    EngravingObject* obj = findByUuid(eventId);
+    if (!obj) {
+        return errorResponse(404, "event not found");
+    }
+
+    Chord* chord = nullptr;
+    if (obj->isNote()) {
+        chord = toNote(static_cast<EngravingItem*>(obj))->chord();
+    } else if (obj->isChord()) {
+        chord = toChord(static_cast<EngravingItem*>(obj));
+    }
+    if (!chord) {
+        return errorResponse(422, "event is not a note or chord");
+    }
+
+    score->startCmd(TranslatableString("test", "add tremolo"));
+    TremoloSingleChord* trem = Factory::createTremoloSingleChord(chord);
+    trem->setTremoloType(tremoloTypeFromString(typeName));
+    trem->setParent(chord);
+    trem->setTrack(chord->track());
+    score->undoAddElement(trem);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveTremolo(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "tremolo not found");
+    }
+
+    TremoloSingleChord* trem = dynamic_cast<TremoloSingleChord*>(obj);
+    if (!trem) {
+        return errorResponse(422, "element is not a TremoloSingleChord");
+    }
+
+    score->startCmd(TranslatableString("test", "remove tremolo"));
+    score->undoRemoveElement(trem);
+    score->endCmd();
+
+    return okResponse();
+}
+
+// ---------------------------------------------------------------------------
+// Two-note tremolo actions
+// ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionAddTwoNoteTremolo(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString startId = body["start_event_id"].toString();
+    const QString endId   = body["end_event_id"].toString();
+    const QString typeName = body["tremolo_type"].toString();
+
+    EngravingObject* startObj = findByUuid(startId);
+    EngravingObject* endObj   = findByUuid(endId);
+    if (!startObj || !endObj) {
+        return errorResponse(404, "event not found");
+    }
+
+    Chord* chord1 = nullptr;
+    Chord* chord2 = nullptr;
+    if (startObj->isNote()) {
+        chord1 = toNote(static_cast<EngravingItem*>(startObj))->chord();
+    } else if (startObj->isChord()) {
+        chord1 = toChord(static_cast<EngravingItem*>(startObj));
+    }
+    if (endObj->isNote()) {
+        chord2 = toNote(static_cast<EngravingItem*>(endObj))->chord();
+    } else if (endObj->isChord()) {
+        chord2 = toChord(static_cast<EngravingItem*>(endObj));
+    }
+    if (!chord1 || !chord2) {
+        return errorResponse(422, "two-note tremolo requires chord endpoints");
+    }
+
+    score->startCmd(TranslatableString("test", "add two-note tremolo"));
+    TremoloTwoChord* trem = Factory::createTremoloTwoChord(score->dummy());
+    trem->setTremoloType(tremoloTypeFromString(typeName));
+    trem->setChords(chord1, chord2);
+    trem->setParent(chord1);
+    trem->setTrack(chord1->track());
+    score->undoAddElement(trem);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveTwoNoteTremolo(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "two-note tremolo not found");
+    }
+
+    TremoloTwoChord* trem = dynamic_cast<TremoloTwoChord*>(obj);
+    if (!trem) {
+        return errorResponse(422, "element is not a TremoloTwoChord");
+    }
+
+    score->startCmd(TranslatableString("test", "remove two-note tremolo"));
+    score->undoRemoveElement(trem);
     score->endCmd();
 
     return okResponse();

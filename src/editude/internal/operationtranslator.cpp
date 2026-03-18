@@ -1387,6 +1387,70 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
+    // ── Pass 26d: Single-note tremolos (event-UUID anchored) ──────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::TREMOLO_SINGLECHORD) {
+            continue;
+        }
+        auto* trem = static_cast<TremoloSingleChord*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            Chord* ch = trem->chord();
+            if (!ch) continue;
+            const QString eventUuid = uuidForChordRest(ch, remoteElementToUuid);
+            if (eventUuid.isEmpty()) {
+                LOGD() << "[editude] translateAll: AddTremolo: parent chord UUID unknown, skipping";
+                continue;
+            }
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[trem]  = uuid;
+            m_localUuidToElement[uuid]  = trem;
+            Part* tremPart = ch->staff() ? ch->staff()->part() : nullptr;
+            const QString tremPartUuid = resolvePartUuid(tremPart, lazyAddPartOps);
+            if (tremPartUuid.isEmpty()) continue;
+            ops.append(buildAddTremolo(trem, uuid, tremPartUuid, eventUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(trem, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveTremolo(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(trem);
+            }
+        }
+    }
+
+    // ── Pass 26e: Two-note tremolos (dual-anchor, slur pattern) ─────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::TREMOLO_TWOCHORD) {
+            continue;
+        }
+        auto* trem = static_cast<TremoloTwoChord*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            Chord* ch1 = trem->chord1();
+            Chord* ch2 = trem->chord2();
+            if (!ch1 || !ch2) continue;
+            const QString startUuid = uuidForChordRest(ch1, remoteElementToUuid);
+            const QString endUuid   = uuidForChordRest(ch2, remoteElementToUuid);
+            if (startUuid.isEmpty() || endUuid.isEmpty()) {
+                LOGD() << "[editude] translateAll: AddTwoNoteTremolo: start/end UUID unknown, skipping";
+                continue;
+            }
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[trem]  = uuid;
+            m_localUuidToElement[uuid]  = trem;
+            Part* tremPart = ch1->staff() ? ch1->staff()->part() : nullptr;
+            const QString tremPartUuid = resolvePartUuid(tremPart, lazyAddPartOps);
+            if (tremPartUuid.isEmpty()) continue;
+            ops.append(buildAddTwoNoteTremolo(trem, uuid, tremPartUuid, startUuid, endUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(trem, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveTwoNoteTremolo(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(trem);
+            }
+        }
+    }
+
     // ── Pass 26c: Grace notes (event-UUID anchored) ───────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::CHORD) {
@@ -2706,6 +2770,62 @@ QJsonObject OperationTranslator::buildRemoveBreathMark(const QString& uuid)
 {
     QJsonObject payload;
     payload["type"] = QStringLiteral("RemoveBreathMark");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tremolo builders (single-note)
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddTremolo(EngravingObject* trem,
+                                                  const QString& uuid,
+                                                  const QString& partId,
+                                                  const QString& eventUuid)
+{
+    auto* t = static_cast<TremoloSingleChord*>(trem);
+    QJsonObject payload;
+    payload["type"]         = QStringLiteral("AddTremolo");
+    payload["id"]           = uuid;
+    payload["part_id"]      = partId;
+    payload["event_id"]     = eventUuid;
+    payload["tremolo_type"] = tremoloTypeToString(t->tremoloType());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveTremolo(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveTremolo");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Two-note tremolo builders
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddTwoNoteTremolo(EngravingObject* trem,
+                                                         const QString& uuid,
+                                                         const QString& partId,
+                                                         const QString& startEventUuid,
+                                                         const QString& endEventUuid)
+{
+    auto* t = static_cast<TremoloTwoChord*>(trem);
+    QJsonObject payload;
+    payload["type"]           = QStringLiteral("AddTwoNoteTremolo");
+    payload["id"]             = uuid;
+    payload["part_id"]        = partId;
+    payload["start_event_id"] = startEventUuid;
+    payload["end_event_id"]   = endEventUuid;
+    payload["tremolo_type"]   = tremoloTypeToString(t->tremoloType());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveTwoNoteTremolo(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveTwoNoteTremolo");
     payload["id"]   = uuid;
     return payload;
 }
