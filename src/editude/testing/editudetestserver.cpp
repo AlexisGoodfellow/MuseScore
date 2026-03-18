@@ -2536,10 +2536,9 @@ EditudeTestServer::Reply EditudeTestServer::actionAddTwoNoteTremolo(const QJsonO
     }
 
     score->startCmd(TranslatableString("test", "add two-note tremolo"));
-    TremoloTwoChord* trem = Factory::createTremoloTwoChord(score->dummy());
+    TremoloTwoChord* trem = Factory::createTremoloTwoChord(chord1);
     trem->setTremoloType(tremoloTypeFromString(typeName));
     trem->setChords(chord1, chord2);
-    trem->setParent(chord1);
     trem->setTrack(chord1->track());
     score->undoAddElement(trem);
     score->endCmd();
