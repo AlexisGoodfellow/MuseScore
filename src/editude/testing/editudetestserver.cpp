@@ -284,6 +284,7 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("remove_marker"))       return actionRemoveMarker(body);
     if (action == QLatin1String("insert_jump"))         return actionInsertJump(body);
     if (action == QLatin1String("remove_jump"))         return actionRemoveJump(body);
+    if (action == QLatin1String("set_measure_len"))      return actionSetMeasureLen(body);
     if (action == QLatin1String("insert_beats"))        return actionInsertBeats(body);
     if (action == QLatin1String("delete_beats"))        return actionDeleteBeats(body);
     if (action == QLatin1String("set_score_metadata"))  return actionSetScoreMetadata(body);
@@ -574,6 +575,7 @@ QJsonObject EditudeTestServer::serializeScore()
     return QJsonObject{
         { "parts",            partsArr },
         { "metric_grid",      serializeMetricGrid() },
+        { "measure_len_overrides", serializeMeasureLenOverrides() },
         { "tempo_map",        serializeTempoMap() },
         { "chord_symbols",    serializeScoreChordSymbols() },
         { "system_texts",     serializeScoreSystemTexts() },
@@ -1598,6 +1600,21 @@ QJsonObject EditudeTestServer::serializeScoreJumps()
         }
     }
     return result;
+}
+
+QJsonArray EditudeTestServer::serializeMeasureLenOverrides()
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonArray arr;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        if (m->ticks() != m->timesig()) {
+            arr.append(QJsonObject{
+                { "beat",       beatJson(m->tick()) },
+                { "actual_len", beatJson(m->ticks()) },
+            });
+        }
+    }
+    return arr;
 }
 
 // ---------------------------------------------------------------------------
@@ -3267,6 +3284,37 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveJump(const QJsonObject& 
 // ---------------------------------------------------------------------------
 // Structural + metadata action handlers
 // ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionSetMeasureLen(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int beatNum = body["beat_num"].toInt(0);
+    const int beatDen = body["beat_den"].toInt(1);
+    const int lenNum  = body["len_num"].toInt(0);
+    const int lenDen  = body["len_den"].toInt(1);
+
+    const Fraction tick(beatNum, beatDen);
+    const Fraction newLen(lenNum, lenDen);
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(400, QString("no measure at tick %1/%2").arg(beatNum).arg(beatDen));
+    }
+
+    if (newLen <= Fraction(0, 1)) {
+        return errorResponse(400, "actual_len must be positive");
+    }
+
+    score->startCmd(TranslatableString("test", "set measure length"));
+    measure->adjustToLen(newLen, /*appendRestsIfNecessary=*/true);
+    score->endCmd();
+
+    return okResponse();
+}
 
 EditudeTestServer::Reply EditudeTestServer::actionInsertBeats(const QJsonObject& body)
 {

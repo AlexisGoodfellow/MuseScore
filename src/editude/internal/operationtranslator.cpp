@@ -1471,6 +1471,28 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
+    // ── Pass 32: SetMeasureLen (pickup / anacrusis measures) ────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::MEASURE) {
+            continue;
+        }
+        if (!cmds.count(CommandType::ChangeMeasureLen)) {
+            continue;
+        }
+        auto* m = static_cast<Measure*>(obj);
+        QJsonObject op;
+        op["type"] = QStringLiteral("SetMeasureLen");
+        op["beat"] = beatJson(m->tick());
+        if (m->ticks() != m->timesig()) {
+            // Measure is now irregular — emit actual_len.
+            op["actual_len"] = beatJson(m->ticks());
+        } else {
+            // Measure restored to full length — clear the override.
+            op["actual_len"] = QJsonValue(QJsonValue::Null);
+        }
+        ops.append(op);
+    }
+
     // Prepend any lazily-generated AddPart ops so the server registers parts
     // before processing the element ops that reference them.
     if (!lazyAddPartOps.isEmpty()) {

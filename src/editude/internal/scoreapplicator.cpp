@@ -1365,6 +1365,7 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
 
     // Structural ops
     if (type == QLatin1String("SetScoreMetadata")) return applySetScoreMetadata(score, payload);
+    if (type == QLatin1String("SetMeasureLen"))     return applySetMeasureLen(score, payload);
     if (type == QLatin1String("InsertBeats"))       return applyInsertBeats(score, payload);
     if (type == QLatin1String("DeleteBeats"))       return applyDeleteBeats(score, payload);
 
@@ -3164,6 +3165,45 @@ bool ScoreApplicator::applySetScoreMetadata(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Set score metadata"));
     score->undo(new ChangeMetaText(score, String(tag), String(value)));
     score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applySetMeasureLen(Score* score, const QJsonObject& op)
+{
+    const QJsonObject beatObj = op["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applySetMeasureLen: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    if (op["actual_len"].isNull() || op["actual_len"].isUndefined()) {
+        // Clear override — restore full time-signature length.
+        const Fraction fullLen = measure->timesig();
+        if (measure->ticks() == fullLen) {
+            LOGD() << "[editude] applySetMeasureLen: measure already at full length";
+            return true;
+        }
+        score->startCmd(TranslatableString("undoableAction", "Restore measure length"));
+        measure->adjustToLen(fullLen, /*appendRestsIfNecessary=*/true);
+        score->endCmd();
+    } else {
+        const QJsonObject lenObj = op["actual_len"].toObject();
+        const Fraction newLen(lenObj["numerator"].toInt(), lenObj["denominator"].toInt());
+        if (newLen <= Fraction(0, 1)) {
+            LOGW() << "[editude] applySetMeasureLen: non-positive actual_len";
+            return false;
+        }
+        if (measure->ticks() == newLen) {
+            LOGD() << "[editude] applySetMeasureLen: measure already at requested length";
+            return true;
+        }
+        score->startCmd(TranslatableString("undoableAction", "Set measure length"));
+        measure->adjustToLen(newLen, /*appendRestsIfNecessary=*/true);
+        score->endCmd();
+    }
     return true;
 }
 

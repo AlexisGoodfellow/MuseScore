@@ -154,6 +154,7 @@ private:
     Reply actionRemoveJump(const QJsonObject& body);
 
     // Structural ops
+    Reply actionSetMeasureLen(const QJsonObject& body);
     Reply actionInsertBeats(const QJsonObject& body);
     Reply actionDeleteBeats(const QJsonObject& body);
 
@@ -196,6 +197,7 @@ private:
     QJsonObject serializeScoreVoltas();
     QJsonObject serializeScoreMarkers();
     QJsonObject serializeScoreJumps();
+    QJsonArray  serializeMeasureLenOverrides();
 
     QString uuidForElement(mu::engraving::EngravingObject* obj) const;
     QString uuidForChordRest(mu::engraving::EngravingObject* obj) const;

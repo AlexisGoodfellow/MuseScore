@@ -185,6 +185,7 @@ private:
 
     // Structural ops
     bool applySetScoreMetadata(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetMeasureLen(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyInsertBeats(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyDeleteBeats(mu::engraving::Score* score, const QJsonObject& payload);
 
