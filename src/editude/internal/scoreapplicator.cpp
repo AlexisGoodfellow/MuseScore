@@ -23,6 +23,7 @@
 
 #include <QJsonArray>
 
+#include "engraving/dom/breath.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/engravingitem.h"
@@ -1350,6 +1351,9 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("RemoveArpeggio")) return applyRemoveArpeggio(score, payload);
     if (type == QLatin1String("AddGraceNote"))   return applyAddGraceNote(score, payload);
     if (type == QLatin1String("RemoveGraceNote")) return applyRemoveGraceNote(score, payload);
+    // Breath marks / caesuras
+    if (type == QLatin1String("AddBreathMark"))    return applyAddBreathMark(score, payload);
+    if (type == QLatin1String("RemoveBreathMark")) return applyRemoveBreathMark(score, payload);
 
     // Tier 4 — navigation marks
     if (type == QLatin1String("InsertVolta"))  return applyInsertVolta(score, payload);
@@ -2840,6 +2844,76 @@ bool ScoreApplicator::applyRemoveGraceNote(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Remove grace note"));
     score->undoRemoveElement(graceChord);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Breath marks / caesuras
+// ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applyAddBreathMark(Score* score, const QJsonObject& op)
+{
+    const QString id         = op["id"].toString();
+    const QString partId     = op["part_id"].toString();
+    const QString typeName   = op["breath_type"].toString();
+    const QJsonObject beat   = op["beat"].toObject();
+    const double pause       = op["pause"].toDouble(0.0);
+
+    if (id.isEmpty() || partId.isEmpty()) {
+        LOGW() << "[editude] applyAddBreathMark: missing id or part_id";
+        return false;
+    }
+
+    if (!m_partUuidToPart.contains(partId)) {
+        LOGW() << "[editude] applyAddBreathMark: unknown part_id" << partId;
+        return false;
+    }
+
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyAddBreathMark: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    Part* part = m_partUuidToPart.value(partId);
+    const track_idx_t track = part->startTrack();
+
+    score->startCmd(TranslatableString("undoableAction", "Add breath mark"));
+    Segment* seg = measure->undoGetSegment(SegmentType::Breath, tick);
+    Breath* breath = Factory::createBreath(seg);
+    breath->setParent(seg);
+    breath->setTrack(track);
+    breath->setSymId(breathTypeFromString(typeName));
+    breath->setPause(pause);
+    score->undoAddElement(breath);
+    score->endCmd();
+
+    m_tier3UuidToElement[id] = breath;
+    m_tier3ElementToUuid[breath] = id;
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveBreathMark(Score* score, const QJsonObject& op)
+{
+    const QString id = op["id"].toString();
+    if (id.isEmpty() || !m_tier3UuidToElement.contains(id)) {
+        LOGW() << "[editude] applyRemoveBreathMark: unknown id" << id;
+        return false;
+    }
+
+    Breath* breath = dynamic_cast<Breath*>(m_tier3UuidToElement.value(id));
+    if (!breath) {
+        LOGW() << "[editude] applyRemoveBreathMark: element is not Breath" << id;
+        return false;
+    }
+
+    m_tier3ElementToUuid.remove(breath);
+    m_tier3UuidToElement.remove(id);
+
+    score->startCmd(TranslatableString("undoableAction", "Remove breath mark"));
+    score->undoRemoveElement(breath);
     score->endCmd();
     return true;
 }

@@ -171,6 +171,9 @@ private:
     // Grace notes
     bool applyAddGraceNote(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveGraceNote(mu::engraving::Score* score, const QJsonObject& payload);
+    // Breath marks / caesuras
+    bool applyAddBreathMark(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveBreathMark(mu::engraving::Score* score, const QJsonObject& payload);
 
     // Tier 4 — navigation marks
     bool applyInsertVolta(mu::engraving::Score* score, const QJsonObject& payload);

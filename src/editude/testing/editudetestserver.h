@@ -92,6 +92,10 @@ private:
     Reply actionAddGraceNote(const QJsonObject& body);
     Reply actionRemoveGraceNote(const QJsonObject& body);
 
+    // Tier 3 — breath marks / caesuras
+    Reply actionAddBreathMark(const QJsonObject& body);
+    Reply actionRemoveBreathMark(const QJsonObject& body);
+
     // Tier 3 — dynamics
     Reply actionAddDynamic(const QJsonObject& body);
     Reply actionSetDynamic(const QJsonObject& body);
@@ -172,6 +176,7 @@ private:
     QJsonObject serializePartArticulations(mu::engraving::Part* part);
     QJsonObject serializePartArpeggios(mu::engraving::Part* part);
     QJsonObject serializePartGraceNotes(mu::engraving::Part* part);
+    QJsonObject serializePartBreaths(mu::engraving::Part* part);
     QJsonObject serializePartDynamics(mu::engraving::Part* part);
     QJsonObject serializePartSlurs(mu::engraving::Part* part);
     QJsonObject serializePartHairpins(mu::engraving::Part* part);

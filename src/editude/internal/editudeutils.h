@@ -8,6 +8,7 @@
 #include <QString>
 
 #include "engraving/dom/articulation.h"
+#include "engraving/dom/breath.h"
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/marker.h"
 #include "engraving/types/symnames.h"
@@ -286,6 +287,46 @@ inline mu::engraving::TremoloType tremoloTypeFromString(const QString& s)
     if (s == QLatin1String("c32"))       return TremoloType::C32;
     if (s == QLatin1String("c64"))       return TremoloType::C64;
     return TremoloType::INVALID_TREMOLO;
+}
+
+// ---------------------------------------------------------------------------
+// BreathType (SymId) ↔ string
+// ---------------------------------------------------------------------------
+
+inline QString breathTypeToString(mu::engraving::SymId id)
+{
+    using mu::engraving::SymId;
+    static const QHash<SymId, QString> s_map = {
+        { SymId::breathMarkComma,       QStringLiteral("comma")                  },
+        { SymId::breathMarkTick,        QStringLiteral("tick")                   },
+        { SymId::breathMarkSalzedo,     QStringLiteral("salzedo")                },
+        { SymId::breathMarkUpbow,       QStringLiteral("upbow")                  },
+        { SymId::caesura,               QStringLiteral("caesura")                },
+        { SymId::caesuraCurved,         QStringLiteral("caesura_curved")         },
+        { SymId::caesuraShort,          QStringLiteral("caesura_short")          },
+        { SymId::caesuraThick,          QStringLiteral("caesura_thick")          },
+        { SymId::chantCaesura,          QStringLiteral("chant_caesura")          },
+        { SymId::caesuraSingleStroke,   QStringLiteral("caesura_single_stroke")  },
+    };
+    return s_map.value(id, QStringLiteral("comma"));
+}
+
+inline mu::engraving::SymId breathTypeFromString(const QString& s)
+{
+    using mu::engraving::SymId;
+    static const QHash<QString, SymId> s_map = {
+        { QStringLiteral("comma"),                  SymId::breathMarkComma       },
+        { QStringLiteral("tick"),                   SymId::breathMarkTick        },
+        { QStringLiteral("salzedo"),                SymId::breathMarkSalzedo     },
+        { QStringLiteral("upbow"),                  SymId::breathMarkUpbow       },
+        { QStringLiteral("caesura"),                SymId::caesura               },
+        { QStringLiteral("caesura_curved"),         SymId::caesuraCurved         },
+        { QStringLiteral("caesura_short"),          SymId::caesuraShort          },
+        { QStringLiteral("caesura_thick"),          SymId::caesuraThick          },
+        { QStringLiteral("chant_caesura"),          SymId::chantCaesura          },
+        { QStringLiteral("caesura_single_stroke"),  SymId::caesuraSingleStroke   },
+    };
+    return s_map.value(s, SymId::breathMarkComma);
 }
 
 } // namespace mu::editude::internal

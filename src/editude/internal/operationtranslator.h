@@ -258,6 +258,11 @@ private:
                                           const QString& eventUuid);
     static QJsonObject buildRemoveGraceNote(const QString& uuid);
 
+    // Breath mark / caesura builders.
+    static QJsonObject buildAddBreathMark(mu::engraving::EngravingObject* breath,
+                                           const QString& uuid, const QString& partId);
+    static QJsonObject buildRemoveBreathMark(const QString& uuid);
+
     // Tier 4 builders — volta.
     static QJsonObject buildInsertVolta(mu::engraving::EngravingObject* volta,
                                         const QString& uuid);

@@ -30,6 +30,7 @@
 #include "engraving/dom/accidental.h"
 #include "engraving/dom/arpeggio.h"
 #include "engraving/dom/articulation.h"
+#include "engraving/dom/breath.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/clef.h"
@@ -1304,6 +1305,32 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
+    // ── Pass 26d: Breath marks / caesuras (beat-anchored) ────────────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::BREATH) {
+            continue;
+        }
+        auto* breath = static_cast<Breath*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            Segment* seg = breath->segment();
+            if (!seg) continue;
+            Part* bPart = breath->part();
+            const QString bPartUuid = resolvePartUuid(bPart, lazyAddPartOps);
+            if (bPartUuid.isEmpty()) continue;
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_localElementToUuid[breath] = uuid;
+            m_localUuidToElement[uuid]   = breath;
+            ops.append(buildAddBreathMark(breath, uuid, bPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            const QString uuid = uuidForElement(breath, remoteElementToUuid);
+            if (!uuid.isEmpty()) {
+                ops.append(buildRemoveBreathMark(uuid));
+                m_localUuidToElement.remove(uuid);
+                m_localElementToUuid.remove(breath);
+            }
+        }
+    }
+
     // ── Pass 27: InsertBeats / DeleteBeats ───────────────────────────────
     // Collect MEASURE objects by their command type, sort by tick, then emit
     // a single InsertBeats or DeleteBeats covering the contiguous range.
@@ -2481,6 +2508,33 @@ QJsonObject OperationTranslator::buildRemoveGraceNote(const QString& uuid)
 {
     QJsonObject payload;
     payload["type"] = QStringLiteral("RemoveGraceNote");
+    payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Breath mark / caesura builders
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddBreathMark(EngravingObject* breathObj,
+                                                     const QString& uuid,
+                                                     const QString& partId)
+{
+    auto* b = static_cast<Breath*>(breathObj);
+    QJsonObject payload;
+    payload["type"]        = QStringLiteral("AddBreathMark");
+    payload["id"]          = uuid;
+    payload["part_id"]     = partId;
+    payload["beat"]        = beatJson(b->segment()->tick());
+    payload["breath_type"] = breathTypeToString(b->symId());
+    payload["pause"]       = b->pause();
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveBreathMark(const QString& uuid)
+{
+    QJsonObject payload;
+    payload["type"] = QStringLiteral("RemoveBreathMark");
     payload["id"]   = uuid;
     return payload;
 }

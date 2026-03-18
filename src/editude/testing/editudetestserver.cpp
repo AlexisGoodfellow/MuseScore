@@ -264,6 +264,8 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("remove_arpeggio"))      return actionRemoveArpeggio(body);
     if (action == QLatin1String("add_grace_note"))       return actionAddGraceNote(body);
     if (action == QLatin1String("remove_grace_note"))    return actionRemoveGraceNote(body);
+    if (action == QLatin1String("add_breath_mark"))      return actionAddBreathMark(body);
+    if (action == QLatin1String("remove_breath_mark"))   return actionRemoveBreathMark(body);
     if (action == QLatin1String("add_lyric"))             return actionAddLyric(body);
     if (action == QLatin1String("set_lyric"))             return actionSetLyric(body);
     if (action == QLatin1String("remove_lyric"))          return actionRemoveLyric(body);
@@ -686,6 +688,7 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
         { "staff_texts",   serializePartStaffTexts(part) },
         { "arpeggios",     serializePartArpeggios(part) },
         { "grace_notes",   serializePartGraceNotes(part) },
+        { "breaths",       serializePartBreaths(part) },
     };
 }
 
@@ -1195,6 +1198,36 @@ QJsonObject EditudeTestServer::serializePartGraceNotes(Part* part)
                     }
                     result[gnUuid] = entry;
                 }
+            }
+        }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestServer::serializePartBreaths(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(); seg; seg = seg->next()) {
+            for (EngravingItem* el : seg->elist()) {
+                if (!el || el->type() != ElementType::BREATH) {
+                    continue;
+                }
+                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) {
+                    continue;
+                }
+                Breath* breath = static_cast<Breath*>(el);
+                const QString bUuid = uuidForElement(breath);
+                if (bUuid.isEmpty()) {
+                    continue;
+                }
+                QJsonObject entry;
+                entry["id"]          = bUuid;
+                entry["beat"]        = beatJson(seg->tick());
+                entry["breath_type"] = breathTypeToString(breath->symId());
+                entry["pause"]       = breath->pause();
+                result[bUuid] = entry;
             }
         }
     }
@@ -2086,6 +2119,67 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveGraceNote(const QJsonObj
 
     score->startCmd(TranslatableString("test", "remove grace note"));
     score->undoRemoveElement(graceChord);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionAddBreathMark(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const QString typeName = body["breath_type"].toString();
+    const double pause = body["pause"].toDouble(0.0);
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(422, "beat not found in score");
+    }
+
+    score->startCmd(TranslatableString("test", "add breath mark"));
+    Segment* seg = measure->undoGetSegment(SegmentType::Breath, tick);
+    Breath* breath = Factory::createBreath(seg);
+    breath->setParent(seg);
+    breath->setTrack(part->startTrack());
+    breath->setSymId(breathTypeFromString(typeName));
+    breath->setPause(pause);
+    score->undoAddElement(breath);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionRemoveBreathMark(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const QString id = body["id"].toString();
+    EngravingObject* obj = findByUuid(id);
+    if (!obj) {
+        return errorResponse(404, "breath mark not found");
+    }
+
+    Breath* breath = dynamic_cast<Breath*>(obj);
+    if (!breath) {
+        return errorResponse(422, "element is not a Breath");
+    }
+
+    score->startCmd(TranslatableString("test", "remove breath mark"));
+    score->undoRemoveElement(breath);
     score->endCmd();
 
     return okResponse();
