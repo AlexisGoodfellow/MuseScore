@@ -1843,11 +1843,24 @@ QJsonObject OperationTranslator::buildSetKeySignature(KeySig* ks, const QString&
 QJsonObject OperationTranslator::buildSetClef(Clef* clef, const QString& partUuid, int staffIdx)
 {
     static const QHash<ClefType, QString> s_clefNames = {
-        { ClefType::G,    QStringLiteral("treble")     },
-        { ClefType::F,    QStringLiteral("bass")       },
-        { ClefType::C3,   QStringLiteral("alto")       },
-        { ClefType::C4,   QStringLiteral("tenor")      },
-        { ClefType::PERC, QStringLiteral("percussion") },
+        { ClefType::G,       QStringLiteral("treble")       },
+        { ClefType::G8_VB,   QStringLiteral("treble_8vb")   },
+        { ClefType::G8_VA,   QStringLiteral("treble_8va")   },
+        { ClefType::G15_MB,  QStringLiteral("treble_15mb")  },
+        { ClefType::G15_MA,  QStringLiteral("treble_15ma")  },
+        { ClefType::F,       QStringLiteral("bass")         },
+        { ClefType::F8_VB,   QStringLiteral("bass_8vb")     },
+        { ClefType::F_8VA,   QStringLiteral("bass_8va")     },
+        { ClefType::F15_MB,  QStringLiteral("bass_15mb")    },
+        { ClefType::F_15MA,  QStringLiteral("bass_15ma")    },
+        { ClefType::C3,      QStringLiteral("alto")         },
+        { ClefType::C4,      QStringLiteral("tenor")        },
+        { ClefType::C2,      QStringLiteral("mezzo_soprano") },
+        { ClefType::C1,      QStringLiteral("soprano")      },
+        { ClefType::C5,      QStringLiteral("baritone")     },
+        { ClefType::PERC,    QStringLiteral("percussion")   },
+        { ClefType::TAB,     QStringLiteral("tab")          },
+        { ClefType::TAB4,    QStringLiteral("tab4")         },
     };
 
     const ClefType ct   = clef->clefType();

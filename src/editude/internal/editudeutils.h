@@ -128,18 +128,34 @@ inline QString dynamicKindName(mu::engraving::DynamicType dt)
 {
     using mu::engraving::DynamicType;
     switch (dt) {
-    case DynamicType::PPP: return QStringLiteral("ppp");
-    case DynamicType::PP:  return QStringLiteral("pp");
-    case DynamicType::P:   return QStringLiteral("p");
-    case DynamicType::MP:  return QStringLiteral("mp");
-    case DynamicType::MF:  return QStringLiteral("mf");
-    case DynamicType::F:   return QStringLiteral("f");
-    case DynamicType::FF:  return QStringLiteral("ff");
-    case DynamicType::FFF: return QStringLiteral("fff");
-    case DynamicType::SFZ: return QStringLiteral("sfz");
-    case DynamicType::FP:  return QStringLiteral("fp");
-    case DynamicType::RF:  return QStringLiteral("rf");
-    default:               return QStringLiteral("mf");
+    case DynamicType::PPPPPP: return QStringLiteral("pppppp");
+    case DynamicType::PPPPP:  return QStringLiteral("ppppp");
+    case DynamicType::PPPP:   return QStringLiteral("pppp");
+    case DynamicType::PPP:    return QStringLiteral("ppp");
+    case DynamicType::PP:     return QStringLiteral("pp");
+    case DynamicType::P:      return QStringLiteral("p");
+    case DynamicType::MP:     return QStringLiteral("mp");
+    case DynamicType::MF:     return QStringLiteral("mf");
+    case DynamicType::F:      return QStringLiteral("f");
+    case DynamicType::FF:     return QStringLiteral("ff");
+    case DynamicType::FFF:    return QStringLiteral("fff");
+    case DynamicType::FFFF:   return QStringLiteral("ffff");
+    case DynamicType::FFFFF:  return QStringLiteral("fffff");
+    case DynamicType::FFFFFF: return QStringLiteral("ffffff");
+    case DynamicType::FP:     return QStringLiteral("fp");
+    case DynamicType::PF:     return QStringLiteral("pf");
+    case DynamicType::SF:     return QStringLiteral("sf");
+    case DynamicType::SFZ:    return QStringLiteral("sfz");
+    case DynamicType::SFF:    return QStringLiteral("sff");
+    case DynamicType::SFFZ:   return QStringLiteral("sffz");
+    case DynamicType::SFFF:   return QStringLiteral("sfff");
+    case DynamicType::SFFFZ:  return QStringLiteral("sfffz");
+    case DynamicType::SFP:    return QStringLiteral("sfp");
+    case DynamicType::SFPP:   return QStringLiteral("sfpp");
+    case DynamicType::RFZ:    return QStringLiteral("rfz");
+    case DynamicType::RF:     return QStringLiteral("rf");
+    case DynamicType::FZ:     return QStringLiteral("fz");
+    default:                  return QStringLiteral("mf");
     }
 }
 

@@ -2111,11 +2111,20 @@ EditudeTestServer::Reply EditudeTestServer::actionAddDynamic(const QJsonObject& 
     const QString kind = body["kind"].toString();
 
     static const QHash<QString, DynamicType> s_dynMap = {
-        { "ppp", DynamicType::PPP }, { "pp",  DynamicType::PP  },
-        { "p",   DynamicType::P   }, { "mp",  DynamicType::MP  },
-        { "mf",  DynamicType::MF  }, { "f",   DynamicType::F   },
-        { "ff",  DynamicType::FF  }, { "fff", DynamicType::FFF },
-        { "sfz", DynamicType::SFZ }, { "fp",  DynamicType::FP  },
+        { "pppppp", DynamicType::PPPPPP }, { "ppppp", DynamicType::PPPPP },
+        { "pppp", DynamicType::PPPP },     { "ppp", DynamicType::PPP },
+        { "pp",  DynamicType::PP  },       { "p",   DynamicType::P   },
+        { "mp",  DynamicType::MP  },       { "mf",  DynamicType::MF  },
+        { "f",   DynamicType::F   },       { "ff",  DynamicType::FF  },
+        { "fff", DynamicType::FFF },       { "ffff", DynamicType::FFFF },
+        { "fffff", DynamicType::FFFFF },   { "ffffff", DynamicType::FFFFFF },
+        { "fp",  DynamicType::FP  },       { "pf",  DynamicType::PF  },
+        { "sf",  DynamicType::SF  },       { "sfz", DynamicType::SFZ },
+        { "sff", DynamicType::SFF },       { "sffz", DynamicType::SFFZ },
+        { "sfff", DynamicType::SFFF },     { "sfffz", DynamicType::SFFFZ },
+        { "sfp", DynamicType::SFP },       { "sfpp", DynamicType::SFPP },
+        { "rfz", DynamicType::RFZ },       { "rf",  DynamicType::RF  },
+        { "fz",  DynamicType::FZ  },
     };
     const DynamicType dt = s_dynMap.value(kind, DynamicType::OTHER);
     if (dt == DynamicType::OTHER) {
@@ -2162,10 +2171,20 @@ EditudeTestServer::Reply EditudeTestServer::actionSetDynamic(const QJsonObject& 
     }
 
     static const QHash<QString, DynamicType> s_dynMap = {
-        { "ppp", DynamicType::PPP }, { "pp",  DynamicType::PP  },
-        { "p",   DynamicType::P   }, { "mp",  DynamicType::MP  },
-        { "mf",  DynamicType::MF  }, { "f",   DynamicType::F   },
-        { "ff",  DynamicType::FF  }, { "fff", DynamicType::FFF },
+        { "pppppp", DynamicType::PPPPPP }, { "ppppp", DynamicType::PPPPP },
+        { "pppp", DynamicType::PPPP },     { "ppp", DynamicType::PPP },
+        { "pp",  DynamicType::PP  },       { "p",   DynamicType::P   },
+        { "mp",  DynamicType::MP  },       { "mf",  DynamicType::MF  },
+        { "f",   DynamicType::F   },       { "ff",  DynamicType::FF  },
+        { "fff", DynamicType::FFF },       { "ffff", DynamicType::FFFF },
+        { "fffff", DynamicType::FFFFF },   { "ffffff", DynamicType::FFFFFF },
+        { "fp",  DynamicType::FP  },       { "pf",  DynamicType::PF  },
+        { "sf",  DynamicType::SF  },       { "sfz", DynamicType::SFZ },
+        { "sff", DynamicType::SFF },       { "sffz", DynamicType::SFFZ },
+        { "sfff", DynamicType::SFFF },     { "sfffz", DynamicType::SFFFZ },
+        { "sfp", DynamicType::SFP },       { "sfpp", DynamicType::SFPP },
+        { "rfz", DynamicType::RFZ },       { "rf",  DynamicType::RF  },
+        { "fz",  DynamicType::FZ  },
     };
     const QString kind = body["kind"].toString();
     const DynamicType dt = s_dynMap.value(kind, DynamicType::OTHER);
@@ -3590,11 +3609,24 @@ EditudeTestServer::Reply EditudeTestServer::actionSetClef(const QJsonObject& bod
     const QString clefName     = clefObj["name"].toString();
 
     static const QHash<QString, ClefType> s_clefMap = {
-        { "treble",     ClefType::G    },
-        { "bass",       ClefType::F    },
-        { "alto",       ClefType::C3   },
-        { "tenor",      ClefType::C4   },
-        { "percussion", ClefType::PERC },
+        { "treble",         ClefType::G      },
+        { "treble_8vb",     ClefType::G8_VB  },
+        { "treble_8va",     ClefType::G8_VA  },
+        { "treble_15mb",    ClefType::G15_MB },
+        { "treble_15ma",    ClefType::G15_MA },
+        { "bass",           ClefType::F      },
+        { "bass_8vb",       ClefType::F8_VB  },
+        { "bass_8va",       ClefType::F_8VA  },
+        { "bass_15mb",      ClefType::F15_MB },
+        { "bass_15ma",      ClefType::F_15MA },
+        { "alto",           ClefType::C3     },
+        { "tenor",          ClefType::C4     },
+        { "mezzo_soprano",  ClefType::C2     },
+        { "soprano",        ClefType::C1     },
+        { "baritone",       ClefType::C5     },
+        { "percussion",     ClefType::PERC   },
+        { "tab",            ClefType::TAB    },
+        { "tab4",           ClefType::TAB4   },
     };
     const ClefType ct = s_clefMap.value(clefName, ClefType::INVALID);
     if (ct == ClefType::INVALID) {
@@ -3811,11 +3843,24 @@ QJsonArray EditudeTestServer::serializePartClefChanges(Part* part)
     const staff_idx_t nStaves    = static_cast<staff_idx_t>(part->nstaves());
 
     static const QHash<ClefType, QString> s_clefNames = {
-        { ClefType::G,    QStringLiteral("treble")     },
-        { ClefType::F,    QStringLiteral("bass")       },
-        { ClefType::C3,   QStringLiteral("alto")       },
-        { ClefType::C4,   QStringLiteral("tenor")      },
-        { ClefType::PERC, QStringLiteral("percussion") },
+        { ClefType::G,       QStringLiteral("treble")       },
+        { ClefType::G8_VB,   QStringLiteral("treble_8vb")   },
+        { ClefType::G8_VA,   QStringLiteral("treble_8va")   },
+        { ClefType::G15_MB,  QStringLiteral("treble_15mb")  },
+        { ClefType::G15_MA,  QStringLiteral("treble_15ma")  },
+        { ClefType::F,       QStringLiteral("bass")         },
+        { ClefType::F8_VB,   QStringLiteral("bass_8vb")     },
+        { ClefType::F_8VA,   QStringLiteral("bass_8va")     },
+        { ClefType::F15_MB,  QStringLiteral("bass_15mb")    },
+        { ClefType::F_15MA,  QStringLiteral("bass_15ma")    },
+        { ClefType::C3,      QStringLiteral("alto")         },
+        { ClefType::C4,      QStringLiteral("tenor")        },
+        { ClefType::C2,      QStringLiteral("mezzo_soprano") },
+        { ClefType::C1,      QStringLiteral("soprano")      },
+        { ClefType::C5,      QStringLiteral("baritone")     },
+        { ClefType::PERC,    QStringLiteral("percussion")   },
+        { ClefType::TAB,     QStringLiteral("tab")          },
+        { ClefType::TAB4,    QStringLiteral("tab4")         },
     };
 
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
