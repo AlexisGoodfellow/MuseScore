@@ -64,6 +64,8 @@
 #include "engraving/dom/ornament.h"
 #include "engraving/dom/ottava.h"
 #include "engraving/dom/pedal.h"
+#include "engraving/dom/tremolosinglechord.h"
+#include "engraving/dom/tremolotwochord.h"
 #include "engraving/dom/trill.h"
 #include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"
@@ -3035,7 +3037,7 @@ bool ScoreApplicator::applyAddTwoNoteTremolo(Score* score, const QJsonObject& op
     }
 
     score->startCmd(TranslatableString("undoableAction", "Add two-note tremolo"));
-    TremoloTwoChord* trem = Factory::createTremoloTwoChord(score->dummy());
+    TremoloTwoChord* trem = Factory::createTremoloTwoChord(chord1);
     trem->setTremoloType(tremoloTypeFromString(typeName));
     trem->setChords(chord1, chord2);
     trem->setParent(chord1);

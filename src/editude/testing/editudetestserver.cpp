@@ -52,6 +52,8 @@
 #include "engraving/dom/ornament.h"
 #include "engraving/dom/ottava.h"
 #include "engraving/dom/pedal.h"
+#include "engraving/dom/tremolosinglechord.h"
+#include "engraving/dom/tremolotwochord.h"
 #include "engraving/dom/trill.h"
 #include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"

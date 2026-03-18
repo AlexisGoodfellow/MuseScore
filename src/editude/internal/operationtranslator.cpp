@@ -54,6 +54,8 @@
 #include "engraving/dom/tempotext.h"
 #include "engraving/dom/tie.h"
 #include "engraving/dom/timesig.h"
+#include "engraving/dom/tremolosinglechord.h"
+#include "engraving/dom/tremolotwochord.h"
 #include "engraving/dom/trill.h"
 #include "engraving/dom/tuplet.h"
 #include "engraving/dom/rehearsalmark.h"
