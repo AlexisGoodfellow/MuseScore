@@ -45,6 +45,7 @@ FocusScope {
 
     property alias isNavigatorVisible: notationNavigator.visible
     property alias isBraillePanelVisible: brailleViewLoader.active
+    property alias isAnnotationPanelVisible: annotationPanelLoader.active
     property alias isMainView: notationView.isMainView
 
     property alias defaultNavigationControl: fakeNavCtrl
@@ -225,53 +226,10 @@ FocusScope {
                         notationViewRect: Qt.rect(notationView.x, notationView.y, notationView.width, notationView.height)
                         notationViewMatrix: notationView.matrix
                     }
-                }
 
-                Item {
-                    anchors.fill: notationView
-                    enabled: false
-
-                    Component.onCompleted: {
-                        EditudePresenceModel.setNotationViewMatrix(notationView.matrix)
-                    }
-
-                    Connections {
-                        target: notationView
-                        function onMatrixChanged() {
-                            EditudePresenceModel.setNotationViewMatrix(notationView.matrix)
-                        }
-                    }
-
-                    Repeater {
-                        model: EditudePresenceModel
-                        delegate: Rectangle {
-                            x: model.screenRect.x
-                            y: model.screenRect.y
-                            width: model.screenRect.width
-                            height: model.screenRect.height
-                            color: model.rectColor
-                            enabled: false
-                        }
-                    }
-
-                    Rectangle {
-                        visible: EditudePresenceModel.toastText !== ""
-                        anchors.top: parent.top
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.topMargin: 16
-                        color: "#cc1a1a1a"
-                        radius: 6
-                        width: toastLabel.implicitWidth + 24
-                        height: toastLabel.implicitHeight + 12
+                    EditudeNotationOverlay {
+                        anchors.fill: parent
                         enabled: false
-
-                        Text {
-                            id: toastLabel
-                            anchors.centerIn: parent
-                            text: EditudePresenceModel.toastText
-                            color: "#ffffff"
-                            font.pixelSize: 13
-                        }
                     }
                 }
 
@@ -332,6 +290,24 @@ FocusScope {
                             notationView.navigationPanel.setActive(false);
                             fakeNavCtrl.setActive(false);
                         }
+                    }
+                }
+            }
+
+            Loader {
+                id: annotationPanelLoader
+
+                active: false
+                visible: active
+
+                SplitView.preferredWidth: 260
+                SplitView.minimumWidth: 180
+                SplitView.fillHeight: true
+
+                sourceComponent: AnnotationSidePanel {
+                    onAnnotationSelected: function(annotationId) {
+                        // Future: scroll notation view to the annotation's beat range.
+                        // For now, the panel selection is sufficient to identify the annotation.
                     }
                 }
             }

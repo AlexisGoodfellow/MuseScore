@@ -12,6 +12,7 @@ build
 /build_overrides.cmake
 build.release
 build.debug
+build.e2e
 build.install
 build.tooldata
 build.qtc
