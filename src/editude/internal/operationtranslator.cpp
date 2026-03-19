@@ -62,6 +62,7 @@
 #include "engraving/dom/stafftext.h"
 #include "engraving/dom/systemtext.h"
 #include "engraving/dom/volta.h"
+#include "engraving/dom/pitchspelling.h"
 #include "engraving/dom/rest.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
@@ -1706,7 +1707,7 @@ QJsonObject OperationTranslator::buildInsertNote(Note* note, const QString& uuid
     payload["beat"]     = beatJson(tick);
     payload["duration"] = duration;
     payload["track"]    = static_cast<int>(note->track());
-    payload["pitch"]    = pitchJson(note->tpc1(), note->octave());
+    payload["pitch"]    = pitchJson(note->tpc1(), playingOctave(note->pitch(), note->tpc1()));
     payload["tie"]      = QJsonValue::Null;
 
     // Tab fields: include fret/string if the note carries tab data.
@@ -1755,7 +1756,7 @@ QJsonObject OperationTranslator::buildInsertChord(Chord* chord, const QVector<No
 
     QJsonArray pitches;
     for (Note* n : notes) {
-        pitches.append(pitchJson(n->tpc1(), n->octave()));
+        pitches.append(pitchJson(n->tpc1(), playingOctave(n->pitch(), n->tpc1())));
     }
 
     QJsonObject payload;
@@ -1779,7 +1780,7 @@ QJsonObject OperationTranslator::buildAddChordNote(const QString& chordUuid, Not
     QJsonObject payload;
     payload["type"]     = "AddChordNote";
     payload["event_id"] = chordUuid;
-    payload["pitch"]    = pitchJson(note->tpc1(), note->octave());
+    payload["pitch"]    = pitchJson(note->tpc1(), playingOctave(note->pitch(), note->tpc1()));
     return payload;
 }
 
@@ -1788,7 +1789,7 @@ QJsonObject OperationTranslator::buildRemoveChordNote(const QString& chordUuid, 
     QJsonObject payload;
     payload["type"]     = "RemoveChordNote";
     payload["event_id"] = chordUuid;
-    payload["pitch"]    = pitchJson(note->tpc1(), note->octave());
+    payload["pitch"]    = pitchJson(note->tpc1(), playingOctave(note->pitch(), note->tpc1()));
     return payload;
 }
 
@@ -1805,7 +1806,7 @@ QJsonObject OperationTranslator::buildSetPitch(const QString& uuid, Note* note)
     QJsonObject payload;
     payload["type"]     = "SetPitch";
     payload["event_id"] = uuid;
-    payload["pitch"]    = pitchJson(note->tpc1(), note->octave());
+    payload["pitch"]    = pitchJson(note->tpc1(), playingOctave(note->pitch(), note->tpc1()));
     return payload;
 }
 
@@ -1886,6 +1887,13 @@ QJsonObject OperationTranslator::buildSetTempo(TempoText* tt)
 //
 // TPC circle-of-fifths layout: F=13, C=14, G=15, D=16, A=17, E=18, B=19
 // (natural); each flat subtracts 7, each sharp adds 7.
+//
+// IMPORTANT: callers must pass the CONCERT octave, not note->octave().
+// Note::octave() uses epitch() which returns the WRITTEN MIDI pitch when
+// concertPitch mode is OFF, producing a written-pitch octave.  Since we
+// always pair the octave with tpc1 (the concert TPC), the octave must also
+// be in concert-pitch terms.  Use playingOctave(note->pitch(), note->tpc1())
+// to compute the correct concert octave.
 QJsonObject OperationTranslator::pitchJson(int tpc, int octave)
 {
     static const char* const kSteps[] = { "F", "C", "G", "D", "A", "E", "B" };
@@ -2279,12 +2287,12 @@ QJsonObject OperationTranslator::buildAddTuplet(EngravingObject* tup,
             if (chord->notes().size() == 1) {
                 Note* n = chord->notes().front();
                 m["kind"] = QStringLiteral("note");
-                m["pitch"] = pitchJson(n->tpc1(), n->octave());
+                m["pitch"] = pitchJson(n->tpc1(), playingOctave(n->pitch(), n->tpc1()));
             } else {
                 m["kind"] = QStringLiteral("chord");
                 QJsonArray pitches;
                 for (Note* n : chord->notes()) {
-                    pitches.append(pitchJson(n->tpc1(), n->octave()));
+                    pitches.append(pitchJson(n->tpc1(), playingOctave(n->pitch(), n->tpc1())));
                 }
                 m["pitches"] = pitches;
             }

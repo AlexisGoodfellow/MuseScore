@@ -173,6 +173,9 @@ private:
     // Metadata
     Reply actionSetScoreMetadata(const QJsonObject& body);
 
+    // Display mode
+    Reply actionSetConcertPitch(const QJsonObject& body);
+
     // Serialization helpers
     QJsonObject serializeScore();
     QJsonObject serializePart(mu::engraving::Part* part);

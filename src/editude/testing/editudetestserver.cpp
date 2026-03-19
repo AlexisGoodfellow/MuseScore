@@ -17,6 +17,7 @@
 #include "engraving/dom/factory.h"
 #include "engraving/dom/measure.h"
 #include "engraving/dom/noteval.h"
+#include "engraving/dom/pitchspelling.h"
 #include "engraving/dom/rest.h"
 #include "engraving/dom/segment.h"
 #include "engraving/editing/undo.h"
@@ -296,6 +297,7 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("insert_beats"))        return actionInsertBeats(body);
     if (action == QLatin1String("delete_beats"))        return actionDeleteBeats(body);
     if (action == QLatin1String("set_score_metadata"))  return actionSetScoreMetadata(body);
+    if (action == QLatin1String("set_concert_pitch"))   return actionSetConcertPitch(body);
 
     return errorResponse(400, QString("unknown action: %1").arg(action));
 }
@@ -923,7 +925,9 @@ QJsonObject EditudeTestServer::pitchJson(Note* note)
     };
 
     const int tpc      = note->tpc1();
-    const int octave   = note->octave();
+    // Use playingOctave(concert MIDI, concert TPC) — NOT note->octave(),
+    // which returns the written octave when concertPitch mode is OFF.
+    const int octave   = playingOctave(note->pitch(), tpc);
     const int stepIndex = (tpc + 1) % 7;
     const int accOffset = (tpc - kNaturalTpc[stepIndex]) / 7; // range: -2..+2
 
@@ -3734,6 +3738,20 @@ EditudeTestServer::Reply EditudeTestServer::actionSetScoreMetadata(const QJsonOb
         ? okResponse()
         : errorResponse(500,
                         "set_score_metadata failed");
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetConcertPitch(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const bool on = body.value("concert_pitch").toBool(true);
+    // Set the style directly — no undo command.  This changes the display
+    // mode without generating an OT op or affecting the undo stack.
+    score->style().set(Sid::concertPitch, PropertyValue(on));
+    return okResponse();
 }
 
 // ---------------------------------------------------------------------------
