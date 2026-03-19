@@ -43,6 +43,7 @@
 #include "project/iprojectfilescontroller.h"
 #include "audio/main/iplayback.h"
 #include "playback/iplaybackcontroller.h"
+#include "ui/imainwindow.h"
 #include "ui/inavigationcontroller.h"
 
 #include "operationtranslator.h"
@@ -126,6 +127,7 @@ private:
     muse::ContextInject<mu::playback::IPlaybackController> m_playbackController{ iocContext() };
     muse::ContextInject<muse::audio::IPlayback> m_audioPlayback{ iocContext() };
     muse::ContextInject<muse::ui::INavigationController> m_navigationController{ iocContext() };
+    muse::ContextInject<muse::ui::IMainWindow> m_mainWindow{ iocContext() };
 
     QWebSocket* m_socket = nullptr;
     QNetworkAccessManager m_nam;

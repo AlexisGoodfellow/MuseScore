@@ -46,12 +46,48 @@ Item {
     // are recomputed in screen coordinates whenever the view scrolls or zooms.
     Component.onCompleted: {
         EditudePresenceModel.setNotationViewMatrix(root.parent.matrix)
+        // Start focus retries immediately.  On the snapshot path, scoreReady
+        // was emitted before this overlay existed (the page hadn't been
+        // created yet), so the onScoreReady connection below never fired.
+        // Starting here ensures keyboard focus is established once the
+        // NotationPaintView can accept it.
+        focusRetry.attempts = 0
+        focusRetry.start()
     }
 
     Connections {
         target: root.parent
         function onMatrixChanged() {
             EditudePresenceModel.setNotationViewMatrix(root.parent.matrix)
+        }
+    }
+
+    // When the C++ EditudeService finishes bootstrap (ops applied, WS open),
+    // it emits scoreReady.  At that point the page transition may still be
+    // in progress, so forceFocusIn() won't succeed immediately.  Retry every
+    // 50 ms until the NotationPaintView actually has active focus (keyboard
+    // shortcuts work) or 2 s elapse.  This replaces both the old fixed-200 ms
+    // QML timer and the C++ requestActivateByName retry, which returned true
+    // (controls found) even when the controls were still disabled during the
+    // page transition.
+    Connections {
+        target: EditudePresenceModel
+        function onScoreReady() {
+            focusRetry.attempts = 0
+            focusRetry.start()
+        }
+    }
+
+    Timer {
+        id: focusRetry
+        interval: 50
+        repeat: true
+        property int attempts: 0
+        onTriggered: {
+            root.parent.forceFocusIn()
+            if (root.parent.activeFocus || ++attempts >= 40) {
+                stop()
+            }
         }
     }
 

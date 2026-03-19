@@ -30,6 +30,7 @@
 #include <QMap>
 #include <QApplication>
 #include <QHttpMultiPart>
+#include <QWindow>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QUrl>
@@ -101,12 +102,40 @@ void EditudeService::start()
         m_pendingOps       = obj.value("snapshot_ops").toArray();
         m_bootstrapReady   = true;
 
-        // Defer openProject() to the next event-loop iteration so it runs outside
-        // the QNetworkReply::finished callback stack.  openProject() triggers QML
-        // page navigation (openPageIfNeed) which must not be called re-entrantly
-        // from inside a network reply handler.
+        // Defer openProject() to the next event-loop iteration so it runs
+        // outside the QNetworkReply::finished callback stack.  openProject()
+        // triggers QML page navigation (openPageIfNeed) which must not be
+        // called re-entrantly from inside a network reply handler.
         QTimer::singleShot(0, this, [this]() {
             openScoreForSession();
+
+            // Re-arm Interactive::m_openingObject with NOTATION page data.
+            //
+            // When MuseScore starts, the HOME page is the first to load
+            // (DockWindow::isFirstOpening == true).  DockWindow defers its
+            // notifyAboutPageLoaded() callback via async::Async::call().
+            // That deferred callback eventually calls
+            // Interactive::onOpen(PrimaryPage), which writes m_openingObject
+            // into m_stack[0] (the current URI).
+            //
+            // The problem: by the time the HOME callback fires, the NOTATION
+            // page has already opened (inside openScoreForSession above).
+            // The notation page's onOpen() already cleared m_openingObject
+            // (interactive.cpp:1133).  So the HOME callback writes an EMPTY
+            // ObjectInfo into m_stack[0], making currentUri() return an empty
+            // URI.  UiContextResolver then returns UiCtxUnknown, disabling
+            // keyboard shortcuts and toolbar actions.
+            //
+            // Fix: call Interactive::open() for the notation page again.
+            // DockWindow::loadPage() sees the notation page is already the
+            // current page and returns immediately (no page reload).  But
+            // Interactive::openFunc() has already re-set m_openingObject to
+            // NOTATION data.  When the HOME deferred callback later fires
+            // onOpen(), it picks up this NOTATION data instead of empty,
+            // keeping the URI correct.
+            if (m_currentNotation) {
+                m_interactive()->open(muse::Uri("musescore://notation"));
+            }
         });
     });
 
@@ -147,35 +176,16 @@ bool EditudeService::eventFilter(QObject* watched, QEvent* event)
 void EditudeService::openScoreForSession()
 {
     if (!m_snapshotPath.isEmpty()) {
-        static const muse::Uri NOTATION_URI("musescore://notation");
-
-        if (m_interactive()->isOpened(NOTATION_URI).val) {
-            // Notation page already visible (e.g. test-server reconnect
-            // path after closeOpenedProject) — open the file directly.
-            m_projectFiles()->openProject(
-                mu::project::ProjectFile(muse::io::path_t(m_snapshotPath)));
-            bootstrapAndConnect();
-            requestNotationFocus();
-        } else {
-            // Navigate to the notation page first so the NotationPaintView
-            // is fully created and laid out before we load the project.
-            // This mirrors StartupScenario's StartWithScore flow: page
-            // opens, then file loads into the already-visible view, so
-            // forceFocusIn() succeeds and keyboard shortcuts / toolbar
-            // actions work immediately.
-            m_fileOpenPending = true;
-            m_interactive()->opened().onReceive(this, [this](const muse::Uri&) {
-                if (!m_fileOpenPending) {
-                    return;
-                }
-                m_fileOpenPending = false;
-                m_projectFiles()->openProject(
-                    mu::project::ProjectFile(muse::io::path_t(m_snapshotPath)));
-                bootstrapAndConnect();
-                requestNotationFocus();
-            });
-            m_interactive()->open(NOTATION_URI);
-        }
+        // Let MuseScore's own openProject() handle page navigation.
+        // It internally opens the notation page after loading the score,
+        // which correctly wires up the navigation context (ScoreView panel
+        // active → UiCtxProjectFocused → actions enabled).  Manually
+        // navigating first created a page-without-project state that left
+        // the navigation context stuck at UiCtxProjectOpened.
+        m_projectFiles()->openProject(
+            mu::project::ProjectFile(muse::io::path_t(m_snapshotPath)));
+        bootstrapAndConnect();
+        requestNotationFocus();
     } else {
         // No snapshot — this is a brand-new project.  Open MuseScore's
         // "New Score" wizard so the user can pick a template/instruments.
@@ -221,6 +231,17 @@ void EditudeService::bootstrapAndConnect()
              it != m_applicator.partUuidToPart().cend(); ++it) {
             m_translator.registerKnownPart(it.value(), it.key());
         }
+    }
+
+    // Clear any stale editing state left over from the bootstrap op replay.
+    // NotationActionController::isEditingElement() gates ALL action
+    // enablement (note-input, arrow keys, toolbar buttons) — if the
+    // interaction reports editing or dragging in progress, actions are
+    // unconditionally disabled.  Applying bootstrap ops via startCmd/endCmd
+    // can leave m_editData.element set as a side effect, so we explicitly
+    // end editing here.
+    if (m_currentNotation) {
+        m_currentNotation->interaction()->endEditElement();
     }
 
     if (!m_websocketUrl.isEmpty() && !m_wsEverConnected) {
@@ -739,18 +760,41 @@ void EditudeService::uploadInitialSnapshot()
 
 void EditudeService::requestNotationFocus()
 {
-    // Defer by one event-loop iteration so that QML layout completes and
-    // the NotationView's NavigationSection/Panel/Control are registered.
-    // requestActivateByName activates the "ScoreView" panel, which:
-    //   1. Sets UiCtxProjectFocused → toolbar actions become enabled
-    //   2. Triggers fakeNavCtrl.onActiveChanged → forceFocusIn()
-    //   3. forceFocusIn() calls forceActiveFocus() on the NotationPaintView
-    // Since layout is settled after one event-loop pass, forceActiveFocus()
-    // succeeds and keyboard shortcuts reach the paint view.
-    QTimer::singleShot(0, this, [this]() {
-        m_navigationController()->requestActivateByName(
-            "NotationView", "ScoreView", "Score");
-    });
+    // Three things must happen for keyboard shortcuts and toolbar to work:
+    //
+    // 1. The OS must recognize this window as the active application
+    //    (→ keyboard events are delivered by the OS).
+    // 2. The ScoreView navigation panel must be active (→ UiCtxProjectFocused
+    //    → actions like note-input are enabled).
+    // 3. The NotationPaintView must have QML active focus (→ ShortcutOverride
+    //    events are delivered to it → keyboard shortcuts fire).
+    //
+    // On macOS, when launched via subprocess.Popen, the MuseScore window
+    // appears but the APPLICATION may not be activated — the parent process
+    // retains active-app status.  requestActivate() calls
+    // [NSApp activateIgnoringOtherApps:YES] under the hood.
+    //
+    // requestActivateByName activates the navigation hierarchy; the explicit
+    // navigationChanged().notify() forces UiContextResolver to re-evaluate
+    // even if the controls were already active from a prior attempt.
+    //
+    // Three timed attempts cover sync, near-sync, and async page creation.
+    for (int delay : {0, 200, 500}) {
+        QTimer::singleShot(delay, this, [this, delay]() {
+            LOGD() << "[editude] requestNotationFocus @" << delay
+                   << "ms: appState=" << qApp->applicationState();
+
+            if (QWindow* w = m_mainWindow()->qWindow()) {
+                w->requestActivate();
+            }
+
+            bool ok = m_navigationController()->requestActivateByName(
+                "NotationView", "ScoreView", "Score");
+            LOGD() << "[editude] requestActivateByName returned " << ok;
+
+            m_navigationController()->navigationChanged().notify();
+        });
+    }
 }
 
 void EditudeService::_openWebSocket()
