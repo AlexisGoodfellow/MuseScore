@@ -23,6 +23,8 @@
 
 #include <QAbstractListModel>
 #include <QColor>
+#include <QJSEngine>
+#include <QQmlEngine>
 #include <QRectF>
 #include <QString>
 #include <QTimer>
@@ -64,12 +66,21 @@ public:
 
     explicit EditudePresenceModel(QObject* parent = nullptr);
 
+    // Qt 6 QML_SINGLETON factory — returns the C++-created instance so that
+    // both EditudeService and QML operate on the same object.
+    static EditudePresenceModel* create(QQmlEngine*, QJSEngine*);
+
     // Called by EditudeService when presence data changes.
     // canvasData: list of (colour, list-of-canvas-rects) per contributor cursor.
     void setCanvasData(const QVector<QPair<QColor, QVector<muse::RectF>>>& canvasData);
 
     // Shows a transient toast notification; auto-clears after 4 s.
     void showToast(const QString& text);
+
+    // Called by EditudeService when a notation has finished loading
+    // (including any bootstrap ops).  QML uses this to request focus
+    // on the notation paint view so that keyboard shortcuts work.
+    void notifyScoreReady();
 
     QString toastText() const { return m_toastText; }
 
@@ -83,6 +94,7 @@ public:
 
 Q_SIGNALS:
     void toastTextChanged();
+    void scoreReady();
 
 private:
     void rebuild();
@@ -98,6 +110,8 @@ private:
 
     QString m_toastText;
     QTimer* m_toastTimer = nullptr;
+
+    static EditudePresenceModel* s_instance;
 };
 
 } // namespace mu::editude::internal

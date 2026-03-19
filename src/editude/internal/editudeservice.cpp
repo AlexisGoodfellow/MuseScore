@@ -28,6 +28,8 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QMap>
+#include <QApplication>
+#include <QHttpMultiPart>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QUrl>
@@ -37,6 +39,9 @@
 #include "engraving/dom/engravingitem.h"
 #include "engraving/dom/masterscore.h"
 #include "engraving/dom/part.h"
+#include "engraving/engravingproject.h"
+#include "engraving/infrastructure/mscwriter.h"
+#include "global/io/buffer.h"
 #include "notation/internal/igetscore.h"
 #include "log.h"
 #include "qml/Editude/editudeannotationmodel.h"
@@ -112,17 +117,133 @@ void EditudeService::start()
                 onPlaybackStateChanged();
             });
     }
+
+    // Install an event filter on QApplication to intercept Close/Quit events.
+    // When the user closes MuseScore, this marks the score as saved BEFORE
+    // ApplicationActionController's filter runs, suppressing the "Save
+    // changes?" dialog.  Editude projects are persisted via OT ops — there's
+    // nothing to "save" locally.  Qt event filters fire in reverse install
+    // order, and editude initializes after appshell, so ours runs first.
+    qApp->installEventFilter(this);
+}
+
+bool EditudeService::eventFilter(QObject* watched, QEvent* event)
+{
+    if (event->type() == QEvent::Close || event->type() == QEvent::Quit) {
+        // Mark the score as saved so the "Save changes?" dialog is suppressed.
+        // This runs before ApplicationActionController's event filter (which
+        // calls closeOpenedProject → needSave check) because Qt invokes
+        // filters in reverse installation order and editude installs after
+        // appshell.  We only touch the saved flag — no notifications fire
+        // because we go straight to MasterScore::setSaved(), bypassing
+        // NotationProject::setNeedSave() and its notification broadcast.
+        if (m_score && m_score->masterScore()) {
+            m_score->masterScore()->setSaved(true);
+        }
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 void EditudeService::openScoreForSession()
 {
     if (!m_snapshotPath.isEmpty()) {
-        m_projectFiles()->openProject(
-            mu::project::ProjectFile(muse::io::path_t(m_snapshotPath)));
-        // onNotationChanged() fires when MuseScore finishes loading the file
+        static const muse::Uri NOTATION_URI("musescore://notation");
+
+        if (m_interactive()->isOpened(NOTATION_URI).val) {
+            // Notation page already visible (e.g. test-server reconnect
+            // path after closeOpenedProject) — open the file directly.
+            m_projectFiles()->openProject(
+                mu::project::ProjectFile(muse::io::path_t(m_snapshotPath)));
+            bootstrapAndConnect();
+            requestNotationFocus();
+        } else {
+            // Navigate to the notation page first so the NotationPaintView
+            // is fully created and laid out before we load the project.
+            // This mirrors StartupScenario's StartWithScore flow: page
+            // opens, then file loads into the already-visible view, so
+            // forceFocusIn() succeeds and keyboard shortcuts / toolbar
+            // actions work immediately.
+            m_fileOpenPending = true;
+            m_interactive()->opened().onReceive(this, [this](const muse::Uri&) {
+                if (!m_fileOpenPending) {
+                    return;
+                }
+                m_fileOpenPending = false;
+                m_projectFiles()->openProject(
+                    mu::project::ProjectFile(muse::io::path_t(m_snapshotPath)));
+                bootstrapAndConnect();
+                requestNotationFocus();
+            });
+            m_interactive()->open(NOTATION_URI);
+        }
+    } else {
+        // No snapshot — this is a brand-new project.  Open MuseScore's
+        // "New Score" wizard so the user can pick a template/instruments.
+        // onNotationChanged() fires when they finish the wizard.
+        //
+        // The "file-new" action opens a QML dialog that requires the
+        // InteractiveProvider to be fully initialized.  At this point in
+        // startup, the main window has not opened yet — dispatching now
+        // would crash (assertion in Interactive::onClose because the dialog
+        // was never registered in m_stack).  Wait for the first opened()
+        // signal, which fires once the startup scenario shows the HOME page.
+        m_needsInitialSnapshot = true;
+        m_fileNewPending = true;
+        m_interactive()->opened().onReceive(this, [this](const muse::Uri&) {
+            if (!m_fileNewPending) {
+                return;
+            }
+            m_fileNewPending = false;
+            m_dispatcher()->dispatch("file-new");
+        });
     }
-    // No snapshot → MuseScore shows its normal start screen;
-    // onNotationChanged() fires when user opens/creates any score.
+}
+
+void EditudeService::bootstrapAndConnect()
+{
+    if (!m_bootstrapReady || !m_score) {
+        return;
+    }
+
+    if (!m_pendingOps.isEmpty()) {
+        m_applyingRemote = true;
+        m_applicator.bootstrapPartMap(m_score);
+        applyPendingOps();
+        m_applyingRemote = false;
+        m_pendingOps = QJsonArray();
+
+        // Sync part registrations from applicator → translator.  When
+        // applyAddPart adopts an existing Part* (bootstrap de-dup), only the
+        // applicator's m_partUuidToPart is updated.  The translator must also
+        // learn about these parts; otherwise the next onScoreChanges() would
+        // generate spurious AddPart ops for "unknown" parts.
+        for (auto it = m_applicator.partUuidToPart().cbegin();
+             it != m_applicator.partUuidToPart().cend(); ++it) {
+            m_translator.registerKnownPart(it.value(), it.key());
+        }
+    }
+
+    if (!m_websocketUrl.isEmpty() && !m_wsEverConnected) {
+        m_wsEverConnected = true;
+        if (!m_tokenRefreshTimer) {
+            m_tokenRefreshTimer = new QTimer(this);
+            m_tokenRefreshTimer->setSingleShot(true);
+            connect(m_tokenRefreshTimer, &QTimer::timeout,
+                    this, &EditudeService::onTokenRefreshTimer);
+        }
+        if (!m_reconnectTimer) {
+            m_reconnectTimer = new QTimer(this);
+            m_reconnectTimer->setSingleShot(true);
+            connect(m_reconnectTimer, &QTimer::timeout,
+                    this, &EditudeService::onReconnectTimer);
+        }
+        scheduleTokenRefresh();
+        _openWebSocket();
+    }
+
+    if (m_presenceModel) {
+        m_presenceModel->notifyScoreReady();
+    }
 }
 
 void EditudeService::applyPendingOps()
@@ -180,13 +301,15 @@ void EditudeService::onServerMessage(const QString& text)
             }
             m_applyingRemote = false;
             LOGD() << "[editude] applied" << syncOps.size() << "sync ops from peers";
+        }
 
-            // Sync part registrations from the applicator into the translator.
-            // When applyAddPart adopts an existing Part* (bootstrap de-dup), only
-            // the applicator's m_partUuidToPart is updated.  The translator's
-            // m_knownPartUuids must also learn about these parts; otherwise the
-            // next onScoreChanges() call (e.g. from MuseScore internal init)
-            // would generate spurious lazy AddPart ops for "unknown" parts.
+        // Sync part registrations from the applicator into the translator.
+        // This must run even when syncOps is empty: bootstrapAndConnect()
+        // may have applied AddPart ops (from the snapshot_ops bootstrap)
+        // that updated the applicator's part map but didn't sync to the
+        // translator.  Without this, the next onScoreChanges() would
+        // generate spurious AddPart ops for "unknown" parts.
+        if (m_score) {
             for (auto it = m_applicator.partUuidToPart().cbegin();
                  it != m_applicator.partUuidToPart().cend(); ++it) {
                 m_translator.registerKnownPart(it.value(), it.key());
@@ -212,15 +335,24 @@ void EditudeService::onServerMessage(const QString& text)
                 for (const QJsonObject& op : bootstrapOps) {
                     opsArray.append(op);
                 }
+                QString batchId = QUuid::createUuid().toString(QUuid::WithoutBraces);
                 QJsonObject batch;
                 batch["type"]          = QStringLiteral("op_batch");
-                batch["batch_id"]      = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                batch["batch_id"]      = batchId;
                 batch["base_revision"] = 0;
                 batch["ops"]           = opsArray;
                 m_socket->sendTextMessage(
                     QJsonDocument(batch).toJson(QJsonDocument::Compact));
                 LOGD() << "[editude] bootstrapped" << bootstrapOps.size()
                        << "pre-existing parts from MSCX";
+
+                // Defer the initial snapshot upload until this batch is acked.
+                // The ack updates m_serverRevision to include the AddPart ops,
+                // so the snapshot is stored at the correct revision and won't
+                // cause duplicate AddPart ops on the next session_bootstrap.
+                if (m_needsInitialSnapshot) {
+                    m_bootstrapBatchId = batchId;
+                }
             }
         }
 
@@ -239,6 +371,15 @@ void EditudeService::onServerMessage(const QString& text)
             m_bufferedOps = QJsonArray();
         }
 
+        // Upload the initial snapshot for brand-new projects (wizard flow).
+        // If bootstrap AddPart ops were sent above, the upload is deferred
+        // until their op_batch_ack arrives (so m_serverRevision is correct).
+        // If no bootstrap ops were needed, upload immediately.
+        if (m_needsInitialSnapshot && m_bootstrapBatchId.isEmpty() && m_score) {
+            m_needsInitialSnapshot = false;
+            uploadInitialSnapshot();
+        }
+
     } else if (type == "op_ack") {
         // Legacy ack format — kept for compatibility with older server versions.
         const int revision = msg.value("revision").toInt();
@@ -254,6 +395,20 @@ void EditudeService::onServerMessage(const QString& text)
         }
         LOGD() << "[editude] op_batch_ack batch_id=" << msg.value("batch_id").toString()
                << "revision=" << revision;
+
+        // Deferred initial snapshot upload: the bootstrap AddPart batch has
+        // been acked, so m_serverRevision now includes the parts.  Upload
+        // the snapshot at this revision so session_bootstrap won't return
+        // the AddPart ops (they precede the snapshot revision).
+        if (m_needsInitialSnapshot
+            && !m_bootstrapBatchId.isEmpty()
+            && msg.value("batch_id").toString() == m_bootstrapBatchId) {
+            m_needsInitialSnapshot = false;
+            m_bootstrapBatchId.clear();
+            if (m_score) {
+                uploadInitialSnapshot();
+            }
+        }
 
     } else if (type == "op") {
         // Legacy single-op broadcast — wrap and apply as a batch of one.
@@ -384,34 +539,12 @@ void EditudeService::onNotationChanged(mu::notation::INotationPtr notation)
         }
     }
 
-    // Apply bootstrap ops before going live
-    if (m_bootstrapReady && !m_pendingOps.isEmpty()) {
-        m_applyingRemote = true;
-        m_applicator.bootstrapPartMap(m_score);
-        applyPendingOps();
-        m_applyingRemote = false;
-        m_pendingOps = QJsonArray();
-    }
-
-    // Open WebSocket once (guard with m_wsEverConnected)
-    if (m_bootstrapReady && !m_websocketUrl.isEmpty() && !m_wsEverConnected) {
-        m_wsEverConnected = true;
-
-        if (!m_tokenRefreshTimer) {
-            m_tokenRefreshTimer = new QTimer(this);
-            m_tokenRefreshTimer->setSingleShot(true);
-            connect(m_tokenRefreshTimer, &QTimer::timeout,
-                    this, &EditudeService::onTokenRefreshTimer);
-        }
-        if (!m_reconnectTimer) {
-            m_reconnectTimer = new QTimer(this);
-            m_reconnectTimer->setSingleShot(true);
-            connect(m_reconnectTimer, &QTimer::timeout,
-                    this, &EditudeService::onReconnectTimer);
-        }
-        scheduleTokenRefresh();
-        _openWebSocket();
-    }
+    // Apply bootstrap ops and open the WebSocket if the session info
+    // has already arrived from the network.  When the snapshot path is
+    // passed as a command-line argument, StartupScenario loads the file
+    // before the network reply — in that case bootstrapAndConnect() is
+    // a no-op here and runs later from openScoreForSession().
+    bootstrapAndConnect();
 
     notation->undoStack()->changesChannel().onReceive(
         this,
@@ -510,6 +643,114 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
                << "base_rev=" << baseRevision;
     }
     m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
+}
+
+QUrl EditudeService::deriveServerBaseUrl() const
+{
+    QUrl wsUrl(m_websocketUrl);
+    QUrl base;
+    base.setScheme(wsUrl.scheme() == QStringLiteral("wss") ? QStringLiteral("https")
+                                                           : QStringLiteral("http"));
+    base.setHost(wsUrl.host());
+    base.setPort(wsUrl.port());
+    return base;
+}
+
+void EditudeService::uploadInitialSnapshot()
+{
+    if (!m_score || !m_score->masterScore()) {
+        LOGW() << "[editude] uploadInitialSnapshot: no score available";
+        return;
+    }
+
+    // Serialize the score to MSCZ bytes in memory.
+    muse::ByteArray msczData;
+    {
+        muse::io::Buffer buf(&msczData);
+
+        mu::engraving::MscWriter::Params params;
+        params.device = &buf;
+        params.filePath = muse::io::path_t("snapshot.mscz");
+        params.mode = mu::engraving::MscIoMode::Zip;
+
+        mu::engraving::MscWriter writer(params);
+        muse::Ret ret = writer.open();
+        if (!ret) {
+            LOGW() << "[editude] uploadInitialSnapshot: MscWriter::open() failed";
+            return;
+        }
+
+        auto engProject = m_score->masterScore()->project().lock();
+        if (!engProject) {
+            LOGW() << "[editude] uploadInitialSnapshot: no EngravingProject";
+            return;
+        }
+
+        bool ok = engProject->writeMscz(writer, false);
+        writer.close();
+
+        if (!ok || writer.hasError()) {
+            LOGW() << "[editude] uploadInitialSnapshot: serialization failed";
+            return;
+        }
+    }
+
+    LOGD() << "[editude] uploadInitialSnapshot: serialized"
+           << msczData.size() << "bytes at revision" << m_serverRevision;
+
+    // Build the upload URL from the WebSocket URL.
+    QUrl uploadUrl = deriveServerBaseUrl();
+    uploadUrl.setPath(QString("/projects/%1/snapshots").arg(m_projectId));
+
+    // Multipart form: revision (int) + file (binary).
+    QHttpMultiPart* multiPart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
+
+    QHttpPart revisionPart;
+    revisionPart.setHeader(QNetworkRequest::ContentDispositionHeader,
+                           QVariant(QStringLiteral("form-data; name=\"revision\"")));
+    revisionPart.setBody(QByteArray::number(m_serverRevision));
+    multiPart->append(revisionPart);
+
+    QHttpPart filePart;
+    filePart.setHeader(
+        QNetworkRequest::ContentDispositionHeader,
+        QVariant(QStringLiteral("form-data; name=\"file\"; filename=\"snapshot.mscz\"")));
+    filePart.setHeader(QNetworkRequest::ContentTypeHeader,
+                       QVariant(QStringLiteral("application/octet-stream")));
+    filePart.setBody(QByteArray(reinterpret_cast<const char*>(msczData.constData()),
+                                static_cast<qsizetype>(msczData.size())));
+    multiPart->append(filePart);
+
+    QNetworkRequest req(uploadUrl);
+    req.setRawHeader("Authorization", QString("Bearer %1").arg(m_token).toUtf8());
+
+    QNetworkReply* reply = m_nam.post(req, multiPart);
+    multiPart->setParent(reply);
+
+    connect(reply, &QNetworkReply::finished, this, [reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            LOGW() << "[editude] initial snapshot upload failed:" << reply->errorString();
+        } else {
+            LOGD() << "[editude] initial snapshot uploaded successfully";
+        }
+    });
+}
+
+void EditudeService::requestNotationFocus()
+{
+    // Defer by one event-loop iteration so that QML layout completes and
+    // the NotationView's NavigationSection/Panel/Control are registered.
+    // requestActivateByName activates the "ScoreView" panel, which:
+    //   1. Sets UiCtxProjectFocused → toolbar actions become enabled
+    //   2. Triggers fakeNavCtrl.onActiveChanged → forceFocusIn()
+    //   3. forceFocusIn() calls forceActiveFocus() on the NotationPaintView
+    // Since layout is settled after one event-loop pass, forceActiveFocus()
+    // succeeds and keyboard shortcuts reach the paint view.
+    QTimer::singleShot(0, this, [this]() {
+        m_navigationController()->requestActivateByName(
+            "NotationView", "ScoreView", "Score");
+    });
 }
 
 void EditudeService::_openWebSocket()
@@ -704,20 +945,11 @@ QJsonObject EditudeService::buildSelectionPayload(const mu::notation::INotationS
 
 void EditudeService::fetchAnnotations()
 {
-    if (m_sessionUrl.isEmpty() || m_projectId.isEmpty() || !m_annotationModel) {
+    if (m_websocketUrl.isEmpty() || m_projectId.isEmpty() || !m_annotationModel) {
         return;
     }
 
-    // Derive the annotations REST URL from the session URL base.
-    // EDITUDE_SESSION_URL is expected to be something like
-    //   http://host:port/projects/{pid}/session-bootstrap?token=...
-    // Strip query + trailing path segment to get the project base URL.
-    QUrl sessionUrl(m_sessionUrl);
-    // Build: http://host:port/projects/{pid}/annotations
-    QUrl annotationsUrl;
-    annotationsUrl.setScheme(sessionUrl.scheme());
-    annotationsUrl.setHost(sessionUrl.host());
-    annotationsUrl.setPort(sessionUrl.port());
+    QUrl annotationsUrl = deriveServerBaseUrl();
     annotationsUrl.setPath(QString("/projects/%1/annotations").arg(m_projectId));
 
     QNetworkRequest req(annotationsUrl);
@@ -773,6 +1005,10 @@ void EditudeService::connectToSession(const QString& sessionUrl)
     m_reconnectAttempt = 0;
     m_wsEverConnected = false;
     m_immediateReconnect = false;
+    m_needsInitialSnapshot = false;
+    m_fileNewPending = false;
+    m_fileOpenPending = false;
+    m_bootstrapBatchId.clear();
     m_token.clear();
     m_websocketUrl.clear();
     m_projectId.clear();

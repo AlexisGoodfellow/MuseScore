@@ -23,9 +23,21 @@
 
 using namespace mu::editude::internal;
 
+EditudeAnnotationModel* EditudeAnnotationModel::s_instance = nullptr;
+
 EditudeAnnotationModel::EditudeAnnotationModel(QObject* parent)
     : QAbstractListModel(parent)
 {
+    if (!s_instance) {
+        s_instance = this;
+    }
+}
+
+EditudeAnnotationModel* EditudeAnnotationModel::create(QQmlEngine*, QJSEngine*)
+{
+    Q_ASSERT(s_instance);
+    QJSEngine::setObjectOwnership(s_instance, QJSEngine::CppOwnership);
+    return s_instance;
 }
 
 EditudeAnnotationModel::Row EditudeAnnotationModel::rowFromJson(const QJsonObject& obj)

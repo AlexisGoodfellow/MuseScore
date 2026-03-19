@@ -26,7 +26,9 @@
 #include <QJsonArray>
 #include <QMap>
 #include <QNetworkAccessManager>
+#include <QUrl>
 #include <QUuid>
+#include <QEvent>
 #include <QObject>
 #include <QString>
 #include <QTimer>
@@ -34,11 +36,14 @@
 
 #include "global/modularity/ioc.h"
 #include "global/async/asyncable.h"
+#include "actions/iactionsdispatcher.h"
+#include "interactive/iinteractive.h"
 #include "engraving/dom/score.h"
 #include "notation/inotation.h"
 #include "project/iprojectfilescontroller.h"
 #include "audio/main/iplayback.h"
 #include "playback/iplaybackcontroller.h"
+#include "ui/inavigationcontroller.h"
 
 #include "operationtranslator.h"
 #include "scoreapplicator.h"
@@ -89,6 +94,9 @@ public:
     void setPresenceModel(EditudePresenceModel* model);
     void setAnnotationModel(EditudeAnnotationModel* model);
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
     enum class State { Disconnected, Authenticating, Joining, Live, Reconnecting };
 
@@ -96,6 +104,7 @@ private:
     void onServerMessage(const QString& msg);
     void onScoreChanges(const mu::engraving::ScoreChanges& changes);
     void openScoreForSession();
+    void bootstrapAndConnect();
     void applyPendingOps();
     void scheduleTokenRefresh();
     void onTokenRefreshTimer();
@@ -107,10 +116,16 @@ private:
     QJsonObject buildSelectionPayload(const mu::notation::INotationSelectionPtr& sel);
     void refreshPresenceModel();
     void fetchAnnotations();
+    void uploadInitialSnapshot();
+    void requestNotationFocus();
+    QUrl deriveServerBaseUrl() const;
 
     muse::ContextInject<mu::project::IProjectFilesController> m_projectFiles{ iocContext() };
+    muse::ContextInject<muse::actions::IActionsDispatcher> m_dispatcher{ iocContext() };
+    muse::ContextInject<muse::IInteractive> m_interactive{ iocContext() };
     muse::ContextInject<mu::playback::IPlaybackController> m_playbackController{ iocContext() };
     muse::ContextInject<muse::audio::IPlayback> m_audioPlayback{ iocContext() };
+    muse::ContextInject<muse::ui::INavigationController> m_navigationController{ iocContext() };
 
     QWebSocket* m_socket = nullptr;
     QNetworkAccessManager m_nam;
@@ -137,6 +152,10 @@ private:
     bool m_applyingRemote = false;
     bool m_playbackActive = false;
     bool m_immediateReconnect = false;
+    bool m_needsInitialSnapshot = false;
+    bool m_fileNewPending = false;
+    bool m_fileOpenPending = false;
+    QString m_bootstrapBatchId;
     OperationTranslator m_translator;
     ScoreApplicator m_applicator;
     EditudePresenceModel* m_presenceModel = nullptr;

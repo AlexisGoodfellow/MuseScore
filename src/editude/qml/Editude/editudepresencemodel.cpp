@@ -23,9 +23,21 @@
 
 using namespace mu::editude::internal;
 
+EditudePresenceModel* EditudePresenceModel::s_instance = nullptr;
+
 EditudePresenceModel::EditudePresenceModel(QObject* parent)
     : QAbstractListModel(parent)
 {
+    if (!s_instance) {
+        s_instance = this;
+    }
+}
+
+EditudePresenceModel* EditudePresenceModel::create(QQmlEngine*, QJSEngine*)
+{
+    Q_ASSERT(s_instance);
+    QJSEngine::setObjectOwnership(s_instance, QJSEngine::CppOwnership);
+    return s_instance;
 }
 
 void EditudePresenceModel::setCanvasData(
@@ -49,6 +61,11 @@ void EditudePresenceModel::showToast(const QString& text)
         });
     }
     m_toastTimer->start(4000);
+}
+
+void EditudePresenceModel::notifyScoreReady()
+{
+    emit scoreReady();
 }
 
 void EditudePresenceModel::setNotationViewMatrix(const QVariant& matrix)

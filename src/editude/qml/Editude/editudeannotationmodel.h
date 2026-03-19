@@ -22,8 +22,10 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QJSEngine>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QQmlEngine>
 #include <QString>
 #include <QVector>
 #include <QtQml/qqml.h>
@@ -75,6 +77,10 @@ public:
 
     explicit EditudeAnnotationModel(QObject* parent = nullptr);
 
+    // Qt 6 QML_SINGLETON factory — returns the C++-created instance so that
+    // both EditudeService and QML operate on the same object.
+    static EditudeAnnotationModel* create(QQmlEngine*, QJSEngine*);
+
     // Replace all annotations (called after REST fetch on project join).
     void loadFromJson(const QJsonArray& annotations);
 
@@ -108,6 +114,8 @@ private:
     static Row rowFromJson(const QJsonObject& obj);
 
     QVector<Row> m_rows;
+
+    static EditudeAnnotationModel* s_instance;
 };
 
 } // namespace mu::editude::internal
