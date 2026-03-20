@@ -107,8 +107,14 @@ EngravingObject::~EngravingObject()
     }
 
     {
-        bool isPaletteScore = score()->isPaletteScore();
-        bool canMoveToDummy = !this->isType(ElementType::ROOT_ITEM)
+        // When score() is null the palette Score has already been freed
+        // (PaletteScoreProvider::deinit set m_score to nullptr on all
+        // descendants).  Default to palette-score behaviour: detach children
+        // rather than deleting them, avoiding double-frees with PaletteCells
+        // that still hold shared_ptrs to these items.
+        bool isPaletteScore = !score() || score()->isPaletteScore();
+        bool canMoveToDummy = score()
+                              && !this->isType(ElementType::ROOT_ITEM)
                               && !this->isType(ElementType::DUMMY)
                               && !this->isType(ElementType::SCORE)
                               && score()->rootItem() && score()->rootItem()->dummy();

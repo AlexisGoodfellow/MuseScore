@@ -21,9 +21,11 @@
 #include "editudemodule.h"
 
 #include "internal/editudeservice.h"
+#include "internal/editudeuiactions.h"
 #include "qml/Editude/editudeannotationmodel.h"
 #include "qml/Editude/editudepresencemodel.h"
 #include "log.h"
+#include <QtQml/qqml.h>
 
 using namespace mu::editude;
 using namespace muse::modularity;
@@ -43,6 +45,33 @@ IContextSetup* EditudeModule::newContext(const ContextPtr& ctx) const
 void EditudeModuleContext::registerExports()
 {
     m_service = std::make_shared<internal::EditudeService>(iocContext());
+
+    m_presenceModel = internal::EditudePresenceModel::instance();
+    m_annotationModel = internal::EditudeAnnotationModel::instance();
+
+    qmlRegisterSingletonType<internal::EditudeAnnotationModel>(
+        "Editude", 1, 0, "EditudeAnnotationModel",
+        [](QQmlEngine*, QJSEngine*) -> QObject* {
+            auto* inst = internal::EditudeAnnotationModel::instance();
+            QJSEngine::setObjectOwnership(inst, QJSEngine::CppOwnership);
+            return inst;
+        });
+
+    qmlRegisterSingletonType<internal::EditudePresenceModel>(
+        "Editude", 1, 0, "EditudePresenceModel",
+        [](QQmlEngine*, QJSEngine*) -> QObject* {
+            auto* inst = internal::EditudePresenceModel::instance();
+            QJSEngine::setObjectOwnership(inst, QJSEngine::CppOwnership);
+            return inst;
+        });
+}
+
+void EditudeModuleContext::resolveImports()
+{
+    m_uiActions = std::make_shared<internal::EditudeUiActions>();
+    if (auto ar = ioc()->resolve<muse::ui::IUiActionsRegister>(mname)) {
+        ar->reg(m_uiActions);
+    }
 }
 
 void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
@@ -52,11 +81,24 @@ void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
         return;
     }
 
-    m_presenceModel = std::make_shared<internal::EditudePresenceModel>();
-    m_annotationModel = std::make_shared<internal::EditudeAnnotationModel>();
-    m_service->setPresenceModel(m_presenceModel.get());
-    m_service->setAnnotationModel(m_annotationModel.get());
+    // Editude manages project state through its own server — suppress
+    // MuseScore's "previous session quit unexpectedly" recovery dialog.
+    if (m_sessionsManager()) {
+        m_sessionsManager()->reset();
+    }
+
+    m_service->setPresenceModel(m_presenceModel);
+    m_service->setAnnotationModel(m_annotationModel);
     m_service->start();
+
+    // Wire the annotation model to the UI actions so actionChecked() works.
+    m_uiActions->setAnnotationModel(m_annotationModel);
+
+    // Register dispatch handler for the toggle-annotations toolbar action.
+    m_dispatcher()->reg(this, "toggle-annotations", [this]() {
+        m_annotationModel->setPanelVisible(!m_annotationModel->panelVisible());
+        m_uiActions->notifyAnnotationToggleChanged();
+    });
 
 #ifdef MUE_BUILD_EDITUDE_TEST_SERVER
     LOGI() << "[EditudeModule] test server enabled, EDITUDE_TEST_PORT=" << qgetenv("EDITUDE_TEST_PORT");

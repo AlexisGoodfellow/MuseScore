@@ -32,10 +32,11 @@ EditudePresenceModel::EditudePresenceModel(QObject* parent)
     }
 }
 
-EditudePresenceModel* EditudePresenceModel::create(QQmlEngine*, QJSEngine*)
+EditudePresenceModel* EditudePresenceModel::instance()
 {
-    Q_ASSERT(s_instance);
-    QJSEngine::setObjectOwnership(s_instance, QJSEngine::CppOwnership);
+    if (!s_instance) {
+        s_instance = new EditudePresenceModel();
+    }
     return s_instance;
 }
 

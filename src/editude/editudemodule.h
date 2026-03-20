@@ -26,7 +26,11 @@
 #include "modularity/imodulesetup.h"
 #include "global/modularity/ioc.h"
 #include "global/async/asyncable.h"
+#include "actions/iactionsdispatcher.h"
+#include "actions/actionable.h"
+#include "ui/iuiactionsregister.h"
 #include "context/iglobalcontext.h"
+#include "appshell/internal/isessionsmanager.h"
 #include "qml/Editude/editudeannotationmodel.h"
 #include "qml/Editude/editudepresencemodel.h"
 
@@ -44,22 +48,29 @@ public:
     muse::modularity::IContextSetup* newContext(const muse::modularity::ContextPtr& ctx) const override;
 };
 
-class EditudeModuleContext : public muse::modularity::IContextSetup, public muse::async::Asyncable
+namespace internal { class EditudeUiActions; }
+
+class EditudeModuleContext : public muse::modularity::IContextSetup, public muse::async::Asyncable, public muse::actions::Actionable
 {
     muse::ContextInject<mu::context::IGlobalContext> m_globalContext{ iocContext() };
+    muse::ContextInject<muse::actions::IActionsDispatcher> m_dispatcher{ iocContext() };
+    muse::ContextInject<muse::ui::IUiActionsRegister> m_actionsRegister{ iocContext() };
+    muse::ContextInject<mu::appshell::ISessionsManager> m_sessionsManager{ iocContext() };
 
 public:
     EditudeModuleContext(const muse::modularity::ContextPtr& ctx)
         : muse::modularity::IContextSetup(ctx) {}
 
     void registerExports() override;
+    void resolveImports() override;
     void onInit(const muse::IApplication::RunMode& mode) override;
     void onDeinit() override;
 
 private:
     std::shared_ptr<internal::EditudeService> m_service;
-    std::shared_ptr<internal::EditudePresenceModel> m_presenceModel;
-    std::shared_ptr<internal::EditudeAnnotationModel> m_annotationModel;
+    std::shared_ptr<internal::EditudeUiActions> m_uiActions;
+    internal::EditudePresenceModel* m_presenceModel = nullptr;   // application-scoped singleton
+    internal::EditudeAnnotationModel* m_annotationModel = nullptr; // application-scoped singleton
 #ifdef MUE_BUILD_EDITUDE_TEST_SERVER
     std::unique_ptr<internal::EditudeTestServer> m_testServer;
 #endif

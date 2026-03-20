@@ -45,7 +45,6 @@ FocusScope {
 
     property alias isNavigatorVisible: notationNavigator.visible
     property alias isBraillePanelVisible: brailleViewLoader.active
-    property alias isAnnotationPanelVisible: annotationPanelLoader.active  // [editude]
     property alias isMainView: notationView.isMainView
 
     property alias defaultNavigationControl: fakeNavCtrl
@@ -85,6 +84,12 @@ FocusScope {
         }
 
         SeparatorLine { visible: tabPanel.visible }
+
+        /** [editude] — row: score split + optional annotations side panel */
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 0
 
         SplitView {
             id: splitView
@@ -296,26 +301,6 @@ FocusScope {
                 }
             }
 
-            /** [editude] */
-            Loader {
-                id: annotationPanelLoader
-
-                active: false
-                visible: active
-
-                SplitView.preferredWidth: 260
-                SplitView.minimumWidth: 180
-                SplitView.fillHeight: true
-
-                sourceComponent: AnnotationSidePanel {
-                    onAnnotationSelected: function(annotationId) {
-                        // Future: scroll notation view to the annotation's beat range.
-                        // For now, the panel selection is sufficient to identify the annotation.
-                    }
-                }
-            }
-            /** [/editude] */
-
             Component {
                 id: navigatorComp
 
@@ -363,6 +348,32 @@ FocusScope {
                 ]
             }
         }
+
+        /** [editude] — annotations side panel, right of the score */
+
+        Rectangle {
+            id: editudeSeparator
+            Layout.fillHeight: true
+            Layout.preferredWidth: 1
+            color: ui.theme.strokeColor
+            visible: EditudeAnnotationModel.panelVisible
+        }
+
+        AnnotationSidePanel {
+            id: annotationPanel
+
+            Layout.preferredWidth: 260
+            Layout.minimumWidth: 180
+            Layout.fillHeight: true
+            visible: EditudeAnnotationModel.panelVisible
+
+            onAnnotationSelected: function(annotationId) {
+                // Future: scroll notation view to the annotation's beat range.
+            }
+        }
+        /** [/editude] */
+
+        } /** [/editude] — close RowLayout wrapping splitView + annotations */
 
         SearchPopup {
             id: searchPopup

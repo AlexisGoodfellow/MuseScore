@@ -32,6 +32,8 @@ target_sources(editude PRIVATE
     internal/scoreapplicator.cpp
     internal/presenceoverlay.h
     internal/presenceoverlay.cpp
+    internal/editudeuiactions.h
+    internal/editudeuiactions.cpp
 )
 
 # Model headers live in the QML module directory; expose them to editude

@@ -22,7 +22,6 @@
 
 #include <QAbstractListModel>
 #include <QColor>
-#include <QJSEngine>
 #include <QQmlEngine>
 #include <QRectF>
 #include <QString>
@@ -52,8 +51,6 @@ namespace mu::editude::internal {
 class EditudePresenceModel : public QAbstractListModel
 {
     Q_OBJECT
-    QML_ELEMENT
-    QML_SINGLETON
 
     Q_PROPERTY(QString toastText READ toastText NOTIFY toastTextChanged)
 
@@ -65,9 +62,8 @@ public:
 
     explicit EditudePresenceModel(QObject* parent = nullptr);
 
-    // Qt 6 QML_SINGLETON factory — returns the C++-created instance so that
-    // both EditudeService and QML operate on the same object.
-    static EditudePresenceModel* create(QQmlEngine*, QJSEngine*);
+    // Returns the application-scoped singleton.  Creates it on first call.
+    static EditudePresenceModel* instance();
 
     // Called by EditudeService when presence data changes.
     // canvasData: list of (colour, list-of-canvas-rects) per contributor cursor.

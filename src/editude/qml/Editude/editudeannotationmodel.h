@@ -21,7 +21,6 @@
 #pragma once
 
 #include <QAbstractListModel>
-#include <QJSEngine>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QQmlEngine>
@@ -55,8 +54,8 @@ namespace mu::editude::internal {
 class EditudeAnnotationModel : public QAbstractListModel
 {
     Q_OBJECT
-    QML_ELEMENT
-    QML_SINGLETON
+
+    Q_PROPERTY(bool panelVisible READ panelVisible WRITE setPanelVisible NOTIFY panelVisibleChanged)
 
 public:
     enum Roles {
@@ -76,9 +75,8 @@ public:
 
     explicit EditudeAnnotationModel(QObject* parent = nullptr);
 
-    // Qt 6 QML_SINGLETON factory — returns the C++-created instance so that
-    // both EditudeService and QML operate on the same object.
-    static EditudeAnnotationModel* create(QQmlEngine*, QJSEngine*);
+    // Returns the application-scoped singleton.  Creates it on first call.
+    static EditudeAnnotationModel* instance();
 
     // Replace all annotations (called after REST fetch on project join).
     void loadFromJson(const QJsonArray& annotations);
@@ -89,10 +87,17 @@ public:
     // Increment the reply count for the given annotation UUID.
     void incrementReplyCount(const QString& annotationId);
 
+    // Panel visibility toggle (driven by toolbar action).
+    bool panelVisible() const { return m_panelVisible; }
+    void setPanelVisible(bool visible);
+
     // QAbstractListModel interface
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
+
+signals:
+    void panelVisibleChanged();
 
 private:
     struct Row {
@@ -113,6 +118,7 @@ private:
     static Row rowFromJson(const QJsonObject& obj);
 
     QVector<Row> m_rows;
+    bool m_panelVisible = true;
 
     static EditudeAnnotationModel* s_instance;
 };

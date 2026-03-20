@@ -3138,7 +3138,9 @@ const muse::ui::ToolConfig& NotationUiActions::defaultNoteInputBarConfig()
             { "voice-1", true },
             { "voice-2", true },
             { "voice-3", false },
-            { "voice-4", false }
+            { "voice-4", false },
+            { "", true },                        // [editude]
+            { "toggle-annotations", true }       // [editude]
         };
     }
     return config;

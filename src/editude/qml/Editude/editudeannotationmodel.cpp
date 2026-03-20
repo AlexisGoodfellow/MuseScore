@@ -19,6 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "editudeannotationmodel.h"
+#include "log.h"
 
 using namespace mu::editude::internal;
 
@@ -32,10 +33,20 @@ EditudeAnnotationModel::EditudeAnnotationModel(QObject* parent)
     }
 }
 
-EditudeAnnotationModel* EditudeAnnotationModel::create(QQmlEngine*, QJSEngine*)
+void EditudeAnnotationModel::setPanelVisible(bool visible)
 {
-    Q_ASSERT(s_instance);
-    QJSEngine::setObjectOwnership(s_instance, QJSEngine::CppOwnership);
+    if (m_panelVisible == visible) {
+        return;
+    }
+    m_panelVisible = visible;
+    emit panelVisibleChanged();
+}
+
+EditudeAnnotationModel* EditudeAnnotationModel::instance()
+{
+    if (!s_instance) {
+        s_instance = new EditudeAnnotationModel();
+    }
     return s_instance;
 }
 

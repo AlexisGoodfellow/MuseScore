@@ -67,6 +67,12 @@ void PaletteScoreProvider::init()
 
 void PaletteScoreProvider::deinit()
 {
+    if (m_paletteScore) {
+        // Null m_score on the entire palette tree before deleting. Palette cells
+        // (owned by PaletteProvider) may outlive this Score and their destructors
+        // would otherwise dereference the dangling m_score pointer.
+        m_paletteScore->setScore(nullptr);
+    }
     delete m_paletteScore;
     m_paletteScore = nullptr;
 }
