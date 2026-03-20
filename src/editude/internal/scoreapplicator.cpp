@@ -1363,6 +1363,8 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("RemoveTwoNoteTremolo")) return applyRemoveTwoNoteTremolo(score, payload);
 
     // Tier 4 — navigation marks
+    if (type == QLatin1String("SetStartRepeat")) return applySetStartRepeat(score, payload);
+    if (type == QLatin1String("SetEndRepeat"))   return applySetEndRepeat(score, payload);
     if (type == QLatin1String("InsertVolta"))  return applyInsertVolta(score, payload);
     if (type == QLatin1String("RemoveVolta"))  return applyRemoveVolta(score, payload);
     if (type == QLatin1String("InsertMarker")) return applyInsertMarker(score, payload);
@@ -3075,6 +3077,47 @@ bool ScoreApplicator::applyRemoveTwoNoteTremolo(Score* score, const QJsonObject&
 // ---------------------------------------------------------------------------
 // Tier 4 — navigation marks
 // ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applySetStartRepeat(Score* score, const QJsonObject& op)
+{
+    const QJsonObject beatObj = op["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applySetStartRepeat: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    const bool enabled = op["enabled"].toBool(true);
+    score->startCmd(TranslatableString("undoableAction", "Set start repeat"));
+    measure->undoChangeProperty(Pid::REPEAT_START, enabled);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applySetEndRepeat(Score* score, const QJsonObject& op)
+{
+    const QJsonObject beatObj = op["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applySetEndRepeat: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    const bool enabled = op["enabled"].toBool(true);
+    const int count = op["count"].toInt(2);
+
+    score->startCmd(TranslatableString("undoableAction", "Set end repeat"));
+    measure->undoChangeProperty(Pid::REPEAT_END, enabled);
+    if (enabled) {
+        measure->undoChangeProperty(Pid::REPEAT_COUNT, count);
+    }
+    score->endCmd();
+    return true;
+}
 
 bool ScoreApplicator::applyInsertVolta(Score* score, const QJsonObject& op)
 {

@@ -158,6 +158,8 @@ private:
     Reply actionRemoveTwoNoteTremolo(const QJsonObject& body);
 
     // Tier 4 — navigation marks
+    Reply actionSetStartRepeat(const QJsonObject& body);
+    Reply actionSetEndRepeat(const QJsonObject& body);
     Reply actionInsertVolta(const QJsonObject& body);
     Reply actionRemoveVolta(const QJsonObject& body);
     Reply actionInsertMarker(const QJsonObject& body);
@@ -212,6 +214,7 @@ private:
     QJsonObject serializePartStaffTexts(mu::engraving::Part* part);
     QJsonObject serializeScoreSystemTexts();
     QJsonObject serializeScoreRehearsalMarks();
+    QJsonArray  serializeScoreRepeatBarlines();
     QJsonObject serializeScoreVoltas();
     QJsonObject serializeScoreMarkers();
     QJsonObject serializeScoreJumps();

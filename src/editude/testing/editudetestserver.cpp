@@ -287,6 +287,8 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     if (action == QLatin1String("add_rehearsal_mark"))    return actionAddRehearsalMark(body);
     if (action == QLatin1String("set_rehearsal_mark"))    return actionSetRehearsalMark(body);
     if (action == QLatin1String("remove_rehearsal_mark")) return actionRemoveRehearsalMark(body);
+    if (action == QLatin1String("set_start_repeat"))       return actionSetStartRepeat(body);
+    if (action == QLatin1String("set_end_repeat"))         return actionSetEndRepeat(body);
     if (action == QLatin1String("insert_volta"))          return actionInsertVolta(body);
     if (action == QLatin1String("remove_volta"))        return actionRemoveVolta(body);
     if (action == QLatin1String("insert_marker"))       return actionInsertMarker(body);
@@ -590,7 +592,7 @@ QJsonObject EditudeTestServer::serializeScore()
         { "chord_symbols",    serializeScoreChordSymbols() },
         { "system_texts",     serializeScoreSystemTexts() },
         { "rehearsal_marks",  serializeScoreRehearsalMarks() },
-        { "repeat_barlines",  QJsonArray() },
+        { "repeat_barlines",  serializeScoreRepeatBarlines() },
         { "voltas",           serializeScoreVoltas() },
         { "markers",          serializeScoreMarkers() },
         { "jumps",            serializeScoreJumps() },
@@ -1651,6 +1653,29 @@ QJsonObject EditudeTestServer::serializePartLyricsMap(Part* part)
 // ---------------------------------------------------------------------------
 // Tier 4 serialization helpers
 // ---------------------------------------------------------------------------
+
+QJsonArray EditudeTestServer::serializeScoreRepeatBarlines()
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonArray arr;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        if (m->repeatStart()) {
+            QJsonObject entry;
+            entry["beat"]  = beatJson(m->tick());
+            entry["side"]  = QStringLiteral("start");
+            entry["count"] = 2;
+            arr.append(entry);
+        }
+        if (m->repeatEnd()) {
+            QJsonObject entry;
+            entry["beat"]  = beatJson(m->tick());
+            entry["side"]  = QStringLiteral("end");
+            entry["count"] = m->repeatCount();
+            arr.append(entry);
+        }
+    }
+    return arr;
+}
 
 QJsonObject EditudeTestServer::serializeScoreVoltas()
 {
@@ -3512,6 +3537,59 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveRehearsalMark(const QJso
 // ---------------------------------------------------------------------------
 // Tier 4 action handlers
 // ---------------------------------------------------------------------------
+
+EditudeTestServer::Reply EditudeTestServer::actionSetStartRepeat(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int beatNum = body["beat_num"].toInt(0);
+    const int beatDen = body["beat_den"].toInt(1);
+    const Fraction tick(beatNum, beatDen);
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(400, QString("no measure at tick %1/%2").arg(beatNum).arg(beatDen));
+    }
+
+    const bool enabled = body.value("enabled").toBool(true);
+    score->startCmd(TranslatableString("test", "set start repeat"));
+    measure->undoChangeProperty(Pid::REPEAT_START, enabled);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetEndRepeat(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int beatNum = body["beat_num"].toInt(0);
+    const int beatDen = body["beat_den"].toInt(1);
+    const Fraction tick(beatNum, beatDen);
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        return errorResponse(400, QString("no measure at tick %1/%2").arg(beatNum).arg(beatDen));
+    }
+
+    const bool enabled = body.value("enabled").toBool(true);
+    const int count = body.value("count").toInt(2);
+
+    score->startCmd(TranslatableString("test", "set end repeat"));
+    measure->undoChangeProperty(Pid::REPEAT_END, enabled);
+    if (enabled) {
+        measure->undoChangeProperty(Pid::REPEAT_COUNT, count);
+    }
+    score->endCmd();
+
+    return okResponse();
+}
 
 EditudeTestServer::Reply EditudeTestServer::actionInsertVolta(const QJsonObject& body)
 {

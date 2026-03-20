@@ -181,6 +181,8 @@ private:
     bool applyRemoveTwoNoteTremolo(mu::engraving::Score* score, const QJsonObject& payload);
 
     // Tier 4 — navigation marks
+    bool applySetStartRepeat(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetEndRepeat(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyInsertVolta(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveVolta(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyInsertMarker(mu::engraving::Score* score, const QJsonObject& payload);

@@ -275,6 +275,10 @@ private:
                                                const QString& endEventUuid);
     static QJsonObject buildRemoveTwoNoteTremolo(const QString& uuid);
 
+    // Tier 4 builders — repeat barlines.
+    static QJsonObject buildSetStartRepeat(const mu::engraving::Fraction& tick, bool enabled);
+    static QJsonObject buildSetEndRepeat(const mu::engraving::Fraction& tick, bool enabled, int count);
+
     // Tier 4 builders — volta.
     static QJsonObject buildInsertVolta(mu::engraving::EngravingObject* volta,
                                         const QString& uuid);

@@ -1627,7 +1627,29 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 31: SetScoreMetadata ─────────────────────────────────────────
+    // ── Pass 31: SetStartRepeat / SetEndRepeat ─────────────────────────────
+    if (changedPropertyIdSet.count(Pid::REPEAT_START)
+        || changedPropertyIdSet.count(Pid::REPEAT_END)
+        || changedPropertyIdSet.count(Pid::REPEAT_COUNT)) {
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || obj->type() != ElementType::MEASURE) {
+                continue;
+            }
+            if (!cmds.count(CommandType::ChangeProperty)) {
+                continue;
+            }
+            auto* m = static_cast<Measure*>(obj);
+            if (changedPropertyIdSet.count(Pid::REPEAT_START)) {
+                ops.append(buildSetStartRepeat(m->tick(), m->repeatStart()));
+            }
+            if (changedPropertyIdSet.count(Pid::REPEAT_END)
+                || changedPropertyIdSet.count(Pid::REPEAT_COUNT)) {
+                ops.append(buildSetEndRepeat(m->tick(), m->repeatEnd(), m->repeatCount()));
+            }
+        }
+    }
+
+    // ── Pass 32: SetScoreMetadata ─────────────────────────────────────────
     // changedMetaTags contains only the tags that changed in this transaction
     // (pre/post diff performed in EditudeService::onScoreChanges).
     if (!changedMetaTags.isEmpty()) {
@@ -1653,7 +1675,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 32: SetMeasureLen (pickup / anacrusis measures) ────────────
+    // ── Pass 33: SetMeasureLen (pickup / anacrusis measures) ────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::MEASURE) {
             continue;
@@ -2836,6 +2858,29 @@ QJsonObject OperationTranslator::buildRemoveTwoNoteTremolo(const QString& uuid)
     QJsonObject payload;
     payload["type"] = QStringLiteral("RemoveTwoNoteTremolo");
     payload["id"]   = uuid;
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 4 builders — repeat barlines
+// ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildSetStartRepeat(const Fraction& tick, bool enabled)
+{
+    QJsonObject payload;
+    payload["type"]    = QStringLiteral("SetStartRepeat");
+    payload["beat"]    = beatJson(tick);
+    payload["enabled"] = enabled;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetEndRepeat(const Fraction& tick, bool enabled, int count)
+{
+    QJsonObject payload;
+    payload["type"]    = QStringLiteral("SetEndRepeat");
+    payload["beat"]    = beatJson(tick);
+    payload["enabled"] = enabled;
+    payload["count"]   = count;
     return payload;
 }
 
