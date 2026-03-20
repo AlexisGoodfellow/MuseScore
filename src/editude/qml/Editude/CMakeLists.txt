@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-only
-# MuseScore-Studio-CLA-applies
 #
-# MuseScore Studio
-# Music Composition & Notation
+# Copyright (C) 2026 Alexis Goodfellow
 #
-# Copyright (C) 2026 MuseScore Limited
+# CREATED EXCLUSIVELY FOR EDITUDE PURPOSES.
+# EDITUDE HAS NO BUSINESS AFFILIATION WITH MUSESCORE.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 3 as
