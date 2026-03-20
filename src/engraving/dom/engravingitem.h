@@ -107,7 +107,7 @@ enum class ElementFlag {
     REPEAT_END             = 0x00001000,
     REPEAT_START           = 0x00002000,
     REPEAT_JUMP            = 0x00004000,
-    IRREGULAR              = 0x00008000,
+    EXCLUDE_FROM_NUMBERING = 0x00008000,
     LINE_BREAK             = 0x00010000,
     PAGE_BREAK             = 0x00020000,
     SECTION_BREAK          = 0x00040000,
@@ -483,7 +483,6 @@ public:
 
     virtual void setParenthesesMode(const ParenthesesMode& v, bool addToLinked = true, bool generated = false);
     ParenthesesMode parenthesesMode() const;
-    inline bool bothParentheses() const { return m_leftParenthesis && m_rightParenthesis; }
     inline Parenthesis* paren(const DirectionH& dir) const { return dir == DirectionH::LEFT ? m_leftParenthesis : m_rightParenthesis; }
     Parenthesis* leftParen() const { return m_leftParenthesis; }
     Parenthesis* rightParen() const { return m_rightParenthesis; }

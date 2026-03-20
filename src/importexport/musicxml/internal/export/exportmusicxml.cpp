@@ -291,11 +291,11 @@ public:
     bool isFirstActualMeasure() const;
 private:
     void init();
-    int m_measureNo = 0;                             // number of next regular measure
-    int m_measureNoOffset = 0;                       // measure number offset
-    int m_irregularMeasureNo = 0;                    // number of next irregular measure
-    int m_pickupMeasureNo = 0;                       // number of next pickup measure
-    String m_cachedAttributes;                  // attributes calculated by updateForMeasure()
+    int m_measureNumber = 0;          // number of next regular measure
+    int m_measureNumberOffset = 0;    // measure number offset
+    int m_irregularMeasureNumber = 0; // number of next irregular measure
+    int m_pickupMeasureNumber = 0;    // number of next pickup measure
+    String m_cachedAttributes;        // attributes calculated by updateForMeasure()
 };
 
 //---------------------------------------------------------
@@ -5829,6 +5829,51 @@ void ExportMusicXml::textLine(TextLineBase const* const tl, staff_idx_t staff, c
 }
 
 //---------------------------------------------------------
+//   writeWordsAndSymbolsXml
+//   Writes a string that may contain <sym>...</sym> elements as words and symbol elements.
+//---------------------------------------------------------
+
+static void writeWordsAndSymbolsXml(mu::engraving::XmlWriter& xml, const mu::engraving::String& words, const mu::engraving::String& attrs)
+{
+    // Write symbols as separate elements, the rest as words.
+    static const std::wregex symRegex(LR"(<sym>([^<>]+)</sym>)");
+    std::wstring wwords = words.toStdWString();
+    std::wsregex_iterator it(wwords.begin(), wwords.end(), symRegex);
+    std::wsregex_iterator end;
+    size_t lastPos = 0;
+    bool foundSym = false;
+    while (it != end) {
+        foundSym = true;
+        size_t matchPos = it->position();
+        size_t matchLen = it->length();
+        // Text before <sym>
+        if (matchPos > lastPos) {
+            mu::engraving::String before = mu::engraving::String::fromStdWString(wwords.substr(lastPos, matchPos - lastPos));
+            if (!before.trimmed().isEmpty()) {
+                xml.tagRaw(u"words" + attrs, before.trimmed());
+            }
+        }
+        mu::engraving::String symName = mu::engraving::String::fromStdWString((*it)[1].str());
+        if (!symName.trimmed().isEmpty()) {
+            xml.tagRaw(u"symbol" + attrs, symName.trimmed());
+        }
+        lastPos = matchPos + matchLen;
+        ++it;
+    }
+    // Text after last <sym>
+    if (foundSym && lastPos < wwords.size()) {
+        mu::engraving::String after = mu::engraving::String::fromStdWString(wwords.substr(lastPos));
+        if (!after.trimmed().isEmpty()) {
+            xml.tagRaw(u"words" + attrs, after.trimmed());
+        }
+    }
+    // If no <sym> found
+    if (!foundSym) {
+        xml.tagRaw(u"words" + attrs, words);
+    }
+}
+
+//---------------------------------------------------------
 //   dynamic
 //---------------------------------------------------------
 
@@ -6074,7 +6119,7 @@ static void directionJump(XmlWriter& xml, const Jump* const jp)
         xml.startElement("direction-type");
         String attrs = color2xml(jp);
         attrs += ExportMusicXml::positioningAttributes(jp);
-        xml.tagRaw(u"words" + attrs, words);
+        writeWordsAndSymbolsXml(xml, words, attrs);
         xml.endElement();
         if (!sound.empty()) {
             xml.tagRaw(u"sound " + sound);
@@ -6215,7 +6260,7 @@ static void directionMarker(XmlWriter& xml, const Marker* const m, const std::ve
             xml.tagRaw(type + attrs);
         }
         if (!words.empty()) {
-            xml.tagRaw(u"words" + attrs, words);
+            writeWordsAndSymbolsXml(xml, words, attrs);
         }
         xml.endElement();
         if (!sound.empty()) {
@@ -8080,10 +8125,10 @@ MeasureNumberStateHandler::MeasureNumberStateHandler()
 
 void MeasureNumberStateHandler::init()
 {
-    m_measureNo = 1;
-    m_measureNoOffset = 0;
-    m_irregularMeasureNo = 1;
-    m_pickupMeasureNo = 1;
+    m_measureNumber = 1;
+    m_measureNumberOffset = 0;
+    m_irregularMeasureNumber = 1;
+    m_pickupMeasureNumber = 1;
 }
 
 void MeasureNumberStateHandler::updateForMeasure(const Measure* const m)
@@ -8103,16 +8148,16 @@ void MeasureNumberStateHandler::updateForMeasure(const Measure* const m)
     }
 
     // update measure numbers and cache result
-    m_measureNoOffset = m->noOffset();
-    m_measureNo += m_measureNoOffset;
+    m_measureNumberOffset = m->measureNumberOffset();
+    m_measureNumber += m_measureNumberOffset;
     m_cachedAttributes = u" number=";
-    if ((m_irregularMeasureNo + m_measureNo) == 2 && m->irregular()) {
+    if ((m_irregularMeasureNumber + m_measureNumber) == 2 && m->excludeFromNumbering()) {
         m_cachedAttributes += u"\"0\" implicit=\"yes\"";
-        m_pickupMeasureNo++;
-    } else if (m->irregular()) {
-        m_cachedAttributes += String(u"\"X%1\" implicit=\"yes\"").arg(m_irregularMeasureNo++);
+        m_pickupMeasureNumber++;
+    } else if (m->excludeFromNumbering()) {
+        m_cachedAttributes += String(u"\"X%1\" implicit=\"yes\"").arg(m_irregularMeasureNumber++);
     } else {
-        m_cachedAttributes += String(u"\"%1\"").arg(m_measureNo++);
+        m_cachedAttributes += String(u"\"%1\"").arg(m_measureNumber++);
     }
 }
 
@@ -8123,7 +8168,7 @@ String MeasureNumberStateHandler::measureNumber() const
 
 bool MeasureNumberStateHandler::isFirstActualMeasure() const
 {
-    return (m_irregularMeasureNo + (m_measureNo - m_measureNoOffset) + m_pickupMeasureNo) == 4;
+    return (m_irregularMeasureNumber + (m_measureNumber - m_measureNumberOffset) + m_pickupMeasureNumber) == 4;
 }
 
 //---------------------------------------------------------
@@ -8953,6 +8998,12 @@ void ExportMusicXml::harmony(Harmony const* const h, FretDiagram const* const fd
     }
     if (!h->isStyled(Pid::PLACEMENT)) {
         harmonyAttrs.emplace_back(std::make_pair("placement", TConv::toXml(h->placement())));
+    }
+    if (!h->isStyled(Pid::FONT_FACE)) {
+        harmonyAttrs.emplace_back(std::make_pair("font-family", h->getProperty(Pid::FONT_FACE).value<String>()));
+    }
+    if (!h->isStyled(Pid::FONT_SIZE)) {
+        harmonyAttrs.emplace_back(std::make_pair("font-size", h->getProperty(Pid::FONT_SIZE).toReal()));
     }
     harmonyAttrs.emplace_back(std::make_pair("print-frame", h->hasFrame() ? "yes" : "no"));     // .append(relative));
     if (!h->visible()) {

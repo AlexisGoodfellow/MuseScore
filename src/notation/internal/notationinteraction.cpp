@@ -481,14 +481,10 @@ bool NotationInteraction::doShowShadowNote(ShadowNote& shadowNote, ShadowNotePar
     const Staff* staff = score()->staff(position.staffIdx);
 
     mu::engraving::Segment* segment = position.segment;
-    qreal segmentSkylineTopY = 0;
-    qreal segmentSkylineBottomY = 0;
 
     mu::engraving::Segment* shadowNoteActualSegment = position.segment->prev1enabled();
     if (shadowNoteActualSegment) {
         segment = shadowNoteActualSegment;
-        segmentSkylineTopY = shadowNoteActualSegment->elementsTopOffsetFromSkyline(position.staffIdx);
-        segmentSkylineBottomY = shadowNoteActualSegment->elementsBottomOffsetFromSkyline(position.staffIdx);
     }
 
     Fraction tick = segment->tick();
@@ -554,7 +550,7 @@ bool NotationInteraction::doShowShadowNote(ShadowNote& shadowNote, ShadowNotePar
         mu::engraving::Rest* rest = mu::engraving::Factory::createRest(s->dummy()->segment(), params.duration.type());
         rest->setTicks(params.duration.fraction());
         symNotehead = rest->getSymbol(params.duration.type(), 0, staff->lines(position.segment->tick()));
-        shadowNote.setState(symNotehead, params.duration, true, segmentSkylineTopY, segmentSkylineBottomY, params.position.beyondScore);
+        shadowNote.setState(symNotehead, params.duration, true, params.position.beyondScore);
         delete rest;
     } else {
         if (mu::engraving::NoteHeadGroup::HEAD_CUSTOM == noteheadGroup) {
@@ -563,8 +559,8 @@ bool NotationInteraction::doShowShadowNote(ShadowNote& shadowNote, ShadowNotePar
             symNotehead = Note::noteHead(0, noteheadGroup, noteHead);
         }
 
-        shadowNote.setState(symNotehead, params.duration, false, segmentSkylineTopY, segmentSkylineBottomY,
-                            params.position.beyondScore, params.accidentalType, params.articulationIds);
+        shadowNote.setState(symNotehead, params.duration, false, params.position.beyondScore, params.accidentalType,
+                            params.articulationIds);
     }
 
     score()->renderer()->layoutItem(&shadowNote);
@@ -687,7 +683,7 @@ std::vector<EngravingItem*> NotationInteraction::hitElements(const PointF& pos, 
 
     PointF posOnPage = pos - page->pos();
 
-    if (isTextEditingStarted()) {
+    if (isTextEditingStarted() && page == m_editData.element->findAncestor(ElementType::PAGE)) {
         auto editW = width * 2;
         RectF editHitRect(posOnPage.x() - editW, posOnPage.y() - editW, 2.0 * editW, 2.0 * editW);
         if (m_editData.element->intersects(editHitRect)) {
@@ -7791,9 +7787,7 @@ void NotationInteraction::navigateToNearText(MoveDirection direction)
         }
     } else {
         // add new text if no existing element to edit
-        // TODO: for tempo text, mscore->addTempo() could be called
-        // but it pre-fills the text
-        // would be better to create empty tempo element
+        // TODO: for tempo text, would be better to create empty tempo element
         if (type != ElementType::TEMPO_TEXT) {
             addTextToItem(textStyleType, el);
         }

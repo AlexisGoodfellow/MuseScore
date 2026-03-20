@@ -4,6 +4,8 @@
 #include <vector>
 #include <memory>
 
+#include <QTimer>
+
 #include "global/internal/baseapplication.h"
 #include "../cmdoptions.h"
 
@@ -13,8 +15,9 @@
 #include "modularity/ioc.h"
 #include "multiwindows/imultiwindowsprovider.h"
 #include "appshell/iappshellconfiguration.h"
-#include "appshell/internal/istartupscenario.h"
 #include "importexport/guitarpro/iguitarproconfiguration.h"
+
+class QQuickWindow;
 
 namespace mu::appshell {
 class SplashScreen;
@@ -43,7 +46,15 @@ public:
 private:
     void applyCommandLineOptions(const CmdOptions& options);
 
-    std::vector<muse::modularity::IContextSetup*>& contextSetups(const muse::modularity::ContextPtr& ctx);
+    struct Context {
+        muse::modularity::ContextPtr ctx;
+        std::vector<muse::modularity::IContextSetup*> setups;
+        QQuickWindow* window = nullptr;
+
+        bool isValid() const { return ctx != nullptr && !setups.empty(); }
+    };
+
+    Context& context(const muse::modularity::ContextPtr& ctx);
 
     CmdOptions m_options;
 
@@ -52,11 +63,7 @@ private:
     //! NOTE Separately to initialize logger and profiler as early as possible
     muse::GlobalModule* m_globalModule = nullptr;
     std::vector<muse::modularity::IModuleSetup*> m_modules;
-
-    struct Context {
-        muse::modularity::ContextPtr ctx;
-        std::vector<muse::modularity::IContextSetup*> setups;
-    };
+    QTimer m_delayedInitTimer;
 
     std::vector<Context> m_contexts;
 };

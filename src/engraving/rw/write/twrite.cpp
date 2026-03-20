@@ -1549,6 +1549,11 @@ void TWrite::write(const GuitarBend* item, XmlWriter& xml, WriteContext& ctx)
     xml.tag("guitarBendType", static_cast<int>(item->bendType()));
     xml.tag("bendStartTimeFactor", item->startTimeFactor());
     xml.tag("bendEndTimeFactor", item->endTimeFactor());
+
+    if (item->targetTimeFactor().has_value()) {
+        xml.tag("bendTargetTimeFactor", item->targetTimeFactor().value());
+    }
+
     writeProperty(item, xml, Pid::DIRECTION);
     writeProperty(item, xml, Pid::BEND_SHOW_HOLD_LINE);
     if (item->isDive()) {
@@ -3089,11 +3094,11 @@ void TWrite::write(const System* item, XmlWriter& xml, WriteContext& ctx)
 void TWrite::write(const SystemDivider* item, XmlWriter& xml, WriteContext& ctx)
 {
     xml.startElement(item, { { "type", (item->dividerType() == SystemDividerType::LEFT ? "left" : "right") } });
-    if (item->scoreFont()) {
-        xml.tag("font", item->scoreFont()->name());
-        writeProperty(item, xml, Pid::SYMBOLS_SIZE);
-        writeProperty(item, xml, Pid::SYMBOL_ANGLE);
-    }
+
+    writeProperty(item, xml, Pid::SCORE_FONT);
+    writeProperty(item, xml, Pid::SYMBOLS_SIZE);
+    writeProperty(item, xml, Pid::SYMBOL_ANGLE);
+
     writeProperties(static_cast<const BSymbol*>(item), xml, ctx);
     xml.endElement();
 }
