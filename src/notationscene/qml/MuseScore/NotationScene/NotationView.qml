@@ -31,7 +31,7 @@ import Muse.UiComponents
 import MuseScore.NotationScene
 import MuseScore.Braille
 import MuseScore.Playback
-import Editude 1.0
+import Editude 1.0  // [editude]
 
 import "internal"
 
@@ -45,7 +45,7 @@ FocusScope {
 
     property alias isNavigatorVisible: notationNavigator.visible
     property alias isBraillePanelVisible: brailleViewLoader.active
-    property alias isAnnotationPanelVisible: annotationPanelLoader.active
+    property alias isAnnotationPanelVisible: annotationPanelLoader.active  // [editude]
     property alias isMainView: notationView.isMainView
 
     property alias defaultNavigationControl: fakeNavCtrl
@@ -227,10 +227,12 @@ FocusScope {
                         notationViewMatrix: notationView.matrix
                     }
 
+                    /** [editude] */
                     EditudeNotationOverlay {
                         anchors.fill: parent
                         enabled: false
                     }
+                    /** [/editude] */
                 }
 
                 onPinchToZoom: function(scale, pos) {
@@ -294,6 +296,7 @@ FocusScope {
                 }
             }
 
+            /** [editude] */
             Loader {
                 id: annotationPanelLoader
 
@@ -311,6 +314,7 @@ FocusScope {
                     }
                 }
             }
+            /** [/editude] */
 
             Component {
                 id: navigatorComp

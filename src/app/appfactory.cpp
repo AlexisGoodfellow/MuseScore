@@ -142,9 +142,11 @@
 
 #include "context/contextmodule.h"
 
+/** [editude] */
 #ifdef MUE_BUILD_EDITUDE_MODULE
 #include "editude/editudemodule.h"
 #endif
+/** [/editude] */
 
 #ifdef MUE_BUILD_CONVERTER_MODULE
 #include "converter/convertermodule.h"
@@ -414,9 +416,11 @@ std::shared_ptr<muse::IApplication> AppFactory::newGuiApp(const CmdOptions& opti
     app->addModule(new mu::print::PrintModule());
 #endif
     app->addModule(new mu::project::ProjectModule());
+/** [editude] */
 #ifdef MUE_BUILD_EDITUDE_MODULE
     app->addModule(new mu::editude::EditudeModule());
 #endif
+/** [/editude] */
     app->addModule(new muse::update::UpdateModule());
     app->addModule(new muse::workspace::WorkspaceModule());
 

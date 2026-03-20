@@ -28,6 +28,7 @@ else()
     set(MAYBE_BRAILLE_QML)
 endif()
 
+## [editude] ##
 if (MUE_BUILD_EDITUDE_MODULE)
     set(MAYBE_EDITUDE_QML
         TARGET editude_qml
@@ -35,6 +36,7 @@ if (MUE_BUILD_EDITUDE_MODULE)
 else()
     set(MAYBE_EDITUDE_QML)
 endif()
+## [/editude] ##
 
 qt_add_qml_module(notationscene_qml
     URI MuseScore.NotationScene
@@ -306,7 +308,7 @@ qt_add_qml_module(notationscene_qml
     IMPORTS
         TARGET muse_ui_qml
         TARGET muse_uicomponents_qml
-        ${MAYBE_EDITUDE_QML}
+        ${MAYBE_EDITUDE_QML}  # [editude]
         ${MAYBE_BRAILLE_QML}
 )
 

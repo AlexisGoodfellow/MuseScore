@@ -77,8 +77,10 @@ option(MUE_BUILD_BRAILLE_TESTS "Build braille tests" ${MUE_BUILD_BRAILLE_MODULE}
 option(MUE_BUILD_CONVERTER_MODULE "Build converter module" ON)
 option(MUE_BUILD_CONVERTER_TESTS "Build converter tests" ${MUE_BUILD_CONVERTER_MODULE})
 
+## [editude] ##
 option(MUE_BUILD_EDITUDE_MODULE "Build editude real-time collaboration module" OFF)
 option(MUE_BUILD_EDITUDE_TESTS "Build editude tests" ${MUE_BUILD_EDITUDE_MODULE})
+## [/editude] ##
 
 option(MUE_BUILD_ENGRAVING_QML "Build engraving QML" ON)
 option(MUE_BUILD_ENGRAVING_TESTS "Build engraving tests" ON)
