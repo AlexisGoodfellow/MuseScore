@@ -23,6 +23,8 @@
 
 #include <memory>
 
+#include <QString>
+
 #include "modularity/imodulesetup.h"
 #include "global/modularity/ioc.h"
 #include "global/async/asyncable.h"
@@ -31,6 +33,7 @@
 #include "ui/iuiactionsregister.h"
 #include "context/iglobalcontext.h"
 #include "appshell/internal/isessionsmanager.h"
+#include "appshell/internal/istartupscenario.h"
 #include "qml/Editude/editudeannotationmodel.h"
 #include "qml/Editude/editudepresencemodel.h"
 
@@ -56,6 +59,7 @@ class EditudeModuleContext : public muse::modularity::IContextSetup, public muse
     muse::ContextInject<muse::actions::IActionsDispatcher> m_dispatcher{ iocContext() };
     muse::ContextInject<muse::ui::IUiActionsRegister> m_actionsRegister{ iocContext() };
     muse::ContextInject<mu::appshell::ISessionsManager> m_sessionsManager{ iocContext() };
+    muse::ContextInject<mu::appshell::IStartupScenario> m_startupScenario{ iocContext() };
 
 public:
     EditudeModuleContext(const muse::modularity::ContextPtr& ctx)
@@ -67,6 +71,7 @@ public:
     void onDeinit() override;
 
 private:
+    QString m_snapshotTmpPath;
     std::shared_ptr<internal::EditudeService> m_service;
     std::shared_ptr<internal::EditudeUiActions> m_uiActions;
     internal::EditudePresenceModel* m_presenceModel = nullptr;   // application-scoped singleton

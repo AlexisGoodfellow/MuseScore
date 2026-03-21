@@ -28,10 +28,12 @@
 #include <QJsonValue>
 #include <QMap>
 #include <QApplication>
+#include <QDir>
 #include <QHttpMultiPart>
 #include <QWindow>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QTemporaryFile>
 #include <QUrl>
 #include <QWebSocketProtocol>
 #include "project/types/projecttypes.h"
@@ -65,9 +67,13 @@ void EditudeService::setAnnotationModel(EditudeAnnotationModel* model)
     m_annotationModel = model;
 }
 
+void EditudeService::setSnapshotPath(const QString& path)
+{
+    m_snapshotPath = path;
+}
+
 void EditudeService::start()
 {
-    m_snapshotPath = QString::fromUtf8(qgetenv("EDITUDE_SNAPSHOT_PATH"));
     m_sessionUrl = QString::fromUtf8(qgetenv("EDITUDE_SESSION_URL"));
 
     if (m_sessionUrl.isEmpty()) {
@@ -107,33 +113,23 @@ void EditudeService::start()
         // called re-entrantly from inside a network reply handler.
         QTimer::singleShot(0, this, [this]() {
             openScoreForSession();
+        });
 
-            // Re-arm Interactive::m_openingObject with NOTATION page data.
-            //
-            // When MuseScore starts, the HOME page is the first to load
-            // (DockWindow::isFirstOpening == true).  DockWindow defers its
-            // notifyAboutPageLoaded() callback via async::Async::call().
-            // That deferred callback eventually calls
-            // Interactive::onOpen(PrimaryPage), which writes m_openingObject
-            // into m_stack[0] (the current URI).
-            //
-            // The problem: by the time the HOME callback fires, the NOTATION
-            // page has already opened (inside openScoreForSession above).
-            // The notation page's onOpen() already cleared m_openingObject
-            // (interactive.cpp:1133).  So the HOME callback writes an EMPTY
-            // ObjectInfo into m_stack[0], making currentUri() return an empty
-            // URI.  UiContextResolver then returns UiCtxUnknown, disabling
-            // keyboard shortcuts and toolbar actions.
-            //
-            // Fix: call Interactive::open() for the notation page again.
-            // DockWindow::loadPage() sees the notation page is already the
-            // current page and returns immediately (no page reload).  But
-            // Interactive::openFunc() has already re-set m_openingObject to
-            // NOTATION data.  When the HOME deferred callback later fires
-            // onOpen(), it picks up this NOTATION data instead of empty,
-            // keeping the URI correct.
-            if (m_currentNotation) {
+        // Listen for the startup scenario opening a page (typically HOME).
+        // If we loaded a score above, the startup scenario's HOME page will
+        // clobber our NOTATION page.  When opened() fires for HOME, we
+        // navigate back to NOTATION.  For the new-project template flow,
+        // we dispatch "file-new" instead.  Both use this single handler.
+        m_interactive()->opened().onReceive(this, [this](const muse::Uri&) {
+            if (m_fileNewPending) {
+                m_fileNewPending = false;
+                m_dispatcher()->dispatch("file-new");
+                return;
+            }
+            if (m_reclaimNotation) {
+                m_reclaimNotation = false;
                 m_interactive()->open(muse::Uri("musescore://notation"));
+                requestNotationFocus();
             }
         });
     });
@@ -175,18 +171,27 @@ bool EditudeService::eventFilter(QObject* watched, QEvent* event)
 void EditudeService::openScoreForSession()
 {
     if (!m_snapshotPath.isEmpty()) {
-        // Let MuseScore's own openProject() handle page navigation.
-        // It internally opens the notation page after loading the score,
-        // which correctly wires up the navigation context (ScoreView panel
-        // active → UiCtxProjectFocused → actions enabled).  Manually
-        // navigating first created a page-without-project state that left
-        // the navigation context stuck at UiCtxProjectOpened.
-        m_projectFiles()->openProject(
-            mu::project::ProjectFile(muse::io::path_t(m_snapshotPath)));
+        if (!m_score) {
+            // Score not loaded yet.  Open the snapshot file via MuseScore's
+            // own openProject().  It internally opens the notation page after
+            // loading the score, which correctly wires up the navigation
+            // context (ScoreView panel active → UiCtxProjectFocused → actions
+            // enabled).  openProject() fires onNotationChanged() synchronously,
+            // which sets m_score and calls bootstrapAndConnect().
+            //
+            // If the startup scenario already loaded the file (via
+            // setStartupScoreFile in registerExports), m_score is set and we
+            // skip this — no double-open.
+            m_projectFiles()->openProject(
+                mu::project::ProjectFile(muse::io::path_t(m_snapshotPath)));
+        }
         bootstrapAndConnect();
-        requestNotationFocus();
-    } else {
-        // No snapshot — this is a brand-new project.  Open MuseScore's
+        // The startup scenario will open HOME after our NOTATION page,
+        // clobbering it.  Set the flag so the opened() handler in start()
+        // navigates back to NOTATION when HOME fires.
+        m_reclaimNotation = true;
+    } else if (m_snapshotRevision == 0) {
+        // m_snapshotRevision == 0 — brand-new project.  Open MuseScore's
         // "New Score" wizard so the user can pick a template/instruments.
         // onNotationChanged() fires when they finish the wizard.
         //
@@ -194,17 +199,11 @@ void EditudeService::openScoreForSession()
         // InteractiveProvider to be fully initialized.  At this point in
         // startup, the main window has not opened yet — dispatching now
         // would crash (assertion in Interactive::onClose because the dialog
-        // was never registered in m_stack).  Wait for the first opened()
-        // signal, which fires once the startup scenario shows the HOME page.
+        // was never registered in m_stack).  The opened() handler in
+        // start() watches m_fileNewPending and dispatches "file-new" when
+        // the startup scenario shows the HOME page.
         m_needsInitialSnapshot = true;
         m_fileNewPending = true;
-        m_interactive()->opened().onReceive(this, [this](const muse::Uri&) {
-            if (!m_fileNewPending) {
-                return;
-            }
-            m_fileNewPending = false;
-            m_dispatcher()->dispatch("file-new");
-        });
     }
 }
 
@@ -778,6 +777,9 @@ void EditudeService::requestNotationFocus()
     // even if the controls were already active from a prior attempt.
     //
     // Three timed attempts cover sync, near-sync, and async page creation.
+    // These only handle OS-level window activation and MuseScore's internal
+    // navigation panel hierarchy.  Page navigation (HOME → NOTATION) is
+    // handled signal-based via the opened() handler in start().
     for (int delay : {0, 200, 500}) {
         QTimer::singleShot(delay, this, [this, delay]() {
             LOGD() << "[editude] requestNotationFocus @" << delay
@@ -1051,10 +1053,12 @@ void EditudeService::connectToSession(const QString& sessionUrl)
     m_needsInitialSnapshot = false;
     m_fileNewPending = false;
     m_fileOpenPending = false;
+    m_reclaimNotation = false;
     m_bootstrapBatchId.clear();
     m_token.clear();
     m_websocketUrl.clear();
     m_projectId.clear();
+    m_snapshotPath.clear();
     m_snapshotRevision = 0;
     m_tokenExpiry = 0;
 
@@ -1122,56 +1126,71 @@ void EditudeService::connectToSession(const QString& sessionUrl)
                     this, &EditudeService::onReconnectTimer);
         }
 
-        // Close the current project and re-open the blank score from disk.
-        // This goes through MuseScore's full document lifecycle (audio engine
-        // teardown, layout cleanup, etc.) instead of manually undoing all
-        // operations — which caused heap corruption from a data race between
-        // the main thread's undo loop and the audio engine thread.
-        //
-        // closeOpenedProject triggers async audio teardown: the PlaybackController
-        // removes the current audio sequence via an RPC to the audio engine thread.
-        // We must wait for that removal to complete before opening a new project,
-        // otherwise PlaybackController::subscribeOnAudioParamsChanges fires while
-        // stale channel subscriptions from the old sequence are still being torn
-        // down, causing an assertion failure in ChannelImpl::addReceiver.
-        //
-        // IPlayback::sequenceRemoved() fires exactly when the removeSequence RPC
-        // round-trip completes — this is the deterministic signal that audio
-        // teardown is done.
-        //
-        // onNotationChanged() fires when the new score loads — it applies
-        // bootstrap ops, opens the WebSocket, and subscribes to changes.
-        QTimer::singleShot(0, this, [this, scoreToClose]() {
-            // Mark the score as saved immediately before closing so the
-            // "Save changes?" dialog doesn't block the test environment.
-            // This must happen HERE (inside the deferred callback), not earlier —
-            // the undo stack change listener can re-dirty the score between
-            // setSaved(true) and closeOpenedProject() if there are pending
-            // change notifications in the event loop.
-            if (scoreToClose) {
-                scoreToClose->masterScore()->setSaved(true);
-            }
+        // Helper: close the current project, wait for audio teardown, then
+        // open the new score via openScoreForSession().
+        auto closeAndReopen = [this, scoreToClose]() {
+            QTimer::singleShot(0, this, [this, scoreToClose]() {
+                if (scoreToClose) {
+                    scoreToClose->masterScore()->setSaved(true);
+                }
 
-            auto oldSeqId = m_playbackController()->currentTrackSequenceId();
-            m_projectFiles()->closeOpenedProject(false);
+                auto oldSeqId = m_playbackController()->currentTrackSequenceId();
+                m_projectFiles()->closeOpenedProject(false);
 
-            if (oldSeqId >= 0) {
-                // Wait for the audio engine to finish removing the old sequence.
-                m_audioPlayback()->sequenceRemoved().onReceive(
-                    this,
-                    [this, oldSeqId](muse::audio::TrackSequenceId removedId) {
-                        if (removedId != oldSeqId) {
-                            return;  // not our sequence, keep waiting
-                        }
-                        m_audioPlayback()->sequenceRemoved().disconnect(this);
-                        openScoreForSession();
-                    },
-                    muse::async::Asyncable::Mode::SetReplace);
-            } else {
-                // No previous audio sequence — open immediately.
-                openScoreForSession();
-            }
-        });
+                if (oldSeqId >= 0) {
+                    m_audioPlayback()->sequenceRemoved().onReceive(
+                        this,
+                        [this, oldSeqId](muse::audio::TrackSequenceId removedId) {
+                            if (removedId != oldSeqId) {
+                                return;
+                            }
+                            m_audioPlayback()->sequenceRemoved().disconnect(this);
+                            openScoreForSession();
+                        },
+                        muse::async::Asyncable::Mode::SetReplace);
+                } else {
+                    openScoreForSession();
+                }
+            });
+        };
+
+        // If the project has a snapshot on the server, fetch it before
+        // closing the current project so openScoreForSession() can load it.
+        if (m_snapshotRevision > 0) {
+            QUrl snapshotUrl = deriveServerBaseUrl();
+            snapshotUrl.setPath(QString("/projects/%1/latest-snapshot").arg(m_projectId));
+
+            QNetworkRequest snapReq(snapshotUrl);
+            snapReq.setRawHeader("Authorization",
+                                 QString("Bearer %1").arg(m_token).toUtf8());
+
+            QNetworkReply* snapReply = m_nam.get(snapReq);
+            connect(snapReply, &QNetworkReply::finished, this,
+                    [this, snapReply, closeAndReopen]() {
+                snapReply->deleteLater();
+                if (snapReply->error() == QNetworkReply::NoError) {
+                    const QByteArray msczData = snapReply->readAll();
+                    QTemporaryFile tmpFile;
+                    tmpFile.setFileTemplate(
+                        QDir::tempPath() + "/editude_XXXXXX.mscz");
+                    tmpFile.setAutoRemove(false);
+                    if (tmpFile.open()) {
+                        tmpFile.write(msczData);
+                        tmpFile.close();
+                        m_snapshotPath = tmpFile.fileName();
+                        LOGD() << "[editude] connectToSession: snapshot written to"
+                               << m_snapshotPath << "(" << msczData.size() << "bytes)";
+                    }
+                } else {
+                    LOGW() << "[editude] connectToSession: snapshot fetch failed:"
+                           << snapReply->errorString();
+                }
+                closeAndReopen();
+            });
+        } else {
+            // No snapshot — new project; proceed directly.
+            closeAndReopen();
+        }
     });
 }
 

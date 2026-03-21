@@ -25,7 +25,20 @@
 #include "qml/Editude/editudeannotationmodel.h"
 #include "qml/Editude/editudepresencemodel.h"
 #include "log.h"
+
+#include <QDir>
+#include <QEventLoop>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QTemporaryFile>
+#include <QTimer>
 #include <QtQml/qqml.h>
+
+#include "project/types/projecttypes.h"
 
 using namespace mu::editude;
 using namespace muse::modularity;
@@ -64,6 +77,86 @@ void EditudeModuleContext::registerExports()
             QJSEngine::setObjectOwnership(inst, QJSEngine::CppOwnership);
             return inst;
         });
+
+    // NOTE: session recovery suppression moved to onInit() — see comment there.
+
+    // ── Snapshot fetch + startup scenario steering ──────────────────────
+    //
+    // If EDITUDE_SESSION_URL is set, fetch session metadata and the latest
+    // snapshot synchronously so we can tell the startup scenario to open
+    // the NOTATION page directly (no HOME page flash).
+
+    const QString sessionUrl = QString::fromUtf8(qgetenv("EDITUDE_SESSION_URL"));
+    if (sessionUrl.isEmpty()) {
+        return; // standalone mode — no editude session
+    }
+
+    // 1. Sync GET /session → local session server (~0.1 ms, localhost)
+    QNetworkAccessManager nam;
+    {
+        QNetworkReply* reply = nam.get(QNetworkRequest(QUrl(sessionUrl)));
+        QEventLoop loop;
+        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        QTimer::singleShot(5000, &loop, &QEventLoop::quit);
+        loop.exec();
+
+        if (reply->error() != QNetworkReply::NoError) {
+            LOGW() << "[EditudeModule] session fetch failed:" << reply->errorString();
+            reply->deleteLater();
+            return;
+        }
+
+        const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
+        reply->deleteLater();
+
+        const QString token     = obj.value("token").toString();
+        const QString projectId = obj.value("project_id").toString();
+        const QString serverUrl = obj.value("server_url").toString();
+
+        if (token.isEmpty() || projectId.isEmpty() || serverUrl.isEmpty()) {
+            LOGW() << "[EditudeModule] session response missing required fields";
+            return;
+        }
+
+        // 2. Sync GET /projects/{pid}/latest-snapshot → editude server
+        QUrl snapshotUrl(serverUrl + "/projects/" + projectId + "/latest-snapshot");
+        QNetworkRequest snapReq(snapshotUrl);
+        snapReq.setRawHeader("Authorization", QString("Bearer %1").arg(token).toUtf8());
+
+        QNetworkReply* snapReply = nam.get(snapReq);
+        QEventLoop snapLoop;
+        QObject::connect(snapReply, &QNetworkReply::finished, &snapLoop, &QEventLoop::quit);
+        QTimer::singleShot(10000, &snapLoop, &QEventLoop::quit);
+        snapLoop.exec();
+
+        if (snapReply->error() == QNetworkReply::NoError
+            && snapReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200) {
+            // Write MSCZ bytes to a temp file for MuseScore's openProject().
+            const QByteArray msczData = snapReply->readAll();
+            QTemporaryFile tmpFile;
+            tmpFile.setFileTemplate(QDir::tempPath() + "/editude_XXXXXX.mscz");
+            tmpFile.setAutoRemove(false);
+            if (tmpFile.open()) {
+                tmpFile.write(msczData);
+                tmpFile.close();
+                m_snapshotTmpPath = tmpFile.fileName();
+                m_service->setSnapshotPath(m_snapshotTmpPath);
+
+                // Tell the startup scenario to open this file directly → NOTATION page.
+                if (m_startupScenario()) {
+                    m_startupScenario()->setStartupScoreFile(
+                        mu::project::ProjectFile(muse::io::path_t(m_snapshotTmpPath)));
+                }
+                LOGI() << "[EditudeModule] snapshot written to" << m_snapshotTmpPath
+                       << "(" << msczData.size() << "bytes)";
+            } else {
+                LOGW() << "[EditudeModule] failed to create temp file for snapshot";
+            }
+        } else {
+            LOGD() << "[EditudeModule] no snapshot available (new project or 404)";
+        }
+        snapReply->deleteLater();
+    }
 }
 
 void EditudeModuleContext::resolveImports()
@@ -81,10 +174,16 @@ void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
         return;
     }
 
-    // Editude manages project state through its own server — suppress
-    // MuseScore's "previous session quit unexpectedly" recovery dialog.
+    // Suppress MuseScore's "previous session quit unexpectedly" recovery dialog.
+    // This clears the persisted session project list via configuration().
+    // Must run in onInit() (not registerExports) because the configuration
+    // system hasn't loaded persisted settings yet during registerExports().
+    // Still well before the startup scenario, which runs via QueuedConnection
+    // after all modules' onInit() completes.
     if (m_sessionsManager()) {
         m_sessionsManager()->reset();
+    } else {
+        LOGW() << "[EditudeModule] ISessionsManager not available — cannot suppress recovery dialog";
     }
 
     m_service->setPresenceModel(m_presenceModel);
@@ -118,6 +217,17 @@ void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
 
     m_globalContext()->currentNotationChanged().onNotify(this, [this]() {
         m_service->onNotationChanged(m_globalContext()->currentNotation());
+
+        // Re-clear session recovery data.  openProject() fires
+        // currentProjectChanged() which triggers the session manager's
+        // update() to re-add the project path — undoing the reset() we
+        // did above.  AppShell's onInit() registered update() before
+        // ours, so by this point the path has already been re-added.
+        // Clearing again here ensures hasProjectsForRestore() returns
+        // false when the startup scenario checks moments later.
+        if (m_sessionsManager()) {
+            m_sessionsManager()->reset();
+        }
     });
 }
 
@@ -125,4 +235,8 @@ void EditudeModuleContext::onDeinit()
 {
     m_globalContext()->currentNotationChanged().disconnect(this);
     m_service.reset();
+
+    if (!m_snapshotTmpPath.isEmpty()) {
+        QFile::remove(m_snapshotTmpPath);
+    }
 }

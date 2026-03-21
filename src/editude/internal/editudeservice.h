@@ -93,6 +93,7 @@ public:
     void onNotationChanged(mu::notation::INotationPtr notation);
     void setPresenceModel(EditudePresenceModel* model);
     void setAnnotationModel(EditudeAnnotationModel* model);
+    void setSnapshotPath(const QString& path);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -156,6 +157,7 @@ private:
     bool m_needsInitialSnapshot = false;
     bool m_fileNewPending = false;
     bool m_fileOpenPending = false;
+    bool m_reclaimNotation = false;
     QString m_bootstrapBatchId;
     OperationTranslator m_translator;
     ScoreApplicator m_applicator;
