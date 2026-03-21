@@ -38,6 +38,7 @@
 #include "actions/iactionsdispatcher.h"
 #include "interactive/iinteractive.h"
 #include "engraving/dom/score.h"
+#include "context/iglobalcontext.h"
 #include "notation/inotation.h"
 #include "project/iprojectfilescontroller.h"
 #include "audio/main/iplayback.h"
@@ -119,8 +120,10 @@ private:
     void fetchAnnotations();
     void uploadInitialSnapshot();
     void requestNotationFocus();
+    void markScoreSaved();
     QUrl deriveServerBaseUrl() const;
 
+    muse::ContextInject<mu::context::IGlobalContext> m_globalContext{ iocContext() };
     muse::ContextInject<mu::project::IProjectFilesController> m_projectFiles{ iocContext() };
     muse::ContextInject<muse::actions::IActionsDispatcher> m_dispatcher{ iocContext() };
     muse::ContextInject<muse::IInteractive> m_interactive{ iocContext() };

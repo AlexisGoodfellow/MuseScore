@@ -158,12 +158,8 @@ bool EditudeService::eventFilter(QObject* watched, QEvent* event)
         // This runs before ApplicationActionController's event filter (which
         // calls closeOpenedProject → needSave check) because Qt invokes
         // filters in reverse installation order and editude installs after
-        // appshell.  We only touch the saved flag — no notifications fire
-        // because we go straight to MasterScore::setSaved(), bypassing
-        // NotationProject::setNeedSave() and its notification broadcast.
-        if (m_score && m_score->masterScore()) {
-            m_score->masterScore()->setSaved(true);
-        }
+        // appshell.
+        markScoreSaved();
     }
     return QObject::eventFilter(watched, event);
 }
@@ -263,6 +259,10 @@ void EditudeService::bootstrapAndConnect()
     if (m_presenceModel) {
         m_presenceModel->notifyScoreReady();
     }
+
+    // Mark score as saved after bootstrap — editude projects are persisted
+    // via OT ops to the server, not local files.
+    markScoreSaved();
 }
 
 void EditudeService::applyPendingOps()
@@ -319,6 +319,7 @@ void EditudeService::onServerMessage(const QString& text)
                 m_applicator.apply(m_score, v.toObject().value("payload").toObject());
             }
             m_applyingRemote = false;
+            markScoreSaved();
             LOGD() << "[editude] applied" << syncOps.size() << "sync ops from peers";
         }
 
@@ -454,6 +455,7 @@ void EditudeService::onServerMessage(const QString& text)
             m_applyingRemote = true;
             m_applicator.apply(m_score, payload);
             m_applyingRemote = false;
+            markScoreSaved();
             // Sync any new part registrations from applicator to translator
             // so subsequent onScoreChanges() calls don't generate spurious
             // lazy AddPart ops for parts added by remote peers.
@@ -485,6 +487,7 @@ void EditudeService::onServerMessage(const QString& text)
             m_applyingRemote = true;
             m_applicator.apply(m_score, msg);
             m_applyingRemote = false;
+            markScoreSaved();
             // Sync part registrations (see "op" handler comment above).
             for (auto it = m_applicator.partUuidToPart().cbegin();
                  it != m_applicator.partUuidToPart().cend(); ++it) {
@@ -564,6 +567,25 @@ void EditudeService::onNotationChanged(mu::notation::INotationPtr notation)
     // before the network reply — in that case bootstrapAndConnect() is
     // a no-op here and runs later from openScoreForSession().
     bootstrapAndConnect();
+
+    // Subscribe to the project-level needSave notification.  MuseScore marks
+    // the project dirty on undo-stack changes, view-state changes, solo/mute
+    // changes, and audio-settings changes.  In an editude session, the score
+    // is persisted via OT ops — there is nothing to "save" locally.  When
+    // needSave fires as true, we defer a markScoreSaved() to clear it.
+    // The deferred call avoids infinite recursion: markScoreSaved() fires the
+    // same notification, but by then needSave().val is false so we skip.
+    if (auto project = m_globalContext()->currentProject()) {
+        project->needSave().notification.onNotify(this, [this]() {
+            if (auto proj = m_globalContext()->currentProject()) {
+                if (proj->needSave().val) {
+                    QTimer::singleShot(0, this, [this]() {
+                        markScoreSaved();
+                    });
+                }
+            }
+        });
+    }
 
     notation->undoStack()->changesChannel().onReceive(
         this,
@@ -662,6 +684,21 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
                << "base_rev=" << baseRevision;
     }
     m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
+}
+
+void EditudeService::markScoreSaved()
+{
+    if (!m_score || !m_score->masterScore()) {
+        return;
+    }
+    m_score->masterScore()->setSaved(true);
+
+    // Fire the project-level needSave notification so the title bar
+    // re-reads needSave().val (now false) and clears the asterisk.
+    // setSaved(true) alone doesn't trigger this notification.
+    if (auto project = m_globalContext()->currentProject()) {
+        project->needSave().notification.notify();
+    }
 }
 
 QUrl EditudeService::deriveServerBaseUrl() const
