@@ -46,7 +46,9 @@
 #include "global/io/buffer.h"
 #include "notation/internal/igetscore.h"
 #include "log.h"
+#include "annotationoverlay.h"
 #include "qml/Editude/editudeannotationmodel.h"
+#include "qml/Editude/editudeannotationoverlaymodel.h"
 #include "qml/Editude/editudepresencemodel.h"
 
 using namespace mu::editude::internal;
@@ -89,7 +91,52 @@ void EditudeService::setAnnotationModel(EditudeAnnotationModel* model)
             [this](const QString& annotationId) {
                 deleteAnnotation(annotationId);
             });
+        connect(model, &EditudeAnnotationModel::annotationExpandedAt, this,
+            [this](qint64 startBeatNum, qint64 startBeatDen, const QString& partId) {
+                refreshAnnotationOverlay();
+                // Scroll the score to the annotation's beat position.
+                if (m_currentNotation && m_score) {
+                    using namespace mu::engraving;
+                    const Fraction tick(static_cast<int>(startBeatNum),
+                                       static_cast<int>(startBeatDen));
+                    Segment* seg = m_score->tick2segment(tick, true, SegmentType::ChordRest);
+                    if (seg) {
+                        // Find the correct staff for this part to scroll to
+                        // the right vertical position.
+                        auto staffIdx = static_cast<staff_idx_t>(0);
+                        const auto& partUuids = m_translator.knownPartUuids();
+                        for (auto it = partUuids.begin(); it != partUuids.end(); ++it) {
+                            if (it.value() == partId) {
+                                staffIdx = m_score->staffIdx(it.key());
+                                break;
+                            }
+                        }
+                        // element() index = staffIdx * VOICES + voice
+                        EngravingItem* el = seg->element(
+                            static_cast<int>(staffIdx * VOICES));
+                        if (!el) {
+                            el = seg->firstElement(staffIdx);
+                        }
+                        if (el) {
+                            m_currentNotation->interaction()->showItem(el);
+                        }
+                    }
+                }
+            });
+        connect(model, &EditudeAnnotationModel::expandedAnnotationIdChanged, this,
+            [this]() {
+                refreshAnnotationOverlay();
+            });
     }
+}
+
+void EditudeService::setAnnotationOverlayModel(EditudeAnnotationOverlayModel* model)
+{
+    m_annotationOverlayModel = model;
+    // No timer or viewMatrixChanged connection needed — overlay refresh is
+    // triggered by concrete layout-change signals (onScoreChanges, remote op
+    // apply). Scroll/zoom tracking is handled by the model's own
+    // setNotationViewMatrix() → remapRows() → dataChanged() path.
 }
 
 void EditudeService::setSnapshotPath(const QString& path)
@@ -365,6 +412,8 @@ void EditudeService::onServerMessage(const QString& text)
         LOGD() << "[editude] joined/rejoined project" << m_projectId
                << "at revision" << m_serverRevision;
 
+        refreshAnnotationOverlay();
+
         // Bootstrap: send AddPart ops for any parts in the local score that are
         // not yet known to the server (e.g. parts loaded from the blank MSCX file
         // before any OT session was established). This lets the server's
@@ -488,6 +537,7 @@ void EditudeService::onServerMessage(const QString& text)
                  it != m_applicator.partUuidToPart().cend(); ++it) {
                 m_translator.registerKnownPart(it.value(), it.key());
             }
+            refreshAnnotationOverlay();
         });
 
     } else if (type == "op_batch") {
@@ -518,6 +568,7 @@ void EditudeService::onServerMessage(const QString& text)
                  it != m_applicator.partUuidToPart().cend(); ++it) {
                 m_translator.registerKnownPart(it.value(), it.key());
             }
+            refreshAnnotationOverlay();
         });
 
     } else if (type == "presence") {
@@ -531,6 +582,7 @@ void EditudeService::onServerMessage(const QString& text)
     } else if (type == "annotation_created") {
         if (m_annotationModel) {
             m_annotationModel->addAnnotation(msg.value("annotation").toObject());
+            refreshAnnotationOverlay();
         }
 
     } else if (type == "annotation_reply_created") {
@@ -712,6 +764,8 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
                << "base_rev=" << baseRevision;
     }
     m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
+
+    refreshAnnotationOverlay();
 }
 
 void EditudeService::markScoreSaved()
@@ -1074,6 +1128,7 @@ void EditudeService::fetchAnnotations()
         }
         const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).array();
         m_annotationModel->loadFromJson(arr);
+        refreshAnnotationOverlay();
         LOGD() << "[editude] loaded" << arr.size() << "annotations";
     });
 }
@@ -1139,6 +1194,7 @@ void EditudeService::resolveAnnotation(const QString& annotationId, bool resolve
             QJsonObject fields;
             fields["resolved"] = resolved;
             m_annotationModel->updateAnnotation(annotationId, fields);
+            refreshAnnotationOverlay();
         }
     });
 }
@@ -1190,6 +1246,7 @@ void EditudeService::deleteAnnotation(const QString& annotationId)
         }
         if (m_annotationModel) {
             m_annotationModel->removeAnnotation(annotationId);
+            refreshAnnotationOverlay();
         }
     });
 }
@@ -1513,4 +1570,57 @@ void EditudeService::refreshPresenceModel()
     }
 
     m_presenceModel->setCanvasData(data);
+}
+
+void EditudeService::refreshAnnotationOverlay()
+{
+    if (!m_annotationOverlayModel || !m_annotationModel || !m_score) {
+        return;
+    }
+
+    const auto& partUuids = m_translator.knownPartUuids();
+    const QString expandedId = m_annotationModel->expandedAnnotationId();
+
+    // Alpha values per ADR: faint = 0x1A (~10%), active = 0x33 (~20%).
+    static constexpr int k_faintAlpha  = 0x26;  // ~15%
+    static constexpr int k_activeAlpha = 0x40;  // ~25%
+
+    // Use the user's chosen accent color from the current theme.
+    QColor baseColor = m_uiConfiguration()->currentTheme().values.value(
+        muse::ui::ACCENT_COLOR).value<QColor>();
+    if (!baseColor.isValid()) {
+        baseColor = QColor(0x44, 0x88, 0xFF);
+    }
+
+    QVector<QPair<QColor, QVector<muse::RectF>>> data;
+
+    const int count = m_annotationModel->rowCount();
+    for (int i = 0; i < count; ++i) {
+        const QModelIndex idx = m_annotationModel->index(i);
+        const bool resolved = idx.data(EditudeAnnotationModel::ResolvedRole).toBool();
+        const bool orphaned = idx.data(EditudeAnnotationModel::OrphanedRole).toBool();
+        const QString partId = idx.data(EditudeAnnotationModel::PartIdRole).toString();
+
+        // No highlights for resolved, orphaned, or score-level annotations.
+        if (resolved || orphaned || partId == "_score") {
+            continue;
+        }
+
+        const QString annId = idx.data(EditudeAnnotationModel::AnnotationIdRole).toString();
+        const qint64 startNum = idx.data(EditudeAnnotationModel::StartBeatNumRole).toLongLong();
+        const qint64 startDen = idx.data(EditudeAnnotationModel::StartBeatDenRole).toLongLong();
+        const qint64 endNum   = idx.data(EditudeAnnotationModel::EndBeatNumRole).toLongLong();
+        const qint64 endDen   = idx.data(EditudeAnnotationModel::EndBeatDenRole).toLongLong();
+
+        QVector<muse::RectF> rects = AnnotationOverlay::reprojectBeatRange(
+            m_score, startNum, startDen, endNum, endDen, partId, partUuids);
+
+        if (!rects.isEmpty()) {
+            QColor color = baseColor;
+            color.setAlpha(annId == expandedId ? k_activeAlpha : k_faintAlpha);
+            data.append({ color, rects });
+        }
+    }
+
+    m_annotationOverlayModel->setCanvasData(data);
 }

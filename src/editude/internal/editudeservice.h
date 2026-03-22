@@ -44,6 +44,7 @@
 #include "audio/main/iplayback.h"
 #include "playback/iplaybackcontroller.h"
 #include "ui/imainwindow.h"
+#include "ui/iuiconfiguration.h"
 #include "ui/inavigationcontroller.h"
 
 #include "operationtranslator.h"
@@ -53,6 +54,7 @@
 namespace mu::editude::internal {
 
 class EditudeAnnotationModel;
+class EditudeAnnotationOverlayModel;
 class EditudePresenceModel;
 
 class EditudeService : public QObject, public muse::Contextable, public muse::async::Asyncable
@@ -94,6 +96,7 @@ public:
     void onNotationChanged(mu::notation::INotationPtr notation);
     void setPresenceModel(EditudePresenceModel* model);
     void setAnnotationModel(EditudeAnnotationModel* model);
+    void setAnnotationOverlayModel(EditudeAnnotationOverlayModel* model);
     void setSnapshotPath(const QString& path);
 
 protected:
@@ -117,6 +120,7 @@ private:
     void onSelectionChanged();
     QJsonObject buildSelectionPayload(const mu::notation::INotationSelectionPtr& sel);
     void refreshPresenceModel();
+    void refreshAnnotationOverlay();
     void fetchAnnotations();
     void createAnnotation(const QString& partId, qint64 startNum, qint64 startDen,
                           qint64 endNum, qint64 endDen, const QString& body);
@@ -136,6 +140,7 @@ private:
     muse::ContextInject<mu::playback::IPlaybackController> m_playbackController{ iocContext() };
     muse::ContextInject<muse::audio::IPlayback> m_audioPlayback{ iocContext() };
     muse::ContextInject<muse::ui::INavigationController> m_navigationController{ iocContext() };
+    muse::GlobalInject<muse::ui::IUiConfiguration> m_uiConfiguration;
     muse::ContextInject<muse::ui::IMainWindow> m_mainWindow{ iocContext() };
 
     QWebSocket* m_socket = nullptr;
@@ -172,6 +177,7 @@ private:
     ScoreApplicator m_applicator;
     EditudePresenceModel* m_presenceModel = nullptr;
     EditudeAnnotationModel* m_annotationModel = nullptr;
+    EditudeAnnotationOverlayModel* m_annotationOverlayModel = nullptr;
     PresenceOverlay m_presenceOverlay;
     QTimer* m_presenceThrottle = nullptr;
 

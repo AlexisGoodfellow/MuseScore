@@ -35,6 +35,7 @@
 #include "appshell/internal/isessionsmanager.h"
 #include "appshell/internal/istartupscenario.h"
 #include "qml/Editude/editudeannotationmodel.h"
+#include "qml/Editude/editudeannotationoverlaymodel.h"
 #include "qml/Editude/editudepresencemodel.h"
 
 #ifdef MUE_BUILD_EDITUDE_TEST_SERVER
@@ -76,6 +77,7 @@ private:
     std::shared_ptr<internal::EditudeUiActions> m_uiActions;
     internal::EditudePresenceModel* m_presenceModel = nullptr;   // application-scoped singleton
     internal::EditudeAnnotationModel* m_annotationModel = nullptr; // application-scoped singleton
+    internal::EditudeAnnotationOverlayModel* m_annotationOverlayModel = nullptr; // application-scoped singleton
 #ifdef MUE_BUILD_EDITUDE_TEST_SERVER
     std::unique_ptr<internal::EditudeTestServer> m_testServer;
 #endif

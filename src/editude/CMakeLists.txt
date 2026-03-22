@@ -32,6 +32,8 @@ target_sources(editude PRIVATE
     internal/scoreapplicator.cpp
     internal/presenceoverlay.h
     internal/presenceoverlay.cpp
+    internal/annotationoverlay.h
+    internal/annotationoverlay.cpp
     internal/editudeuiactions.h
     internal/editudeuiactions.cpp
 )

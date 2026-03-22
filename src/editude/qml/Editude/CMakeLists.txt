@@ -39,6 +39,8 @@ qt_add_qml_module(editude_qml
         editudepresencemodel.cpp
         editudeannotationmodel.h
         editudeannotationmodel.cpp
+        editudeannotationoverlaymodel.h
+        editudeannotationoverlaymodel.cpp
     QML_FILES
         EditudeNotationOverlay.qml
         AnnotationSidePanel.qml

@@ -23,6 +23,7 @@
 #include "internal/editudeservice.h"
 #include "internal/editudeuiactions.h"
 #include "qml/Editude/editudeannotationmodel.h"
+#include "qml/Editude/editudeannotationoverlaymodel.h"
 #include "qml/Editude/editudepresencemodel.h"
 #include "log.h"
 
@@ -61,6 +62,7 @@ void EditudeModuleContext::registerExports()
 
     m_presenceModel = internal::EditudePresenceModel::instance();
     m_annotationModel = internal::EditudeAnnotationModel::instance();
+    m_annotationOverlayModel = internal::EditudeAnnotationOverlayModel::instance();
 
     qmlRegisterSingletonType<internal::EditudeAnnotationModel>(
         "Editude", 1, 0, "EditudeAnnotationModel",
@@ -74,6 +76,14 @@ void EditudeModuleContext::registerExports()
         "Editude", 1, 0, "EditudePresenceModel",
         [](QQmlEngine*, QJSEngine*) -> QObject* {
             auto* inst = internal::EditudePresenceModel::instance();
+            QJSEngine::setObjectOwnership(inst, QJSEngine::CppOwnership);
+            return inst;
+        });
+
+    qmlRegisterSingletonType<internal::EditudeAnnotationOverlayModel>(
+        "Editude", 1, 0, "EditudeAnnotationOverlayModel",
+        [](QQmlEngine*, QJSEngine*) -> QObject* {
+            auto* inst = internal::EditudeAnnotationOverlayModel::instance();
             QJSEngine::setObjectOwnership(inst, QJSEngine::CppOwnership);
             return inst;
         });
@@ -188,6 +198,7 @@ void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
 
     m_service->setPresenceModel(m_presenceModel);
     m_service->setAnnotationModel(m_annotationModel);
+    m_service->setAnnotationOverlayModel(m_annotationOverlayModel);
     m_service->start();
 
     // Wire the annotation model to the UI actions so actionChecked() works.

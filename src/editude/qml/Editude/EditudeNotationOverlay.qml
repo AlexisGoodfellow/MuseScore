@@ -45,6 +45,7 @@ Item {
     // are recomputed in screen coordinates whenever the view scrolls or zooms.
     Component.onCompleted: {
         EditudePresenceModel.setNotationViewMatrix(root.parent.matrix)
+        EditudeAnnotationOverlayModel.setNotationViewMatrix(root.parent.matrix)
         // Start focus retries immediately.  On the snapshot path, scoreReady
         // was emitted before this overlay existed (the page hadn't been
         // created yet), so the onScoreReady connection below never fired.
@@ -58,6 +59,7 @@ Item {
         target: root.parent
         function onMatrixChanged() {
             EditudePresenceModel.setNotationViewMatrix(root.parent.matrix)
+            EditudeAnnotationOverlayModel.setNotationViewMatrix(root.parent.matrix)
         }
     }
 
@@ -87,6 +89,20 @@ Item {
             if (root.parent.activeFocus || ++attempts >= 40) {
                 stop()
             }
+        }
+    }
+
+    // Annotation highlight rectangles — faint/active beat-range highlights.
+    // Rendered below presence cursors (lower z-order in QML document order).
+    Repeater {
+        model: EditudeAnnotationOverlayModel
+        delegate: Rectangle {
+            x: model.screenRect.x
+            y: model.screenRect.y
+            width: model.screenRect.width
+            height: model.screenRect.height
+            color: model.rectColor
+            enabled: false
         }
     }
 

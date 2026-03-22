@@ -222,7 +222,8 @@ Rectangle {
                         }
 
                         MouseArea {
-                            anchors.fill: parent
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
                             visible: delegate.expanded
                             cursorShape: Qt.PointingHandCursor
                             onClicked: EditudeAnnotationModel.setExpanded("")
