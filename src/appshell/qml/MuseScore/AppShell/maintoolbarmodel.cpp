@@ -87,9 +87,17 @@ void MainToolBarModel::load()
     beginResetModel();
 
     m_items.clear();
-    m_items << buildItem(muse::qtrc("appshell", "Home"), HOME_PAGE);
+    // [editude] suppress Home and Publish tabs — projects are managed by the editude launcher
+    if (!qEnvironmentVariableIsSet("EDITUDE_SESSION_URL")) {
+        m_items << buildItem(muse::qtrc("appshell", "Home"), HOME_PAGE);
+    }
+    // [/editude]
     m_items << buildItem(muse::qtrc("appshell", "Score"), NOTATION_PAGE);
-    m_items << buildItem(muse::qtrc("appshell", "Publish"), PUBLISH_PAGE);
+    // [editude]
+    if (!qEnvironmentVariableIsSet("EDITUDE_SESSION_URL")) {
+        m_items << buildItem(muse::qtrc("appshell", "Publish"), PUBLISH_PAGE);
+    }
+    // [/editude]
 
     if (globalConfiguration()->devModeEnabled()) {
         m_items << buildItem(muse::qtrc("appshell", "DevTools"), DEVTOOLS_PAGE);

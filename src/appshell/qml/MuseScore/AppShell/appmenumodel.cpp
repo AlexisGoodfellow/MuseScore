@@ -189,35 +189,45 @@ MenuItem* AppMenuModel::makeMenuItem(const ActionCode& actionCode, MenuItemRole 
 
 MenuItem* AppMenuModel::makeFileMenu()
 {
-    MenuItemList recentScoresList = makeRecentScoresItems();
-    bool openRecentEnabled = !recentScoresList.isEmpty();
+    MenuItemList fileItems;
 
-    if (!recentScoresList.empty()) {
-        recentScoresList = appendClearRecentSection(recentScoresList);
+    // [editude] suppress new/open/close and save/publish in editude sessions —
+    // projects are managed by the editude launcher, persisted via OT ops.
+    if (!qEnvironmentVariableIsSet("EDITUDE_SESSION_URL")) {
+    // [/editude]
+        MenuItemList recentScoresList = makeRecentScoresItems();
+        bool openRecentEnabled = !recentScoresList.isEmpty();
+
+        if (!recentScoresList.empty()) {
+            recentScoresList = appendClearRecentSection(recentScoresList);
+        }
+
+        fileItems
+            << makeMenuItem("file-new")
+            << makeMenuItem("file-open")
+            << makeMenu(TranslatableString("appshell/menu/file", "Open &recent"), recentScoresList, "menu-file-open", openRecentEnabled)
+            << makeMenuItem("file-close")
+            << makeSeparator()
+            << makeMenuItem("file-save")
+            << makeMenuItem("file-save-as")
+            << makeMenuItem("file-save-to-cloud")
+            << makeMenu(TranslatableString("appshell/menu/file", "Save o&ther"), makeSaveOtherSubItems())
+            << makeMenu(TranslatableString("appshell/menu/file", "Pu&blish online"), makePublishOnlineSubItems())
+            << makeSeparator();
+    // [editude]
     }
+    // [/editude]
 
-    MenuItemList fileItems {
-        makeMenuItem("file-new"),
-        makeMenuItem("file-open"),
-        makeMenu(TranslatableString("appshell/menu/file", "Open &recent"), recentScoresList, "menu-file-open", openRecentEnabled),
-        makeMenuItem("file-close"),
-        makeSeparator(),
-        makeMenuItem("file-save"),
-        makeMenuItem("file-save-as"),
-        makeMenuItem("file-save-to-cloud"),
-        makeMenu(TranslatableString("appshell/menu/file", "Save o&ther"), makeSaveOtherSubItems()),
-        makeMenu(TranslatableString("appshell/menu/file", "Pu&blish online"), makePublishOnlineSubItems()),
-        makeSeparator(),
-        makeMenuItem("file-import-pdf"),
-        makeMenuItem("file-export"),
-        makeSeparator(),
-        makeMenuItem("project-properties"),
-        makeMenuItem("parts", TranslatableString("action", "Parts…")),
-        makeSeparator(),
-        makeMenuItem("print"),
-        makeSeparator(),
-        makeMenuItem("quit", MenuItemRole::QuitRole)
-    };
+    fileItems
+        << makeMenuItem("file-import-pdf")
+        << makeMenuItem("file-export")
+        << makeSeparator()
+        << makeMenuItem("project-properties")
+        << makeMenuItem("parts", TranslatableString("action", "Parts…"))
+        << makeSeparator()
+        << makeMenuItem("print")
+        << makeSeparator()
+        << makeMenuItem("quit", MenuItemRole::QuitRole);
 
     return makeMenu(TranslatableString("appshell/menu/file", "&File"), fileItems, "menu-file");
 }
