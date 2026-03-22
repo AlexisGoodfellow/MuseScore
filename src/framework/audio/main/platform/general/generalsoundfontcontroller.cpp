@@ -39,6 +39,13 @@ GeneralSoundFontController::GeneralSoundFontController(const muse::modularity::C
 
 void GeneralSoundFontController::loadSoundFonts()
 {
+    // [editude] Skip soundfont loading in e2e test runs (saves ~7s startup time).
+    // E2e tests validate score data, not audio output.
+    if (!qEnvironmentVariableIsEmpty("EDITUDE_SKIP_SOUNDFONTS")) {
+        return;
+    }
+    // [/editude]
+
     configuration()->soundFontDirectoriesChanged().onReceive(this, [this](const io::paths_t&) {
         doLoadSoundFonts();
     });
