@@ -140,6 +140,11 @@ MenuItemList NotationContextMenuModel::makeMeasureItems()
     items << makeSeparator();
     items << makeMenuItem("measure-properties");
 
+    // [editude]
+    items << makeSeparator();
+    items << makeMenuItem("add-annotation");
+    // [/editude]
+
     return items;
 }
 
@@ -282,6 +287,11 @@ MenuItemList NotationContextMenuModel::makeElementItems()
         items << makeSeparator();
         items << makeMenuItem("edit-element");
     }
+
+    // [editude]
+    items << makeSeparator();
+    items << makeMenuItem("add-annotation");
+    // [/editude]
 
     items << makeSeparator()
           << makeEditStyle(element);

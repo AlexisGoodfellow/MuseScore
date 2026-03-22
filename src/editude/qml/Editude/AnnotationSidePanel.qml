@@ -87,6 +87,7 @@ Rectangle {
             visible: EditudeAnnotationModel.creationActive
             color: ui.theme.backgroundPrimaryColor
             implicitHeight: creationCol.implicitHeight + 16
+            onVisibleChanged: if (visible) creationTextArea.forceActiveFocus()
 
             ColumnLayout {
                 id: creationCol
