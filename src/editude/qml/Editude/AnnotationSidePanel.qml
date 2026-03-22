@@ -204,7 +204,7 @@ Rectangle {
                     }
                     spacing: 4
 
-                    // Author + timestamp
+                    // Author + timestamp (click to collapse when expanded)
                     RowLayout {
                         spacing: 6
                         Text {
@@ -218,6 +218,13 @@ Rectangle {
                             color: ui.theme.fontSecondaryColor
                             font.pixelSize: 10
                             Layout.fillWidth: true
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            visible: delegate.expanded
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: EditudeAnnotationModel.setExpanded("")
                         }
                     }
 
@@ -369,6 +376,9 @@ Rectangle {
 
                 MouseArea {
                     anchors.fill: parent
+                    // Let interactive children (buttons, text fields) receive
+                    // clicks when the card is expanded.
+                    visible: !delegate.expanded
                     onClicked: {
                         EditudeAnnotationModel.setExpanded(delegate.annotationId)
                         root.annotationSelected(delegate.annotationId)
