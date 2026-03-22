@@ -282,3 +282,24 @@ void EditudeAnnotationModel::toggleResolve(const QString& annotationId, bool res
 {
     emit resolveToggled(annotationId, resolved);
 }
+
+void EditudeAnnotationModel::deleteAnnotation(const QString& annotationId)
+{
+    emit deletionRequested(annotationId);
+}
+
+void EditudeAnnotationModel::removeAnnotation(const QString& annotationId)
+{
+    for (int i = 0; i < m_rows.size(); ++i) {
+        if (m_rows[i].annotationId == annotationId) {
+            if (m_expandedId == annotationId) {
+                m_expandedId.clear();
+                emit expandedAnnotationIdChanged();
+            }
+            beginRemoveRows(QModelIndex(), i, i);
+            m_rows.remove(i);
+            endRemoveRows();
+            return;
+        }
+    }
+}

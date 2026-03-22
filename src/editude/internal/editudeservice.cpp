@@ -85,6 +85,10 @@ void EditudeService::setAnnotationModel(EditudeAnnotationModel* model)
             [this](const QString& annotationId, bool resolved) {
                 resolveAnnotation(annotationId, resolved);
             });
+        connect(model, &EditudeAnnotationModel::deletionRequested, this,
+            [this](const QString& annotationId) {
+                deleteAnnotation(annotationId);
+            });
     }
 }
 
@@ -1162,6 +1166,31 @@ void EditudeService::createReply(const QString& annotationId, const QString& bod
             LOGW() << "[editude] create reply failed:" << reply->errorString();
         }
         // The server broadcasts annotation_reply_created via WS; the model handles it there.
+    });
+}
+
+void EditudeService::deleteAnnotation(const QString& annotationId)
+{
+    if (m_token.isEmpty() || m_projectId.isEmpty()) {
+        return;
+    }
+
+    QUrl url = deriveServerBaseUrl();
+    url.setPath(QString("/projects/%1/annotations/%2").arg(m_projectId, annotationId));
+
+    QNetworkRequest req(url);
+    req.setRawHeader("Authorization", QString("Bearer %1").arg(m_token).toUtf8());
+
+    QNetworkReply* reply = m_nam.deleteResource(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, annotationId]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            LOGW() << "[editude] delete annotation failed:" << reply->errorString();
+            return;
+        }
+        if (m_annotationModel) {
+            m_annotationModel->removeAnnotation(annotationId);
+        }
     });
 }
 

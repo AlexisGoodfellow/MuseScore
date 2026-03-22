@@ -85,6 +85,9 @@ public:
     // Update resolved/body for an annotation (from PATCH response or WS).
     void updateAnnotation(const QString& annotationId, const QJsonObject& fields);
 
+    // Remove an annotation from the model (called after successful server DELETE).
+    void removeAnnotation(const QString& annotationId);
+
     // Accordion expand/collapse: set the currently expanded annotation.
     // Pass empty string to collapse all.
     Q_INVOKABLE void setExpanded(const QString& annotationId);
@@ -96,6 +99,7 @@ public:
     Q_INVOKABLE void cancelCreation();
     Q_INVOKABLE void submitReply(const QString& annotationId, const QString& body);
     Q_INVOKABLE void toggleResolve(const QString& annotationId, bool resolved);
+    Q_INVOKABLE void deleteAnnotation(const QString& annotationId);
 
     // Called by the service to populate the creation anchor.
     void setCreationAnchor(const QJsonObject& anchor) { m_creationAnchor = anchor; }
@@ -128,6 +132,7 @@ signals:
                              qint64 endNum, qint64 endDen, const QString& body);
     void replySubmitted(const QString& annotationId, const QString& body);
     void resolveToggled(const QString& annotationId, bool resolved);
+    void deletionRequested(const QString& annotationId);
 
 private:
     struct Row {

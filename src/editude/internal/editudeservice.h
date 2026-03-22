@@ -122,6 +122,7 @@ private:
                           qint64 endNum, qint64 endDen, const QString& body);
     void resolveAnnotation(const QString& annotationId, bool resolved);
     void createReply(const QString& annotationId, const QString& body);
+    void deleteAnnotation(const QString& annotationId);
     QJsonObject getSelectionAnchor();
     void uploadInitialSnapshot();
     void requestNotationFocus();

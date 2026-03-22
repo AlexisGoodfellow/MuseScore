@@ -347,7 +347,7 @@ Rectangle {
                             }
                         }
 
-                        // Action row: resolve toggle
+                        // Action row: resolve toggle + delete
                         RowLayout {
                             spacing: 8
                             Layout.topMargin: 4
@@ -359,6 +359,15 @@ Rectangle {
                                 onClicked: {
                                     EditudeAnnotationModel.toggleResolve(
                                         delegate.annotationId, !delegate.resolved)
+                                }
+                            }
+
+                            FlatButton {
+                                visible: delegate.resolved
+                                text: qsTr("Delete")
+                                onClicked: {
+                                    EditudeAnnotationModel.deleteAnnotation(
+                                        delegate.annotationId)
                                 }
                             }
                         }
