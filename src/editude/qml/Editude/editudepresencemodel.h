@@ -92,7 +92,7 @@ Q_SIGNALS:
     void scoreReady();
 
 private:
-    void rebuild();
+    void remapRows();
 
     struct Row {
         QRectF screenRect;

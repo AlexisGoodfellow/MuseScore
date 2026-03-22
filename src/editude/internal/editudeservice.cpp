@@ -413,6 +413,7 @@ void EditudeService::onServerMessage(const QString& text)
                << "at revision" << m_serverRevision;
 
         refreshAnnotationOverlay();
+        refreshPresenceModel();
 
         // Bootstrap: send AddPart ops for any parts in the local score that are
         // not yet known to the server (e.g. parts loaded from the blank MSCX file
@@ -538,6 +539,7 @@ void EditudeService::onServerMessage(const QString& text)
                 m_translator.registerKnownPart(it.value(), it.key());
             }
             refreshAnnotationOverlay();
+            refreshPresenceModel();
         });
 
     } else if (type == "op_batch") {
@@ -569,6 +571,7 @@ void EditudeService::onServerMessage(const QString& text)
                 m_translator.registerKnownPart(it.value(), it.key());
             }
             refreshAnnotationOverlay();
+            refreshPresenceModel();
         });
 
     } else if (type == "presence") {
@@ -766,6 +769,7 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
     m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
 
     refreshAnnotationOverlay();
+    refreshPresenceModel();
 }
 
 void EditudeService::markScoreSaved()

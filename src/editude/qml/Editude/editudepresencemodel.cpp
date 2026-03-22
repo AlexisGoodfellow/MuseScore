@@ -43,8 +43,26 @@ EditudePresenceModel* EditudePresenceModel::instance()
 void EditudePresenceModel::setCanvasData(
     const QVector<QPair<QColor, QVector<muse::RectF>>>& canvasData)
 {
-    m_canvasData = canvasData;
-    rebuild();
+    // Count incoming rows before modifying anything.
+    int newCount = 0;
+    for (const auto& [color, rects] : canvasData) {
+        newCount += rects.size();
+    }
+
+    if (newCount != m_rows.size()) {
+        // Row count changed — full reset (properly brackets the modification).
+        beginResetModel();
+        m_canvasData = canvasData;
+        remapRows();
+        endResetModel();
+    } else {
+        // Same row count — update positions in place.
+        m_canvasData = canvasData;
+        remapRows();
+        if (!m_rows.isEmpty()) {
+            emit dataChanged(index(0), index(m_rows.size() - 1));
+        }
+    }
 }
 
 void EditudePresenceModel::showToast(const QString& text)
@@ -71,12 +89,15 @@ void EditudePresenceModel::notifyScoreReady()
 void EditudePresenceModel::setNotationViewMatrix(const QVariant& matrix)
 {
     m_matrix = matrix.value<QTransform>();
-    rebuild();
+    // Immediate remap with cached canvas rects for smooth scroll tracking.
+    remapRows();
+    if (!m_rows.isEmpty()) {
+        emit dataChanged(index(0), index(m_rows.size() - 1), { RectRole });
+    }
 }
 
-void EditudePresenceModel::rebuild()
+void EditudePresenceModel::remapRows()
 {
-    beginResetModel();
     m_rows.clear();
     for (const auto& [color, rects] : m_canvasData) {
         for (const muse::RectF& r : rects) {
@@ -87,7 +108,6 @@ void EditudePresenceModel::rebuild()
             m_rows.append(row);
         }
     }
-    endResetModel();
 }
 
 int EditudePresenceModel::rowCount(const QModelIndex& parent) const
