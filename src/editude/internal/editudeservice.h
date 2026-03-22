@@ -118,6 +118,11 @@ private:
     QJsonObject buildSelectionPayload(const mu::notation::INotationSelectionPtr& sel);
     void refreshPresenceModel();
     void fetchAnnotations();
+    void createAnnotation(const QString& partId, qint64 startNum, qint64 startDen,
+                          qint64 endNum, qint64 endDen, const QString& body);
+    void resolveAnnotation(const QString& annotationId, bool resolved);
+    void createReply(const QString& annotationId, const QString& body);
+    QJsonObject getSelectionAnchor();
     void uploadInitialSnapshot();
     void requestNotationFocus();
     void markScoreSaved();

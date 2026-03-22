@@ -1196,4 +1196,9 @@
     <key>grace-note-bend</key>
     <seq>Ctrl+Alt+B</seq>
     </SC>
+  <!-- [editude] annotation creation shortcut -->
+  <SC>
+    <key>add-annotation</key>
+    <seq>Ctrl+Alt+C</seq>
+    </SC>
   </Shortcuts>

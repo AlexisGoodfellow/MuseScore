@@ -39,6 +39,11 @@ const UiActionList EditudeUiActions::m_actions = {
              TranslatableString("action", "Show/hide annotations panel"),
              IconCode::Code::EDIT,
              Checkable::Yes),
+    UiAction("add-annotation",
+             mu::context::UiCtxProjectOpened,
+             mu::context::CTX_ANY,
+             TranslatableString("action", "Add comment"),
+             TranslatableString("action", "Add a comment at the current selection")),
 };
 
 EditudeUiActions::EditudeUiActions() = default;

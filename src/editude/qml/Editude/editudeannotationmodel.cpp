@@ -19,6 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "editudeannotationmodel.h"
+#include "../../internal/editudeservice.h"
 #include "log.h"
 
 using namespace mu::editude::internal;
@@ -42,6 +43,15 @@ void EditudeAnnotationModel::setPanelVisible(bool visible)
     emit panelVisibleChanged();
 }
 
+void EditudeAnnotationModel::setCreationActive(bool active)
+{
+    if (m_creationActive == active) {
+        return;
+    }
+    m_creationActive = active;
+    emit creationActiveChanged();
+}
+
 EditudeAnnotationModel* EditudeAnnotationModel::instance()
 {
     if (!s_instance) {
@@ -59,11 +69,13 @@ EditudeAnnotationModel::Row EditudeAnnotationModel::rowFromJson(const QJsonObjec
     r.resolved      = obj.value("resolved").toBool(false);
     r.orphaned      = obj.value("orphaned").toBool(false);
     r.authorId      = obj.value("author_id").toString();
+    r.authorName    = obj.value("author_name").toString();
     r.startBeatNum  = static_cast<qint64>(obj.value("start_beat_num").toDouble(0));
     r.startBeatDen  = static_cast<qint64>(obj.value("start_beat_den").toDouble(1));
     r.endBeatNum    = static_cast<qint64>(obj.value("end_beat_num").toDouble(0));
     r.endBeatDen    = static_cast<qint64>(obj.value("end_beat_den").toDouble(1));
-    r.replyCount    = obj.value("replies").toArray().size();
+    r.replies       = obj.value("replies").toArray();
+    r.replyCount    = r.replies.size();
     r.createdAt     = obj.value("created_at").toString();
     return r;
 }
@@ -72,6 +84,7 @@ void EditudeAnnotationModel::loadFromJson(const QJsonArray& annotations)
 {
     beginResetModel();
     m_rows.clear();
+    m_expandedId.clear();
     for (const QJsonValue& v : annotations) {
         m_rows.append(rowFromJson(v.toObject()));
     }
@@ -101,16 +114,76 @@ void EditudeAnnotationModel::addAnnotation(const QJsonObject& annotation)
     endInsertRows();
 }
 
-void EditudeAnnotationModel::incrementReplyCount(const QString& annotationId)
+void EditudeAnnotationModel::addReply(const QString& annotationId, const QJsonObject& reply)
 {
     for (int i = 0; i < m_rows.size(); ++i) {
         if (m_rows[i].annotationId == annotationId) {
-            m_rows[i].replyCount++;
+            m_rows[i].replies.append(reply);
+            m_rows[i].replyCount = m_rows[i].replies.size();
             const QModelIndex idx = index(i);
-            emit dataChanged(idx, idx, { ReplyCountRole });
+            emit dataChanged(idx, idx, { ReplyCountRole, RepliesRole });
             return;
         }
     }
+}
+
+void EditudeAnnotationModel::updateAnnotation(const QString& annotationId, const QJsonObject& fields)
+{
+    for (int i = 0; i < m_rows.size(); ++i) {
+        if (m_rows[i].annotationId == annotationId) {
+            QVector<int> changedRoles;
+            if (fields.contains("resolved")) {
+                m_rows[i].resolved = fields.value("resolved").toBool();
+                changedRoles.append(ResolvedRole);
+            }
+            if (fields.contains("body")) {
+                m_rows[i].body = fields.value("body").toString();
+                changedRoles.append(BodyRole);
+            }
+            if (!changedRoles.isEmpty()) {
+                const QModelIndex idx = index(i);
+                emit dataChanged(idx, idx, changedRoles);
+            }
+            return;
+        }
+    }
+}
+
+void EditudeAnnotationModel::setExpanded(const QString& annotationId)
+{
+    const QString oldId = m_expandedId;
+
+    // Collapse the previously expanded annotation.
+    if (!oldId.isEmpty()) {
+        for (int i = 0; i < m_rows.size(); ++i) {
+            if (m_rows[i].annotationId == oldId) {
+                const QModelIndex idx = index(i);
+                emit dataChanged(idx, idx, { ExpandedRole });
+                break;
+            }
+        }
+    }
+
+    // Toggle: if clicking the same annotation, collapse it.
+    if (annotationId == oldId) {
+        m_expandedId.clear();
+    } else {
+        m_expandedId = annotationId;
+        for (int i = 0; i < m_rows.size(); ++i) {
+            if (m_rows[i].annotationId == annotationId) {
+                const QModelIndex idx = index(i);
+                emit dataChanged(idx, idx, { ExpandedRole });
+                emit annotationExpandedAt(
+                    m_rows[i].startBeatNum,
+                    m_rows[i].startBeatDen,
+                    m_rows[i].partId
+                );
+                break;
+            }
+        }
+    }
+
+    emit expandedAnnotationIdChanged();
 }
 
 int EditudeAnnotationModel::rowCount(const QModelIndex& parent) const
@@ -134,12 +207,15 @@ QVariant EditudeAnnotationModel::data(const QModelIndex& index, int role) const
     case ResolvedRole:     return r.resolved;
     case OrphanedRole:     return r.orphaned;
     case AuthorIdRole:     return r.authorId;
+    case AuthorNameRole:   return r.authorName;
     case StartBeatNumRole: return r.startBeatNum;
     case StartBeatDenRole: return r.startBeatDen;
     case EndBeatNumRole:   return r.endBeatNum;
     case EndBeatDenRole:   return r.endBeatDen;
     case ReplyCountRole:   return r.replyCount;
     case CreatedAtRole:    return r.createdAt;
+    case ExpandedRole:     return r.annotationId == m_expandedId;
+    case RepliesRole:      return QVariant::fromValue(r.replies);
     default:               return {};
     }
 }
@@ -153,11 +229,65 @@ QHash<int, QByteArray> EditudeAnnotationModel::roleNames() const
         { ResolvedRole,     "resolved"     },
         { OrphanedRole,     "orphaned"     },
         { AuthorIdRole,     "authorId"     },
+        { AuthorNameRole,   "authorName"   },
         { StartBeatNumRole, "startBeatNum" },
         { StartBeatDenRole, "startBeatDen" },
         { EndBeatNumRole,   "endBeatNum"   },
         { EndBeatDenRole,   "endBeatDen"   },
         { ReplyCountRole,   "replyCount"   },
         { CreatedAtRole,    "createdAt"    },
+        { ExpandedRole,     "expanded"     },
+        { RepliesRole,      "replies"      },
     };
+}
+
+// ---------------------------------------------------------------------------
+// QML-invokable annotation actions
+// ---------------------------------------------------------------------------
+
+void EditudeAnnotationModel::requestCreation()
+{
+    if (!m_service) {
+        return;
+    }
+    m_creationAnchor = m_service->getSelectionAnchor();
+    setCreationActive(true);
+    setPanelVisible(true);
+}
+
+void EditudeAnnotationModel::submitAnnotation(const QString& body)
+{
+    if (!m_service || body.trimmed().isEmpty()) {
+        return;
+    }
+    m_service->createAnnotation(
+        m_creationAnchor.value("part_id").toString(),
+        static_cast<qint64>(m_creationAnchor.value("start_beat_num").toDouble()),
+        static_cast<qint64>(m_creationAnchor.value("start_beat_den").toDouble(1)),
+        static_cast<qint64>(m_creationAnchor.value("end_beat_num").toDouble()),
+        static_cast<qint64>(m_creationAnchor.value("end_beat_den").toDouble(1)),
+        body.trimmed()
+    );
+    setCreationActive(false);
+}
+
+void EditudeAnnotationModel::cancelCreation()
+{
+    setCreationActive(false);
+}
+
+void EditudeAnnotationModel::submitReply(const QString& annotationId, const QString& body)
+{
+    if (!m_service || body.trimmed().isEmpty()) {
+        return;
+    }
+    m_service->createReply(annotationId, body.trimmed());
+}
+
+void EditudeAnnotationModel::toggleResolve(const QString& annotationId, bool resolved)
+{
+    if (!m_service) {
+        return;
+    }
+    m_service->resolveAnnotation(annotationId, resolved);
 }

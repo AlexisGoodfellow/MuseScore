@@ -199,6 +199,11 @@ void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
         m_uiActions->notifyAnnotationToggleChanged();
     });
 
+    // Register dispatch handler for add-annotation (Ctrl+Alt+C / Cmd+Option+C).
+    m_dispatcher()->reg(this, "add-annotation", [this]() {
+        m_annotationModel->requestCreation();
+    });
+
 #ifdef MUE_BUILD_EDITUDE_TEST_SERVER
     LOGI() << "[EditudeModule] test server enabled, EDITUDE_TEST_PORT=" << qgetenv("EDITUDE_TEST_PORT");
     {

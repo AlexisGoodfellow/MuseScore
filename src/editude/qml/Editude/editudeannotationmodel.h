@@ -30,6 +30,8 @@
 
 namespace mu::editude::internal {
 
+class EditudeService;
+
 /**
  * QAbstractListModel that holds the current project's annotations.
  *
@@ -37,25 +39,17 @@ namespace mu::editude::internal {
  * then updated incrementally from annotation_created and
  * annotation_reply_created WebSocket broadcast messages.
  *
- * Roles:
- *   AnnotationIdRole  — QString  — annotation UUID
- *   PartIdRole        — QString  — part UUID (elementToUuid key)
- *   BodyRole          — QString  — annotation body text
- *   ResolvedRole      — bool
- *   OrphanedRole      — bool
- *   AuthorIdRole      — QString  — contributor UUID (may be empty)
- *   StartBeatNumRole  — qint64   — Fraction numerator, whole-note units
- *   StartBeatDenRole  — qint64   — Fraction denominator
- *   EndBeatNumRole    — qint64
- *   EndBeatDenRole    — qint64
- *   ReplyCountRole    — int
- *   CreatedAtRole     — QString  — ISO 8601 timestamp
+ * Supports accordion expand/collapse: exactly one annotation may be expanded
+ * at a time (ExpandedRole). Expanding an annotation fetches its replies
+ * (RepliesRole) and scrolls the score to its beat position.
  */
 class EditudeAnnotationModel : public QAbstractListModel
 {
     Q_OBJECT
 
     Q_PROPERTY(bool panelVisible READ panelVisible WRITE setPanelVisible NOTIFY panelVisibleChanged)
+    Q_PROPERTY(bool creationActive READ creationActive WRITE setCreationActive NOTIFY creationActiveChanged)
+    Q_PROPERTY(QString expandedAnnotationId READ expandedAnnotationId NOTIFY expandedAnnotationIdChanged)
 
 public:
     enum Roles {
@@ -65,12 +59,15 @@ public:
         ResolvedRole,
         OrphanedRole,
         AuthorIdRole,
+        AuthorNameRole,
         StartBeatNumRole,
         StartBeatDenRole,
         EndBeatNumRole,
         EndBeatDenRole,
         ReplyCountRole,
         CreatedAtRole,
+        ExpandedRole,
+        RepliesRole,
     };
 
     explicit EditudeAnnotationModel(QObject* parent = nullptr);
@@ -84,8 +81,32 @@ public:
     // Add a single annotation from an annotation_created WS message.
     void addAnnotation(const QJsonObject& annotation);
 
-    // Increment the reply count for the given annotation UUID.
-    void incrementReplyCount(const QString& annotationId);
+    // Increment the reply count and append the reply JSON for the given annotation.
+    void addReply(const QString& annotationId, const QJsonObject& reply);
+
+    // Update resolved/body for an annotation (from PATCH response or WS).
+    void updateAnnotation(const QString& annotationId, const QJsonObject& fields);
+
+    // Accordion expand/collapse: set the currently expanded annotation.
+    // Pass empty string to collapse all.
+    Q_INVOKABLE void setExpanded(const QString& annotationId);
+
+    // Set the back-pointer to the service (called by EditudeService::setAnnotationModel).
+    void setService(EditudeService* service) { m_service = service; }
+
+    // QML-invokable annotation actions (delegate to EditudeService).
+    Q_INVOKABLE void requestCreation();
+    Q_INVOKABLE void submitAnnotation(const QString& body);
+    Q_INVOKABLE void cancelCreation();
+    Q_INVOKABLE void submitReply(const QString& annotationId, const QString& body);
+    Q_INVOKABLE void toggleResolve(const QString& annotationId, bool resolved);
+
+    // Inline creation mode.
+    bool creationActive() const { return m_creationActive; }
+    void setCreationActive(bool active);
+
+    // Currently expanded annotation ID (empty if none).
+    QString expandedAnnotationId() const { return m_expandedId; }
 
     // Panel visibility toggle (driven by toolbar action).
     bool panelVisible() const { return m_panelVisible; }
@@ -98,6 +119,9 @@ public:
 
 signals:
     void panelVisibleChanged();
+    void creationActiveChanged();
+    void expandedAnnotationIdChanged();
+    void annotationExpandedAt(qint64 startBeatNum, qint64 startBeatDen, const QString& partId);
 
 private:
     struct Row {
@@ -107,18 +131,24 @@ private:
         bool resolved = false;
         bool orphaned = false;
         QString authorId;
+        QString authorName;
         qint64 startBeatNum = 0;
         qint64 startBeatDen = 1;
         qint64 endBeatNum = 0;
         qint64 endBeatDen = 1;
         int replyCount = 0;
         QString createdAt;
+        QJsonArray replies;
     };
 
     static Row rowFromJson(const QJsonObject& obj);
 
     QVector<Row> m_rows;
     bool m_panelVisible = true;
+    bool m_creationActive = false;
+    QString m_expandedId;
+    QJsonObject m_creationAnchor;  // cached anchor for the in-progress creation
+    EditudeService* m_service = nullptr;
 
     static EditudeAnnotationModel* s_instance;
 };

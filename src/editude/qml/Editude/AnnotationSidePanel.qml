@@ -28,14 +28,11 @@ import Muse.UiComponents
 import Editude 1.0
 
 /**
- * DAW-style annotation side panel.
+ * DAW-style annotation side panel with interactive comment creation,
+ * expandable cards, inline replies, and resolve toggle.
  *
- * Lists all annotations for the current project sorted by beat position.
  * Clicking an annotation emits annotationSelected(annotationId) so the
  * caller can scroll the notation view to the relevant beat range.
- *
- * Annotation markers in the score itself are non-interactive decorators
- * rendered separately; this panel is the sole interaction surface.
  */
 Rectangle {
     id: root
@@ -48,17 +45,32 @@ Rectangle {
         anchors.fill: parent
         spacing: 0
 
+        // ── Header ──────────────────────────────────────────────────────
         Rectangle {
             Layout.fillWidth: true
             height: 36
             color: ui.theme.backgroundSecondaryColor
 
-            Text {
-                anchors.centerIn: parent
-                text: qsTr("Comments")
-                color: ui.theme.fontPrimaryColor
-                font.pixelSize: 13
-                font.bold: true
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 8
+
+                Text {
+                    text: qsTr("Comments")
+                    color: ui.theme.fontPrimaryColor
+                    font.pixelSize: 13
+                    font.bold: true
+                    Layout.fillWidth: true
+                }
+
+                FlatButton {
+                    icon: IconCode.PLUS
+                    toolTipTitle: qsTr("Add comment")
+                    width: 28
+                    height: 28
+                    onClicked: EditudeAnnotationModel.requestCreation()
+                }
             }
         }
 
@@ -68,6 +80,78 @@ Rectangle {
             color: ui.theme.strokeColor
         }
 
+        // ── Inline creation input ───────────────────────────────────────
+        Rectangle {
+            id: creationInput
+            Layout.fillWidth: true
+            visible: EditudeAnnotationModel.creationActive
+            color: ui.theme.backgroundPrimaryColor
+            implicitHeight: creationCol.implicitHeight + 16
+
+            ColumnLayout {
+                id: creationCol
+                anchors {
+                    left: parent.left
+                    right: parent.right
+                    top: parent.top
+                    margins: 8
+                }
+                spacing: 6
+
+                Text {
+                    text: qsTr("New comment")
+                    color: ui.theme.fontSecondaryColor
+                    font.pixelSize: 11
+                }
+
+                TextArea {
+                    id: creationTextArea
+                    Layout.fillWidth: true
+                    placeholderText: qsTr("Write a comment...")
+                    wrapMode: TextEdit.Wrap
+                    color: ui.theme.fontPrimaryColor
+                    font.pixelSize: 12
+                    background: Rectangle {
+                        color: ui.theme.backgroundSecondaryColor
+                        radius: 4
+                        border.color: ui.theme.strokeColor
+                        border.width: 1
+                    }
+                }
+
+                RowLayout {
+                    spacing: 6
+                    Layout.alignment: Qt.AlignRight
+
+                    FlatButton {
+                        text: qsTr("Cancel")
+                        onClicked: {
+                            creationTextArea.text = ""
+                            EditudeAnnotationModel.cancelCreation()
+                        }
+                    }
+
+                    FlatButton {
+                        text: qsTr("Submit")
+                        accentButton: true
+                        enabled: creationTextArea.text.trim().length > 0
+                        onClicked: {
+                            EditudeAnnotationModel.submitAnnotation(creationTextArea.text)
+                            creationTextArea.text = ""
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width
+                height: 1
+                color: ui.theme.strokeColor
+            }
+        }
+
+        // ── Annotation list ─────────────────────────────────────────────
         ListView {
             id: listView
 
@@ -88,13 +172,17 @@ Rectangle {
                 required property bool orphaned
                 required property int replyCount
                 required property string createdAt
+                required property string authorName
+                required property bool expanded
+                required property var replies
 
                 width: listView.width
-                height: contentCol.implicitHeight + 16
+                implicitHeight: contentCol.implicitHeight + 16
                 color: delegate.resolved
                     ? Qt.alpha(ui.theme.backgroundSecondaryColor, 0.5)
                     : ui.theme.backgroundPrimaryColor
 
+                // Left color bar
                 Rectangle {
                     width: 3
                     height: parent.height
@@ -116,6 +204,24 @@ Rectangle {
                     }
                     spacing: 4
 
+                    // Author + timestamp
+                    RowLayout {
+                        spacing: 6
+                        Text {
+                            text: delegate.authorName || qsTr("Unknown")
+                            color: ui.theme.fontPrimaryColor
+                            font.pixelSize: 11
+                            font.bold: true
+                        }
+                        Text {
+                            text: delegate.createdAt
+                            color: ui.theme.fontSecondaryColor
+                            font.pixelSize: 10
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    // Body text
                     Text {
                         Layout.fillWidth: true
                         text: delegate.body
@@ -124,15 +230,17 @@ Rectangle {
                             : ui.theme.fontPrimaryColor
                         font.pixelSize: 12
                         wrapMode: Text.WordWrap
-                        maximumLineCount: 3
-                        elide: Text.ElideRight
+                        maximumLineCount: delegate.expanded ? 0 : 3
+                        elide: delegate.expanded ? Text.ElideNone : Text.ElideRight
                     }
 
+                    // Status badges
                     RowLayout {
                         spacing: 8
+                        visible: !delegate.expanded
 
                         Text {
-                            text: delegate.orphaned ? qsTr("⚠ passage deleted")
+                            text: delegate.orphaned ? qsTr("passage deleted")
                                 : delegate.resolved  ? qsTr("Resolved")
                                 :                     ""
                             color: delegate.orphaned ? ui.theme.errorColor
@@ -151,8 +259,106 @@ Rectangle {
                             visible: delegate.replyCount > 0
                         }
                     }
+
+                    // ── Expanded section: replies + actions ─────────────
+                    ColumnLayout {
+                        visible: delegate.expanded
+                        spacing: 4
+                        Layout.fillWidth: true
+
+                        // Separator before replies
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 1
+                            color: ui.theme.strokeColor
+                            opacity: 0.5
+                            visible: delegate.replies.length > 0
+                        }
+
+                        // Reply list
+                        Repeater {
+                            model: delegate.replies
+
+                            ColumnLayout {
+                                spacing: 2
+                                Layout.fillWidth: true
+                                Layout.leftMargin: 8
+
+                                RowLayout {
+                                    spacing: 4
+                                    Text {
+                                        text: modelData.author_name || qsTr("Unknown")
+                                        color: ui.theme.fontPrimaryColor
+                                        font.pixelSize: 10
+                                        font.bold: true
+                                    }
+                                    Text {
+                                        text: modelData.created_at || ""
+                                        color: ui.theme.fontSecondaryColor
+                                        font.pixelSize: 9
+                                    }
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.body || ""
+                                    color: ui.theme.fontPrimaryColor
+                                    font.pixelSize: 11
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                        }
+
+                        // Reply input
+                        RowLayout {
+                            spacing: 4
+                            Layout.fillWidth: true
+                            Layout.topMargin: 4
+
+                            TextField {
+                                id: replyField
+                                Layout.fillWidth: true
+                                placeholderText: qsTr("Reply...")
+                                font.pixelSize: 11
+                                color: ui.theme.fontPrimaryColor
+                                background: Rectangle {
+                                    color: ui.theme.backgroundSecondaryColor
+                                    radius: 3
+                                    border.color: ui.theme.strokeColor
+                                    border.width: 1
+                                }
+                            }
+
+                            FlatButton {
+                                text: qsTr("Send")
+                                enabled: replyField.text.trim().length > 0
+                                onClicked: {
+                                    EditudeAnnotationModel.submitReply(
+                                        delegate.annotationId, replyField.text)
+                                    replyField.text = ""
+                                }
+                            }
+                        }
+
+                        // Action row: resolve toggle
+                        RowLayout {
+                            spacing: 8
+                            Layout.topMargin: 4
+
+                            FlatButton {
+                                text: delegate.resolved
+                                    ? qsTr("Unresolve")
+                                    : qsTr("Resolve")
+                                onClicked: {
+                                    EditudeAnnotationModel.toggleResolve(
+                                        delegate.annotationId, !delegate.resolved)
+                                }
+                            }
+                        }
+                    }
                 }
 
+                // Bottom separator
                 Rectangle {
                     anchors.bottom: parent.bottom
                     width: parent.width
@@ -163,13 +369,16 @@ Rectangle {
 
                 MouseArea {
                     anchors.fill: parent
-                    onClicked: root.annotationSelected(delegate.annotationId)
+                    onClicked: {
+                        EditudeAnnotationModel.setExpanded(delegate.annotationId)
+                        root.annotationSelected(delegate.annotationId)
+                    }
                 }
             }
 
             Text {
                 anchors.centerIn: parent
-                visible: listView.count === 0
+                visible: listView.count === 0 && !EditudeAnnotationModel.creationActive
                 text: qsTr("No comments yet")
                 color: ui.theme.fontSecondaryColor
                 font.pixelSize: 12

@@ -65,6 +65,9 @@ void EditudeService::setPresenceModel(EditudePresenceModel* model)
 void EditudeService::setAnnotationModel(EditudeAnnotationModel* model)
 {
     m_annotationModel = model;
+    if (model) {
+        model->setService(this);
+    }
 }
 
 void EditudeService::setSnapshotPath(const QString& path)
@@ -510,7 +513,10 @@ void EditudeService::onServerMessage(const QString& text)
 
     } else if (type == "annotation_reply_created") {
         if (m_annotationModel) {
-            m_annotationModel->incrementReplyCount(msg.value("annotation_id").toString());
+            m_annotationModel->addReply(
+                msg.value("annotation_id").toString(),
+                msg.value("reply").toObject()
+            );
         }
 
     } else if (type == "op_error") {
@@ -1048,6 +1054,186 @@ void EditudeService::fetchAnnotations()
         m_annotationModel->loadFromJson(arr);
         LOGD() << "[editude] loaded" << arr.size() << "annotations";
     });
+}
+
+void EditudeService::createAnnotation(const QString& partId, qint64 startNum, qint64 startDen,
+                                      qint64 endNum, qint64 endDen, const QString& body)
+{
+    if (m_token.isEmpty() || m_projectId.isEmpty()) {
+        return;
+    }
+
+    QUrl url = deriveServerBaseUrl();
+    url.setPath(QString("/projects/%1/annotations").arg(m_projectId));
+
+    QJsonObject payload;
+    payload["part_id"]        = partId;
+    payload["start_beat_num"] = startNum;
+    payload["start_beat_den"] = startDen;
+    payload["end_beat_num"]   = endNum;
+    payload["end_beat_den"]   = endDen;
+    payload["body"]           = body;
+
+    QNetworkRequest req(url);
+    req.setRawHeader("Authorization", QString("Bearer %1").arg(m_token).toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    QNetworkReply* reply = m_nam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            LOGW() << "[editude] create annotation failed:" << reply->errorString();
+        }
+        // The server broadcasts annotation_created via WS; the model handles it there.
+    });
+}
+
+void EditudeService::resolveAnnotation(const QString& annotationId, bool resolved)
+{
+    if (m_token.isEmpty() || m_projectId.isEmpty()) {
+        return;
+    }
+
+    QUrl url = deriveServerBaseUrl();
+    url.setPath(QString("/projects/%1/annotations/%2").arg(m_projectId, annotationId));
+
+    QJsonObject payload;
+    payload["resolved"] = resolved;
+
+    QNetworkRequest req(url);
+    req.setRawHeader("Authorization", QString("Bearer %1").arg(m_token).toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    // PATCH via custom verb
+    QNetworkReply* reply = m_nam.sendCustomRequest(req, "PATCH",
+        QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, annotationId, resolved]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            LOGW() << "[editude] resolve annotation failed:" << reply->errorString();
+            return;
+        }
+        if (m_annotationModel) {
+            QJsonObject fields;
+            fields["resolved"] = resolved;
+            m_annotationModel->updateAnnotation(annotationId, fields);
+        }
+    });
+}
+
+void EditudeService::createReply(const QString& annotationId, const QString& body)
+{
+    if (m_token.isEmpty() || m_projectId.isEmpty()) {
+        return;
+    }
+
+    QUrl url = deriveServerBaseUrl();
+    url.setPath(QString("/projects/%1/annotations/%2/replies").arg(m_projectId, annotationId));
+
+    QJsonObject payload;
+    payload["body"] = body;
+
+    QNetworkRequest req(url);
+    req.setRawHeader("Authorization", QString("Bearer %1").arg(m_token).toUtf8());
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    QNetworkReply* reply = m_nam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            LOGW() << "[editude] create reply failed:" << reply->errorString();
+        }
+        // The server broadcasts annotation_reply_created via WS; the model handles it there.
+    });
+}
+
+QJsonObject EditudeService::getSelectionAnchor()
+{
+    QJsonObject anchor;
+    static const QString SCORE_LEVEL_PART_ID = QStringLiteral("_score");
+
+    if (!m_currentNotation) {
+        anchor["part_id"]        = SCORE_LEVEL_PART_ID;
+        anchor["start_beat_num"] = 0;
+        anchor["start_beat_den"] = 1;
+        anchor["end_beat_num"]   = 0;
+        anchor["end_beat_den"]   = 1;
+        return anchor;
+    }
+
+    const auto sel = m_currentNotation->interaction()->selection();
+    if (!sel || sel->isNone()) {
+        anchor["part_id"]        = SCORE_LEVEL_PART_ID;
+        anchor["start_beat_num"] = 0;
+        anchor["start_beat_den"] = 1;
+        anchor["end_beat_num"]   = 0;
+        anchor["end_beat_den"]   = 1;
+        return anchor;
+    }
+
+    if (sel->isRange()) {
+        const auto range = sel->range();
+        if (range) {
+            const auto startFrac = range->startTick().reduced();
+            const auto endFrac   = range->endTick().reduced();
+            anchor["start_beat_num"] = startFrac.numerator();
+            anchor["start_beat_den"] = startFrac.denominator();
+            anchor["end_beat_num"]   = endFrac.numerator();
+            anchor["end_beat_den"]   = endFrac.denominator();
+
+            // Resolve part from the range's start staff
+            const auto startStaff = range->startStaffIndex();
+            if (m_score) {
+                const auto& partUuids = m_translator.knownPartUuids();
+                for (auto* part : m_score->parts()) {
+                    staff_idx_t firstStaff = m_score->staffIdx(part);
+                    staff_idx_t lastStaff  = firstStaff + part->nstaves();
+                    if (startStaff >= firstStaff && startStaff < lastStaff) {
+                        auto it = partUuids.find(part);
+                        if (it != partUuids.end()) {
+                            anchor["part_id"] = it.value();
+                        }
+                        break;
+                    }
+                }
+            }
+            if (!anchor.contains("part_id")) {
+                anchor["part_id"] = SCORE_LEVEL_PART_ID;
+            }
+            return anchor;
+        }
+    }
+
+    // Single element selection
+    const auto& elements = sel->elements();
+    if (!elements.empty()) {
+        const auto* elem = elements.first();
+        const auto tick = elem->tick().reduced();
+        anchor["start_beat_num"] = tick.numerator();
+        anchor["start_beat_den"] = tick.denominator();
+        anchor["end_beat_num"]   = tick.numerator();
+        anchor["end_beat_den"]   = tick.denominator();
+
+        if (auto* part = elem->part()) {
+            const auto& partUuids = m_translator.knownPartUuids();
+            auto it = partUuids.find(part);
+            if (it != partUuids.end()) {
+                anchor["part_id"] = it.value();
+            }
+        }
+        if (!anchor.contains("part_id")) {
+            anchor["part_id"] = SCORE_LEVEL_PART_ID;
+        }
+        return anchor;
+    }
+
+    // Fallback: score-level
+    anchor["part_id"]        = SCORE_LEVEL_PART_ID;
+    anchor["start_beat_num"] = 0;
+    anchor["start_beat_den"] = 1;
+    anchor["end_beat_num"]   = 0;
+    anchor["end_beat_den"]   = 1;
+    return anchor;
 }
 
 #ifdef MUE_BUILD_EDITUDE_TEST_SERVER
