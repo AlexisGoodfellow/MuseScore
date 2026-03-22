@@ -30,8 +30,6 @@
 
 namespace mu::editude::internal {
 
-class EditudeService;
-
 /**
  * QAbstractListModel that holds the current project's annotations.
  *
@@ -91,15 +89,16 @@ public:
     // Pass empty string to collapse all.
     Q_INVOKABLE void setExpanded(const QString& annotationId);
 
-    // Set the back-pointer to the service (called by EditudeService::setAnnotationModel).
-    void setService(EditudeService* service) { m_service = service; }
-
-    // QML-invokable annotation actions (delegate to EditudeService).
+    // QML-invokable annotation actions.
+    // These emit signals that EditudeService connects to.
     Q_INVOKABLE void requestCreation();
     Q_INVOKABLE void submitAnnotation(const QString& body);
     Q_INVOKABLE void cancelCreation();
     Q_INVOKABLE void submitReply(const QString& annotationId, const QString& body);
     Q_INVOKABLE void toggleResolve(const QString& annotationId, bool resolved);
+
+    // Called by the service to populate the creation anchor.
+    void setCreationAnchor(const QJsonObject& anchor) { m_creationAnchor = anchor; }
 
     // Inline creation mode.
     bool creationActive() const { return m_creationActive; }
@@ -122,6 +121,13 @@ signals:
     void creationActiveChanged();
     void expandedAnnotationIdChanged();
     void annotationExpandedAt(qint64 startBeatNum, qint64 startBeatDen, const QString& partId);
+
+    // Signals for EditudeService to connect to (avoid including editudeservice.h).
+    void creationRequested();
+    void annotationSubmitted(const QString& partId, qint64 startNum, qint64 startDen,
+                             qint64 endNum, qint64 endDen, const QString& body);
+    void replySubmitted(const QString& annotationId, const QString& body);
+    void resolveToggled(const QString& annotationId, bool resolved);
 
 private:
     struct Row {
@@ -148,7 +154,6 @@ private:
     bool m_creationActive = false;
     QString m_expandedId;
     QJsonObject m_creationAnchor;  // cached anchor for the in-progress creation
-    EditudeService* m_service = nullptr;
 
     static EditudeAnnotationModel* s_instance;
 };

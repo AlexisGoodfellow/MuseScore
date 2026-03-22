@@ -66,7 +66,25 @@ void EditudeService::setAnnotationModel(EditudeAnnotationModel* model)
 {
     m_annotationModel = model;
     if (model) {
-        model->setService(this);
+        connect(model, &EditudeAnnotationModel::creationRequested, this, [this]() {
+            if (m_annotationModel) {
+                m_annotationModel->setCreationAnchor(getSelectionAnchor());
+                m_annotationModel->setCreationActive(true);
+                m_annotationModel->setPanelVisible(true);
+            }
+        });
+        connect(model, &EditudeAnnotationModel::annotationSubmitted, this,
+            [this](const QString& partId, qint64 sn, qint64 sd, qint64 en, qint64 ed, const QString& body) {
+                createAnnotation(partId, sn, sd, en, ed, body);
+            });
+        connect(model, &EditudeAnnotationModel::replySubmitted, this,
+            [this](const QString& annotationId, const QString& body) {
+                createReply(annotationId, body);
+            });
+        connect(model, &EditudeAnnotationModel::resolveToggled, this,
+            [this](const QString& annotationId, bool resolved) {
+                resolveAnnotation(annotationId, resolved);
+            });
     }
 }
 
@@ -1186,8 +1204,8 @@ QJsonObject EditudeService::getSelectionAnchor()
             if (m_score) {
                 const auto& partUuids = m_translator.knownPartUuids();
                 for (auto* part : m_score->parts()) {
-                    staff_idx_t firstStaff = m_score->staffIdx(part);
-                    staff_idx_t lastStaff  = firstStaff + part->nstaves();
+                    auto firstStaff = m_score->staffIdx(part);
+                    auto lastStaff  = firstStaff + part->nstaves();
                     if (startStaff >= firstStaff && startStaff < lastStaff) {
                         auto it = partUuids.find(part);
                         if (it != partUuids.end()) {
@@ -1207,7 +1225,7 @@ QJsonObject EditudeService::getSelectionAnchor()
     // Single element selection
     const auto& elements = sel->elements();
     if (!elements.empty()) {
-        const auto* elem = elements.first();
+        const auto* elem = elements.front();
         const auto tick = elem->tick().reduced();
         anchor["start_beat_num"] = tick.numerator();
         anchor["start_beat_den"] = tick.denominator();

@@ -19,7 +19,6 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "editudeannotationmodel.h"
-#include "../../internal/editudeservice.h"
 #include "log.h"
 
 using namespace mu::editude::internal;
@@ -247,20 +246,15 @@ QHash<int, QByteArray> EditudeAnnotationModel::roleNames() const
 
 void EditudeAnnotationModel::requestCreation()
 {
-    if (!m_service) {
-        return;
-    }
-    m_creationAnchor = m_service->getSelectionAnchor();
-    setCreationActive(true);
-    setPanelVisible(true);
+    emit creationRequested();
 }
 
 void EditudeAnnotationModel::submitAnnotation(const QString& body)
 {
-    if (!m_service || body.trimmed().isEmpty()) {
+    if (body.trimmed().isEmpty()) {
         return;
     }
-    m_service->createAnnotation(
+    emit annotationSubmitted(
         m_creationAnchor.value("part_id").toString(),
         static_cast<qint64>(m_creationAnchor.value("start_beat_num").toDouble()),
         static_cast<qint64>(m_creationAnchor.value("start_beat_den").toDouble(1)),
@@ -278,16 +272,13 @@ void EditudeAnnotationModel::cancelCreation()
 
 void EditudeAnnotationModel::submitReply(const QString& annotationId, const QString& body)
 {
-    if (!m_service || body.trimmed().isEmpty()) {
+    if (body.trimmed().isEmpty()) {
         return;
     }
-    m_service->createReply(annotationId, body.trimmed());
+    emit replySubmitted(annotationId, body.trimmed());
 }
 
 void EditudeAnnotationModel::toggleResolve(const QString& annotationId, bool resolved)
 {
-    if (!m_service) {
-        return;
-    }
-    m_service->resolveAnnotation(annotationId, resolved);
+    emit resolveToggled(annotationId, resolved);
 }
