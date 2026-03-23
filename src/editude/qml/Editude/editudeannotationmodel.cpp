@@ -64,6 +64,7 @@ EditudeAnnotationModel::Row EditudeAnnotationModel::rowFromJson(const QJsonObjec
     Row r;
     r.annotationId  = obj.value("id").toString();
     r.partId        = obj.value("part_id").toString();
+    r.partIds       = obj.value("part_ids").toArray();
     r.body          = obj.value("body").toString();
     r.resolved      = obj.value("resolved").toBool(false);
     r.orphaned      = obj.value("orphaned").toBool(false);
@@ -202,6 +203,7 @@ QVariant EditudeAnnotationModel::data(const QModelIndex& index, int role) const
     switch (role) {
     case AnnotationIdRole: return r.annotationId;
     case PartIdRole:       return r.partId;
+    case PartIdsRole:      return QVariant::fromValue(r.partIds);
     case BodyRole:         return r.body;
     case ResolvedRole:     return r.resolved;
     case OrphanedRole:     return r.orphaned;
@@ -224,6 +226,7 @@ QHash<int, QByteArray> EditudeAnnotationModel::roleNames() const
     return {
         { AnnotationIdRole, "annotationId" },
         { PartIdRole,       "partId"       },
+        { PartIdsRole,      "partIds"      },
         { BodyRole,         "body"         },
         { ResolvedRole,     "resolved"     },
         { OrphanedRole,     "orphaned"     },
@@ -256,6 +259,7 @@ void EditudeAnnotationModel::submitAnnotation(const QString& body)
     }
     emit annotationSubmitted(
         m_creationAnchor.value("part_id").toString(),
+        m_creationAnchor.value("part_ids").toArray(),
         static_cast<qint64>(m_creationAnchor.value("start_beat_num").toDouble()),
         static_cast<qint64>(m_creationAnchor.value("start_beat_den").toDouble(1)),
         static_cast<qint64>(m_creationAnchor.value("end_beat_num").toDouble()),

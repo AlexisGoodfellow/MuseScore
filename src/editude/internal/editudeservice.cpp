@@ -76,8 +76,9 @@ void EditudeService::setAnnotationModel(EditudeAnnotationModel* model)
             }
         });
         connect(model, &EditudeAnnotationModel::annotationSubmitted, this,
-            [this](const QString& partId, qint64 sn, qint64 sd, qint64 en, qint64 ed, const QString& body) {
-                createAnnotation(partId, sn, sd, en, ed, body);
+            [this](const QString& partId, const QJsonArray& partIds,
+                   qint64 sn, qint64 sd, qint64 en, qint64 ed, const QString& body) {
+                createAnnotation(partId, partIds, sn, sd, en, ed, body);
             });
         connect(model, &EditudeAnnotationModel::replySubmitted, this,
             [this](const QString& annotationId, const QString& body) {
@@ -177,6 +178,7 @@ void EditudeService::start()
         m_snapshotRevision = obj.value("snapshot_revision").toInt(0);
         m_serverRevision   = obj.value("server_revision").toInt(0);
         m_pendingOps       = obj.value("snapshot_ops").toArray();
+        m_serverParts      = obj.value("parts").toArray();
         m_bootstrapReady   = true;
 
         // Defer openProject() to the next event-loop iteration so it runs
@@ -296,6 +298,26 @@ void EditudeService::bootstrapAndConnect()
         for (auto it = m_applicator.partUuidToPart().cbegin();
              it != m_applicator.partUuidToPart().cend(); ++it) {
             m_translator.registerKnownPart(it.value(), it.key());
+        }
+    }
+
+    // Register parts from the server's part UUID map.  When a snapshot
+    // compacts away AddPart ops, the MSCZ has parts baked in but no ops
+    // register their UUIDs.  The server returns the part map so the client
+    // can match score parts to their editude UUIDs.
+    if (!m_serverParts.isEmpty()) {
+        const auto& scoreParts = m_score->parts();
+        for (int i = 0; i < m_serverParts.size(); ++i) {
+            const QJsonObject p = m_serverParts[i].toObject();
+            const QString uuid = p.value("part_id").toString();
+            if (uuid.isEmpty() || i >= static_cast<int>(scoreParts.size())) {
+                continue;
+            }
+            mu::engraving::Part* part = scoreParts[static_cast<size_t>(i)];
+            if (!m_applicator.partUuidToPart().contains(uuid)) {
+                m_applicator.registerPart(part, uuid);
+            }
+            m_translator.registerKnownPart(part, uuid);
         }
     }
 
@@ -1137,7 +1159,8 @@ void EditudeService::fetchAnnotations()
     });
 }
 
-void EditudeService::createAnnotation(const QString& partId, qint64 startNum, qint64 startDen,
+void EditudeService::createAnnotation(const QString& partId, const QJsonArray& partIds,
+                                      qint64 startNum, qint64 startDen,
                                       qint64 endNum, qint64 endDen, const QString& body)
 {
     if (m_token.isEmpty() || m_projectId.isEmpty()) {
@@ -1149,6 +1172,9 @@ void EditudeService::createAnnotation(const QString& partId, qint64 startNum, qi
 
     QJsonObject payload;
     payload["part_id"]        = partId;
+    if (!partIds.isEmpty()) {
+        payload["part_ids"]   = partIds;
+    }
     payload["start_beat_num"] = startNum;
     payload["start_beat_den"] = startDen;
     payload["end_beat_num"]   = endNum;
@@ -1289,20 +1315,26 @@ QJsonObject EditudeService::getSelectionAnchor()
             anchor["end_beat_num"]   = endFrac.numerator();
             anchor["end_beat_den"]   = endFrac.denominator();
 
-            // Resolve part from the range's start staff
-            const auto startStaff = range->startStaffIndex();
+            // Resolve all parts covered by the range's staff span.
+            const auto rangeStartStaff = range->startStaffIndex();
+            const auto rangeEndStaff   = range->endStaffIndex();  // exclusive
             if (m_score) {
                 const auto& partUuids = m_translator.knownPartUuids();
+                QJsonArray partIds;
                 for (auto* part : m_score->parts()) {
                     auto firstStaff = m_score->staffIdx(part);
                     auto lastStaff  = firstStaff + part->nstaves();
-                    if (startStaff >= firstStaff && startStaff < lastStaff) {
+                    // Part overlaps the selection if staff ranges intersect.
+                    if (firstStaff < rangeEndStaff && lastStaff > rangeStartStaff) {
                         auto it = partUuids.find(part);
                         if (it != partUuids.end()) {
-                            anchor["part_id"] = it.value();
+                            partIds.append(it.value());
                         }
-                        break;
                     }
+                }
+                if (!partIds.isEmpty()) {
+                    anchor["part_id"]  = partIds.first().toString();
+                    anchor["part_ids"] = partIds;
                 }
             }
             if (!anchor.contains("part_id")) {
@@ -1377,6 +1409,7 @@ void EditudeService::connectToSession(const QString& sessionUrl)
     m_clientSeq = 0;
     m_bootstrapReady = false;
     m_pendingOps = QJsonArray();
+    m_serverParts = QJsonArray();
     m_bufferedOps = QJsonArray();
     m_reconnectAttempt = 0;
     m_wsEverConnected = false;
@@ -1441,6 +1474,7 @@ void EditudeService::connectToSession(const QString& sessionUrl)
         m_snapshotRevision = obj.value("snapshot_revision").toInt(0);
         m_serverRevision   = obj.value("server_revision").toInt(0);
         m_pendingOps       = obj.value("snapshot_ops").toArray();
+        m_serverParts      = obj.value("parts").toArray();
         m_bootstrapReady   = true;
 
         // Ensure timers are created (they may have been nil if start() was never called)
@@ -1616,8 +1650,23 @@ void EditudeService::refreshAnnotationOverlay()
         const qint64 endNum   = idx.data(EditudeAnnotationModel::EndBeatNumRole).toLongLong();
         const qint64 endDen   = idx.data(EditudeAnnotationModel::EndBeatDenRole).toLongLong();
 
-        QVector<muse::RectF> rects = AnnotationOverlay::reprojectBeatRange(
-            m_score, startNum, startDen, endNum, endDen, partId, partUuids);
+        // Collect rects for all parts this annotation covers.
+        QVector<muse::RectF> rects;
+        const QJsonArray partIds = idx.data(EditudeAnnotationModel::PartIdsRole)
+                                       .value<QJsonArray>();
+
+        if (partIds.size() > 1) {
+            // Multi-part annotation: render highlights on every annotated part.
+            for (const QJsonValue& pv : partIds) {
+                rects += AnnotationOverlay::reprojectBeatRange(
+                    m_score, startNum, startDen, endNum, endDen,
+                    pv.toString(), partUuids);
+            }
+        } else {
+            // Single-part (or legacy annotation with no part_ids).
+            rects = AnnotationOverlay::reprojectBeatRange(
+                m_score, startNum, startDen, endNum, endDen, partId, partUuids);
+        }
 
         if (!rects.isEmpty()) {
             QColor color = baseColor;

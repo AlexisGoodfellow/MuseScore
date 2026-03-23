@@ -122,7 +122,8 @@ private:
     void refreshPresenceModel();
     void refreshAnnotationOverlay();
     void fetchAnnotations();
-    void createAnnotation(const QString& partId, qint64 startNum, qint64 startDen,
+    void createAnnotation(const QString& partId, const QJsonArray& partIds,
+                          qint64 startNum, qint64 startDen,
                           qint64 endNum, qint64 endDen, const QString& body);
     void resolveAnnotation(const QString& annotationId, bool resolved);
     void createReply(const QString& annotationId, const QString& body);
@@ -155,6 +156,7 @@ private:
     int m_snapshotRevision = 0;
     int m_serverRevision = 0;
     QJsonArray m_pendingOps;
+    QJsonArray m_serverParts;  // part UUID map from session-bootstrap (survives snapshot compaction)
     bool m_bootstrapReady = false;
     QTimer* m_tokenRefreshTimer = nullptr;
     qint64 m_tokenExpiry = 0;

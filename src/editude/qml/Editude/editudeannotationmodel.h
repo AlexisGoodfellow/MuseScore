@@ -53,6 +53,7 @@ public:
     enum Roles {
         AnnotationIdRole = Qt::UserRole + 1,
         PartIdRole,
+        PartIdsRole,
         BodyRole,
         ResolvedRole,
         OrphanedRole,
@@ -128,7 +129,8 @@ signals:
 
     // Signals for EditudeService to connect to (avoid including editudeservice.h).
     void creationRequested();
-    void annotationSubmitted(const QString& partId, qint64 startNum, qint64 startDen,
+    void annotationSubmitted(const QString& partId, const QJsonArray& partIds,
+                             qint64 startNum, qint64 startDen,
                              qint64 endNum, qint64 endDen, const QString& body);
     void replySubmitted(const QString& annotationId, const QString& body);
     void resolveToggled(const QString& annotationId, bool resolved);
@@ -138,6 +140,7 @@ private:
     struct Row {
         QString annotationId;
         QString partId;
+        QJsonArray partIds;
         QString body;
         bool resolved = false;
         bool orphaned = false;
