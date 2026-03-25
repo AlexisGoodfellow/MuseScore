@@ -46,16 +46,14 @@ private:
 
     Reply actionInsertNote(const QJsonObject& body);
     Reply actionInsertRest(const QJsonObject& body);
-    Reply actionDeleteEvent(const QJsonObject& body);
+    Reply actionDeleteNote(const QJsonObject& body);
+    Reply actionDeleteRest(const QJsonObject& body);
     Reply actionSetPitch(const QJsonObject& body);
     Reply actionUndo();
 
     // Tier 1 — extended ops
-    Reply actionInsertChord(const QJsonObject& body);
-    Reply actionAddChordNote(const QJsonObject& body);
-    Reply actionRemoveChordNote(const QJsonObject& body);
     Reply actionSetTie(const QJsonObject& body);
-    Reply actionSetTrack(const QJsonObject& body);
+    Reply actionSetVoice(const QJsonObject& body);
 
     // Tier 2 — score directives
     Reply actionSetTimeSignature(const QJsonObject& body);
@@ -178,19 +176,16 @@ private:
     // Display mode
     Reply actionSetConcertPitch(const QJsonObject& body);
 
-    // Serialization helpers
+    // Serialization helpers — coordinate-addressed (no UUIDs)
     QJsonObject serializeScore();
     QJsonObject serializePart(mu::engraving::Part* part);
     QJsonArray  serializePartEvents(mu::engraving::Part* part);
     QJsonObject serializeNote(mu::engraving::Note* note,
-                              const QString& uuid,
-                              const mu::engraving::Fraction& tick);
+                              const mu::engraving::Fraction& tick,
+                              int voice, int staff);
     QJsonObject serializeRest(mu::engraving::Rest* rest,
-                              const QString& uuid,
-                              const mu::engraving::Fraction& tick);
-    QJsonObject serializeChord(mu::engraving::Chord* chord,
-                               const QString& uuid,
-                               const mu::engraving::Fraction& tick);
+                              const mu::engraving::Fraction& tick,
+                              int voice, int staff);
     QJsonObject serializePartArticulations(mu::engraving::Part* part);
     QJsonObject serializePartTuplets(mu::engraving::Part* part);
     QJsonObject serializePartArpeggios(mu::engraving::Part* part);
@@ -220,10 +215,8 @@ private:
     QJsonObject serializeScoreJumps();
     QJsonArray  serializeMeasureLenOverrides();
 
-    QString uuidForElement(mu::engraving::EngravingObject* obj) const;
-    QString uuidForChordRest(mu::engraving::EngravingObject* obj) const;
+    // Part UUID lookup (retained — parts are axes, not points).
     QString uuidForPart(mu::engraving::Part* part) const;
-    mu::engraving::EngravingObject* findByUuid(const QString& uuid) const;
     static QJsonObject beatJson(const mu::engraving::Fraction& tick);
     static QString durationTypeName(mu::engraving::DurationType dt);
     static QJsonObject pitchJson(mu::engraving::Note* note);

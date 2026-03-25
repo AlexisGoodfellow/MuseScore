@@ -738,7 +738,6 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
     const QVector<QJsonObject> ops = m_translator.translateAll(
         changes.changedObjects,
         changes.changedPropertyIdSet,
-        m_applicator.elementToUuid(),
         changedMetaTags);
 
     QVector<QJsonObject> allOps = ops;
@@ -1121,15 +1120,14 @@ QJsonObject EditudeService::buildSelectionPayload(const mu::notation::INotationS
     }
 
     obj["state"] = "single";
-    const auto& uuidMap = m_applicator.elementToUuid();
-    QJsonArray ids;
+    QJsonArray ticks;
+    QJsonArray staves;
     for (const auto* elem : sel->elements()) {
-        auto it = uuidMap.find(const_cast<mu::engraving::EngravingItem*>(elem));
-        if (it != uuidMap.end()) {
-            ids.append(it.value());
-        }
+        ticks.append(elem->tick().ticks());
+        staves.append(static_cast<int>(elem->staffIdx()));
     }
-    obj["element_ids"] = ids;
+    obj["element_ticks"] = ticks;
+    obj["element_staves"] = staves;
     return obj;
 }
 
@@ -1471,7 +1469,12 @@ void EditudeService::connectToSession(const QString& sessionUrl)
             return;
         }
 
-        m_snapshotRevision = obj.value("snapshot_revision").toInt(0);
+        // snapshot_revision is null when no snapshot exists, or an int >= 0
+        // when a snapshot is present.  We must distinguish the two because a
+        // snapshot at revision 0 is valid and must be fetched.
+        QJsonValue snapRevVal = obj.value("snapshot_revision");
+        bool hasSnapshot = !snapRevVal.isNull() && !snapRevVal.isUndefined();
+        m_snapshotRevision = snapRevVal.toInt(0);
         m_serverRevision   = obj.value("server_revision").toInt(0);
         m_pendingOps       = obj.value("snapshot_ops").toArray();
         m_serverParts      = obj.value("parts").toArray();
@@ -1521,7 +1524,9 @@ void EditudeService::connectToSession(const QString& sessionUrl)
 
         // If the project has a snapshot on the server, fetch it before
         // closing the current project so openScoreForSession() can load it.
-        if (m_snapshotRevision > 0) {
+        // snapshot_revision is null (hasSnapshot == false) for brand-new
+        // projects; a value of 0 means a snapshot exists at revision 0.
+        if (hasSnapshot) {
             QUrl snapshotUrl = deriveServerBaseUrl();
             snapshotUrl.setPath(QString("/projects/%1/latest-snapshot").arg(m_projectId));
 
@@ -1591,13 +1596,19 @@ void EditudeService::refreshPresenceModel()
         if (cursor.state == "range") {
             rects = PresenceOverlay::reprojectRange(m_score, cursor);
         } else if (cursor.state == "single") {
-            const auto& uuidMap = m_applicator.elementToUuid();
-            for (auto it = uuidMap.begin(); it != uuidMap.end(); ++it) {
-                if (cursor.elementIds.contains(it.value())) {
-                    const auto* engItem = dynamic_cast<const mu::engraving::EngravingItem*>(it.key());
-                    if (engItem) {
-                        rects.append(engItem->canvasBoundingRect());
-                    }
+            for (int i = 0; i < cursor.elementTicks.size(); ++i) {
+                const auto tick = mu::engraving::Fraction::fromTicks(cursor.elementTicks[i]);
+                auto* seg = m_score->tick2segment(tick, true,
+                                                   mu::engraving::SegmentType::ChordRest);
+                if (!seg) {
+                    continue;
+                }
+                // Get the staff index for this element (if available).
+                const int staffIdx = (i < cursor.elementStaves.size())
+                    ? cursor.elementStaves[i] : 0;
+                auto* elem = seg->element(staffIdx * mu::engraving::VOICES);
+                if (elem) {
+                    rects.append(elem->canvasBoundingRect());
                 }
             }
         }

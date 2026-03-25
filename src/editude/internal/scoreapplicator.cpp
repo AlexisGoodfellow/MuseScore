@@ -19,6 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "scoreapplicator.h"
+#include "editudeutils.h"
 
 #include <QJsonArray>
 
@@ -77,14 +78,27 @@
 using namespace mu::editude::internal;
 using namespace mu::engraving;
 
+// ---------------------------------------------------------------------------
+// Lifecycle helpers
+// ---------------------------------------------------------------------------
+
 void ScoreApplicator::reset()
 {
-    m_uuidToElement.clear();
-    m_elementToUuid.clear();
     m_partUuidToPart.clear();
-    m_tier3UuidToElement.clear();
-    m_tier3ElementToUuid.clear();
 }
+
+Part* ScoreApplicator::resolvePart(const QJsonObject& op) const
+{
+    const QString partId = op["part_id"].toString();
+    if (partId.isEmpty() || !m_partUuidToPart.contains(partId)) {
+        return nullptr;
+    }
+    return m_partUuidToPart.value(partId);
+}
+
+// ---------------------------------------------------------------------------
+// Shared static helpers
+// ---------------------------------------------------------------------------
 
 int ScoreApplicator::pitchToMidi(const QString& step, int octave, const QString& accidental)
 {
@@ -131,11 +145,20 @@ DurationType ScoreApplicator::parseDurationType(const QString& name)
     return DurationType::V_INVALID;
 }
 
+// ---------------------------------------------------------------------------
+// Tier 1 — coordinate-addressed note/rest operations
+// ---------------------------------------------------------------------------
+
 bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
 {
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyInsertNote: unknown or missing part_id";
+        return false;
+    }
+
     const QJsonObject beat     = op["beat"].toObject();
     const QJsonObject pitch    = op["pitch"].toObject();
-    // Duration is {"type": "quarter", "dots": 0} — an object, not a bare string.
     const QJsonObject durObj   = op["duration"].toObject();
 
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
@@ -150,8 +173,9 @@ bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const track_idx_t track = static_cast<track_idx_t>(op["track"].toInt(0));
-    const QString noteUuid  = op["id"].toString();
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+    const track_idx_t track = trackFromCoord(part, voice, stf);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
@@ -164,11 +188,16 @@ bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
     dur.setDots(dots);
 
     score->startCmd(TranslatableString("undoableAction", "Insert note"));
-    score->setNoteRest(seg, track, nval, dur.ticks());
+    // If a chord already exists at this segment/track, add the note to it
+    // instead of replacing the entire ChordRest (which setNoteRest does).
+    EngravingItem* existing = seg->element(track);
+    if (existing && existing->isChord()) {
+        score->addNote(toChord(existing), nval);
+    } else {
+        score->setNoteRest(seg, track, nval, dur.ticks());
+    }
     score->endCmd();
 
-    // Register the UUID ↔ element mapping so that subsequent DeleteEvent /
-    // SetPitch ops targeting this note can look it up by UUID.
     // Optional tab fields — set fret/string if provided by the op.
     const int tabFret   = op.value("fret").toInt(-1);
     const int tabString = op.value("string").toInt(-1);
@@ -176,23 +205,18 @@ bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
     const QString noteheadStr = op.value("notehead").toString();
     const bool hasNotehead = !noteheadStr.isEmpty();
 
-    if (!noteUuid.isEmpty()) {
+    if (tabFret >= 0 || tabString >= 0 || hasNotehead) {
         Segment* seg2 = score->tick2segment(tick, false, SegmentType::ChordRest);
         if (seg2) {
             EngravingItem* el = seg2->element(track);
             if (el && el->type() == ElementType::CHORD) {
                 Chord* chord = toChord(el);
-                // Find the note we just inserted by MIDI pitch.
                 for (Note* n : chord->notes()) {
                     if (n->pitch() == midi) {
-                        m_uuidToElement[noteUuid] = n;
-                        m_elementToUuid[n]        = noteUuid;
-                        // Apply tab data if present.
                         if (tabFret >= 0 && tabString >= 0) {
                             n->setFret(tabFret);
                             n->setString(tabString);
                         }
-                        // Apply notehead if present.
                         if (hasNotehead) {
                             n->setHeadGroup(noteheadGroupFromString(noteheadStr));
                         }
@@ -206,67 +230,14 @@ bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
     return true;
 }
 
-bool ScoreApplicator::applyDeleteEvent(Score* score, const QJsonObject& op)
-{
-    const QString uuid = op["event_id"].toString();
-    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
-        LOGW() << "[editude] applyDeleteEvent: unknown uuid" << uuid;
-        return false;
-    }
-
-    EngravingObject* obj = m_uuidToElement.value(uuid);
-    m_uuidToElement.remove(uuid);
-    m_elementToUuid.remove(obj);
-
-    auto* item = dynamic_cast<EngravingItem*>(obj);
-    if (!item) {
-        LOGW() << "[editude] applyDeleteEvent: element is not an EngravingItem";
-        return false;
-    }
-
-    score->startCmd(TranslatableString("undoableAction", "Delete element"));
-    score->deleteItem(item);
-    score->endCmd();
-    return true;
-}
-
-bool ScoreApplicator::applySetPitch(Score* score, const QJsonObject& op)
-{
-    const QString uuid = op["event_id"].toString();
-    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
-        LOGW() << "[editude] applySetPitch: unknown uuid" << uuid;
-        return false;
-    }
-
-    Note* note = dynamic_cast<Note*>(m_uuidToElement.value(uuid));
-    if (!note) {
-        LOGW() << "[editude] applySetPitch: element is not a Note";
-        return false;
-    }
-
-    const QJsonObject pitchObj = op["pitch"].toObject();
-    const int midi = pitchToMidi(pitchObj["step"].toString(),
-                                 pitchObj["octave"].toInt(),
-                                 pitchObj["accidental"].toString());
-    if (midi < 0 || midi > 127) {
-        LOGW() << "[editude] applySetPitch: invalid pitch";
-        return false;
-    }
-
-    // Set PITCH, TPC1, and TPC2 together — setPitch(int) does NOT update
-    // TPC, so the translator's pitchJson(tpc1, octave) would read stale TPC.
-    const int tpc1 = note->tpc1default(midi);
-    const int tpc2 = note->tpc2default(midi);
-    score->startCmd(TranslatableString("undoableAction", "Set pitch"));
-    note->undoChangeProperty(Pid::PITCH, midi);
-    note->undoChangeProperty(Pid::TPC1, tpc1);
-    note->undoChangeProperty(Pid::TPC2, tpc2);
-    score->endCmd();
-    return true;
-}
-
 bool ScoreApplicator::applyInsertRest(Score* score, const QJsonObject& op)
 {
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyInsertRest: unknown or missing part_id";
+        return false;
+    }
+
     const QJsonObject beat   = op["beat"].toObject();
     const QJsonObject durObj = op["duration"].toObject();
 
@@ -279,8 +250,9 @@ bool ScoreApplicator::applyInsertRest(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const track_idx_t track = static_cast<track_idx_t>(op["track"].toInt(0));
-    const QString restUuid  = op["id"].toString();
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+    const track_idx_t track = trackFromCoord(part, voice, stf);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
@@ -294,212 +266,193 @@ bool ScoreApplicator::applyInsertRest(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Insert rest"));
     score->setNoteRest(seg, track, NoteVal(), dur.ticks());
     score->endCmd();
+    return true;
+}
 
-    if (!restUuid.isEmpty()) {
-        Segment* seg2 = score->tick2segment(tick, false, SegmentType::ChordRest);
-        if (seg2) {
-            EngravingItem* el = seg2->element(track);
-            if (el && el->type() == ElementType::REST) {
-                m_uuidToElement[restUuid] = el;
-                m_elementToUuid[el]       = restUuid;
+bool ScoreApplicator::applyDeleteNote(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyDeleteNote: unknown or missing part_id";
+        return false;
+    }
+
+    const QJsonObject beat  = op["beat"].toObject();
+    const QJsonObject pitch = op["pitch"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int midi = pitchToMidi(pitch["step"].toString(),
+                                 pitch["octave"].toInt(),
+                                 pitch["accidental"].toString());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+
+    if (midi < 0 || midi > 127) {
+        LOGW() << "[editude] applyDeleteNote: invalid pitch";
+        return false;
+    }
+
+    Note* note = findNoteAtCoord(score, part, tick, midi, voice, stf);
+    if (!note) {
+        LOGW() << "[editude] applyDeleteNote: note not found at coordinate";
+        return false;
+    }
+
+    Chord* chord = note->chord();
+    const track_idx_t track = trackFromCoord(part, voice, stf);
+    score->startCmd(TranslatableString("undoableAction", "Delete note"));
+    if (chord->notes().size() == 1) {
+        // Last note in chord — check whether this is the only non-rest in
+        // the voice for this measure.  If so, replace the entire voice
+        // content with a full-measure rest (matching the editor's undo
+        // behaviour).  Otherwise just delete the chord.
+        Measure* measure = chord->measure();
+        bool onlyNonRest = true;
+        for (Segment* s = measure->first(SegmentType::ChordRest); s;
+             s = s->next(SegmentType::ChordRest)) {
+            EngravingItem* e = s->element(track);
+            if (e && !e->isRest() && e != chord) {
+                onlyNonRest = false;
+                break;
             }
         }
-    }
 
+        if (onlyNonRest) {
+            // Replace the whole voice with a full-measure rest.
+            Segment* seg0 = measure->getSegmentR(SegmentType::ChordRest,
+                                                  measure->tick());
+            score->setNoteRest(seg0, track, NoteVal(), measure->ticks());
+        } else {
+            score->deleteItem(chord);
+        }
+    } else {
+        // Multiple notes — just remove this one pitch.
+        score->deleteItem(note);
+    }
+    score->endCmd();
     return true;
 }
 
-bool ScoreApplicator::applyInsertChord(Score* score, const QJsonObject& op)
+bool ScoreApplicator::applyDeleteRest(Score* score, const QJsonObject& op)
 {
-    const QJsonObject beat    = op["beat"].toObject();
-    const QJsonArray  pitches = op["pitches"].toArray();
-    const QJsonObject durObj  = op["duration"].toObject();
-
-    if (pitches.isEmpty()) {
-        LOGW() << "[editude] applyInsertChord: pitches array is empty";
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyDeleteRest: unknown or missing part_id";
         return false;
     }
 
+    const QJsonObject beat = op["beat"].toObject();
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
-    const DurationType dt = parseDurationType(durObj["type"].toString());
-    const int dots        = durObj["dots"].toInt(0);
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
 
-    if (dt == DurationType::V_INVALID) {
-        LOGW() << "[editude] applyInsertChord: invalid duration";
+    Rest* rest = findRestAtCoord(score, part, tick, voice, stf);
+    if (!rest) {
+        LOGW() << "[editude] applyDeleteRest: rest not found at coordinate";
         return false;
     }
 
-    const track_idx_t track     = static_cast<track_idx_t>(op["track"].toInt(0));
-    const QString     chordUuid = op["id"].toString();
-
-    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
-    if (!seg) {
-        LOGW() << "[editude] applyInsertChord: no segment at tick" << tick.toString();
-        return false;
-    }
-
-    // Parse all pitches upfront so we can validate before mutating the score.
-    QVector<int> midiPitches;
-    midiPitches.reserve(pitches.size());
-    for (const QJsonValue& v : pitches) {
-        const QJsonObject p = v.toObject();
-        const int midi = pitchToMidi(p["step"].toString(), p["octave"].toInt(), p["accidental"].toString());
-        if (midi < 0 || midi > 127) {
-            LOGW() << "[editude] applyInsertChord: invalid pitch in pitches array";
-            return false;
-        }
-        midiPitches.append(midi);
-    }
-
-    TDuration dur(dt);
-    dur.setDots(dots);
-
-    score->startCmd(TranslatableString("undoableAction", "Insert chord"));
-
-    // First pitch: use setNoteRest to place the chord on the score.
-    NoteVal nval0(midiPitches[0]);
-    score->setNoteRest(seg, track, nval0, dur.ticks());
-
-    // Additional pitches: find the created chord and call addNote for each.
-    Segment* seg2 = score->tick2segment(tick, false, SegmentType::ChordRest);
-    Chord* chord  = nullptr;
-    if (seg2) {
-        EngravingItem* el = seg2->element(track);
-        if (el && el->type() == ElementType::CHORD) {
-            chord = toChord(el);
-        }
-    }
-    if (chord) {
-        for (int i = 1; i < midiPitches.size(); ++i) {
-            NoteVal nv(midiPitches[i]);
-            score->addNote(chord, nv);
-        }
-    }
-
-    score->endCmd();
-
-    // Register the whole chord under chordUuid (not individual notes).
-    if (!chordUuid.isEmpty() && chord) {
-        m_uuidToElement[chordUuid] = chord;
-        m_elementToUuid[chord]     = chordUuid;
-    }
-
-    return true;
-}
-
-bool ScoreApplicator::applyAddChordNote(Score* score, const QJsonObject& op)
-{
-    const QString uuid = op["event_id"].toString();
-    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
-        LOGW() << "[editude] applyAddChordNote: unknown chord uuid" << uuid;
-        return false;
-    }
-
-    Chord* chord = dynamic_cast<Chord*>(m_uuidToElement.value(uuid));
-    if (!chord) {
-        LOGW() << "[editude] applyAddChordNote: element is not a Chord";
-        return false;
-    }
-
-    const QJsonObject pitchObj = op["pitch"].toObject();
-    const int midi = pitchToMidi(pitchObj["step"].toString(),
-                                 pitchObj["octave"].toInt(),
-                                 pitchObj["accidental"].toString());
-    if (midi < 0 || midi > 127) {
-        LOGW() << "[editude] applyAddChordNote: invalid pitch";
-        return false;
-    }
-
-    NoteVal nval(midi);
-    score->startCmd(TranslatableString("undoableAction", "Add chord note"));
-    score->addNote(chord, nval);
+    score->startCmd(TranslatableString("undoableAction", "Delete rest"));
+    score->deleteItem(rest);
     score->endCmd();
     return true;
 }
 
-bool ScoreApplicator::applyRemoveChordNote(Score* score, const QJsonObject& op)
+bool ScoreApplicator::applySetPitch(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["event_id"].toString();
-    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
-        LOGW() << "[editude] applyRemoveChordNote: unknown chord uuid" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetPitch: unknown or missing part_id";
         return false;
     }
 
-    Chord* chord = dynamic_cast<Chord*>(m_uuidToElement.value(uuid));
-    if (!chord) {
-        LOGW() << "[editude] applyRemoveChordNote: element is not a Chord";
-        return false;
-    }
-
+    const QJsonObject beat     = op["beat"].toObject();
     const QJsonObject pitchObj = op["pitch"].toObject();
-    const int midi = pitchToMidi(pitchObj["step"].toString(),
-                                 pitchObj["octave"].toInt(),
-                                 pitchObj["accidental"].toString());
-    if (midi < 0 || midi > 127) {
-        LOGW() << "[editude] applyRemoveChordNote: invalid pitch";
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int oldMidi = pitchToMidi(pitchObj["step"].toString(),
+                                    pitchObj["octave"].toInt(),
+                                    pitchObj["accidental"].toString());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+
+    if (oldMidi < 0 || oldMidi > 127) {
+        LOGW() << "[editude] applySetPitch: invalid old pitch";
         return false;
     }
 
-    Note* target = nullptr;
-    for (Note* n : chord->notes()) {
-        if (n->pitch() == midi) {
-            target = n;
-            break;
-        }
-    }
-    if (!target) {
-        LOGW() << "[editude] applyRemoveChordNote: pitch" << midi << "not found in chord";
+    Note* note = findNoteAtCoord(score, part, tick, oldMidi, voice, stf);
+    if (!note) {
+        LOGW() << "[editude] applySetPitch: note not found at coordinate";
         return false;
     }
 
-    score->startCmd(TranslatableString("undoableAction", "Remove chord note"));
-    score->deleteItem(target);
+    const QJsonObject newPitchObj = op["new_pitch"].toObject();
+    const int newMidi = pitchToMidi(newPitchObj["step"].toString(),
+                                    newPitchObj["octave"].toInt(),
+                                    newPitchObj["accidental"].toString());
+    if (newMidi < 0 || newMidi > 127) {
+        LOGW() << "[editude] applySetPitch: invalid new pitch";
+        return false;
+    }
+
+    // Set PITCH, TPC1, and TPC2 together — setPitch(int) does NOT update
+    // TPC, so the translator's pitchJson(tpc1, octave) would read stale TPC.
+    const int tpc1 = note->tpc1default(newMidi);
+    const int tpc2 = note->tpc2default(newMidi);
+    score->startCmd(TranslatableString("undoableAction", "Set pitch"));
+    note->undoChangeProperty(Pid::PITCH, newMidi);
+    note->undoChangeProperty(Pid::TPC1, tpc1);
+    note->undoChangeProperty(Pid::TPC2, tpc2);
     score->endCmd();
     return true;
 }
 
 bool ScoreApplicator::applySetDuration(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["event_id"].toString();
-    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
-        LOGW() << "[editude] applySetDuration: unknown uuid" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetDuration: unknown or missing part_id";
         return false;
     }
 
-    EngravingObject* obj = m_uuidToElement.value(uuid);
-    auto* cr = dynamic_cast<ChordRest*>(obj);
-    if (!cr) {
-        LOGW() << "[editude] applySetDuration: element is not a ChordRest";
-        return false;
-    }
-
+    const QJsonObject beat   = op["beat"].toObject();
     const QJsonObject durObj = op["duration"].toObject();
-    const DurationType dt    = parseDurationType(durObj["type"].toString());
-    const int dots           = durObj["dots"].toInt(0);
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+    const track_idx_t track = trackFromCoord(part, voice, stf);
+
+    const DurationType dt = parseDurationType(durObj["type"].toString());
+    const int dots        = durObj["dots"].toInt(0);
 
     if (dt == DurationType::V_INVALID) {
         LOGW() << "[editude] applySetDuration: invalid duration";
         return false;
     }
 
-    TDuration dur(dt);
-    dur.setDots(dots);
+    // Locate the ChordRest at the coordinate.
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
+    if (!cr) {
+        LOGW() << "[editude] applySetDuration: no ChordRest at coordinate";
+        return false;
+    }
 
-    const Fraction tick  = cr->tick();
-    const track_idx_t track = cr->track();
-
-    // Capture pitch if this is a chord (needed to re-find the element after replacement).
+    // If the op specifies a pitch, find that specific note's chord. Otherwise
+    // use the ChordRest directly (could be a rest or single-note chord).
     int midiForRefind = -1;
-    if (cr->type() == ElementType::CHORD) {
+    if (op.contains("pitch") && !op["pitch"].isNull()) {
+        const QJsonObject pitchObj = op["pitch"].toObject();
+        midiForRefind = pitchToMidi(pitchObj["step"].toString(),
+                                    pitchObj["octave"].toInt(),
+                                    pitchObj["accidental"].toString());
+    } else if (cr->type() == ElementType::CHORD) {
         Chord* chord = toChord(cr);
         if (!chord->notes().empty()) {
             midiForRefind = chord->notes().front()->pitch();
         }
     }
 
-    // Remove old UUID entry before the element pointer is invalidated.
-    m_uuidToElement.remove(uuid);
-    m_elementToUuid.remove(obj);
+    TDuration dur(dt);
+    dur.setDots(dots);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
@@ -508,33 +461,38 @@ bool ScoreApplicator::applySetDuration(Score* score, const QJsonObject& op)
     }
 
     score->startCmd(TranslatableString("undoableAction", "Set duration"));
-    score->setNoteRest(seg, track, midiForRefind >= 0 ? NoteVal(midiForRefind) : NoteVal(), dur.ticks());
+    score->setNoteRest(seg, track,
+                       midiForRefind >= 0 ? NoteVal(midiForRefind) : NoteVal(),
+                       dur.ticks());
     score->endCmd();
-
-    // Re-register the new element under the same UUID.
-    Segment* seg2 = score->tick2segment(tick, false, SegmentType::ChordRest);
-    if (seg2) {
-        EngravingItem* el = seg2->element(track);
-        if (el) {
-            m_uuidToElement[uuid] = el;
-            m_elementToUuid[el]   = uuid;
-        }
-    }
-
     return true;
 }
 
 bool ScoreApplicator::applySetTie(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["event_id"].toString();
-    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
-        LOGW() << "[editude] applySetTie: unknown event_id" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetTie: unknown or missing part_id";
         return false;
     }
 
-    Note* note = dynamic_cast<Note*>(m_uuidToElement.value(uuid));
+    const QJsonObject beat     = op["beat"].toObject();
+    const QJsonObject pitchObj = op["pitch"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int midi = pitchToMidi(pitchObj["step"].toString(),
+                                 pitchObj["octave"].toInt(),
+                                 pitchObj["accidental"].toString());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+
+    if (midi < 0 || midi > 127) {
+        LOGW() << "[editude] applySetTie: invalid pitch";
+        return false;
+    }
+
+    Note* note = findNoteAtCoord(score, part, tick, midi, voice, stf);
     if (!note) {
-        LOGW() << "[editude] applySetTie: element is not a note" << uuid;
+        LOGW() << "[editude] applySetTie: note not found at coordinate";
         return false;
     }
 
@@ -547,7 +505,6 @@ bool ScoreApplicator::applySetTie(Score* score, const QJsonObject& op)
     if (wantTie) {
         // "start" or "continue": ensure a forward tie exists.
         if (!note->tieFor()) {
-            // Find the next chord/rest in the same track.
             ChordRest* nextCR = nextChordRest(note->chord());
             Note* endNote = nullptr;
             if (nextCR && nextCR->isChord()) {
@@ -584,26 +541,37 @@ bool ScoreApplicator::applySetTie(Score* score, const QJsonObject& op)
     return true;
 }
 
-bool ScoreApplicator::applySetTrack(Score* score, const QJsonObject& op)
+bool ScoreApplicator::applySetVoice(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["event_id"].toString();
-    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
-        LOGW() << "[editude] applySetTrack: unknown uuid" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetVoice: unknown or missing part_id";
         return false;
     }
 
-    auto* item = dynamic_cast<EngravingItem*>(m_uuidToElement.value(uuid));
-    if (!item) {
-        LOGW() << "[editude] applySetTrack: element is not an EngravingItem";
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int oldVoice = opVoice(op);
+    const int stf      = opStaff(op);
+    const int newVoice = op["new_voice"].toInt(1);
+
+    // Find the ChordRest at the old voice coordinate.
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, oldVoice, stf);
+    if (!cr) {
+        LOGW() << "[editude] applySetVoice: no ChordRest at coordinate";
         return false;
     }
 
-    const track_idx_t newTrack = static_cast<track_idx_t>(op["track"].toInt(0));
-    score->startCmd(TranslatableString("undoableAction", "Set track"));
-    item->undoChangeProperty(Pid::TRACK, newTrack);
+    const track_idx_t newTrack = trackFromCoord(part, newVoice, stf);
+    score->startCmd(TranslatableString("undoableAction", "Set voice"));
+    cr->undoChangeProperty(Pid::TRACK, static_cast<int>(newTrack));
     score->endCmd();
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// Tier 2 — score directive operations (already position-addressed)
+// ---------------------------------------------------------------------------
 
 bool ScoreApplicator::applySetTimeSignature(Score* score, const QJsonObject& op)
 {
@@ -611,7 +579,6 @@ bool ScoreApplicator::applySetTimeSignature(Score* score, const QJsonObject& op)
     const QJsonObject tsObj = op["time_signature"].toObject();
 
     if (tsObj.isEmpty()) {
-        // null time_signature → remove: not yet implemented.
         LOGD() << "[editude] applySetTimeSignature: null value (remove) not yet implemented";
         return true;
     }
@@ -621,7 +588,8 @@ bool ScoreApplicator::applySetTimeSignature(Score* score, const QJsonObject& op)
     const int denom = tsObj["denominator"].toInt(0);
 
     if (num <= 0 || denom <= 0) {
-        LOGW() << "[editude] applySetTimeSignature: invalid time signature" << num << "/" << denom;
+        LOGW() << "[editude] applySetTimeSignature: invalid time signature"
+               << num << "/" << denom;
         return false;
     }
 
@@ -642,11 +610,10 @@ bool ScoreApplicator::applySetTimeSignature(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applySetTempo(Score* score, const QJsonObject& op)
 {
-    const QJsonObject beat    = op["beat"].toObject();
+    const QJsonObject beat     = op["beat"].toObject();
     const QJsonObject tempoObj = op["tempo"].toObject();
 
     if (tempoObj.isEmpty()) {
-        // null tempo → remove: not yet implemented.
         LOGD() << "[editude] applySetTempo: null value (remove) not yet implemented";
         return true;
     }
@@ -678,14 +645,6 @@ bool ScoreApplicator::applySetTempo(Score* score, const QJsonObject& op)
 
 void ScoreApplicator::bootstrapPartMap(Score* score)
 {
-    // Called after the initial score is loaded (snapshot or empty).
-    // Parts baked into an MSCZ snapshot do not carry editude UUIDs, so this
-    // function cannot populate m_partUuidToPart from the score alone.
-    // The map is populated incrementally: applyAddPart registers each new
-    // part, and applyRemovePart removes it.
-    // This function exists as the designated call-site hook; once a protocol
-    // extension supplies per-part editude UUIDs in the bootstrap payload,
-    // the mapping can be built here.
     Q_UNUSED(score);
     LOGD() << "[editude] bootstrapPartMap: "
            << m_partUuidToPart.size() << " parts already registered";
@@ -698,26 +657,24 @@ void ScoreApplicator::registerPart(Part* part, const QString& uuid)
 
 bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["part_id"].toString();
-    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
-        LOGW() << "[editude] applySetKeySignature: unknown part_id" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetKeySignature: unknown part_id";
         return false;
     }
 
     const QJsonValue ksSigVal = op["key_signature"];
     if (ksSigVal.isNull() || ksSigVal.isUndefined()) {
-        // Remove the key signature at the given beat for this part.
         const QJsonObject beat = op["beat"].toObject();
         const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
         Measure* measure = score->tick2measure(tick);
         if (!measure) {
-            return true; // nothing to remove
+            return true;
         }
         Segment* seg = measure->findSegment(SegmentType::KeySig, tick);
         if (!seg) {
-            return true; // no KeySig segment at this tick
+            return true;
         }
-        Part* part = m_partUuidToPart.value(uuid);
         const staff_idx_t firstStaff = part->startTrack() / VOICES;
         const staff_idx_t nStaves    = static_cast<staff_idx_t>(part->nstaves());
         score->startCmd(TranslatableString("undoableAction", "Remove key signature"));
@@ -732,9 +689,9 @@ bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
         return true;
     }
 
-    const QJsonObject beat   = op["beat"].toObject();
+    const QJsonObject beat = op["beat"].toObject();
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
-    const int sharps         = ksSigVal.toObject()["sharps"].toInt(0);
+    const int sharps = ksSigVal.toObject()["sharps"].toInt(0);
 
     if (sharps < -7 || sharps > 7) {
         LOGW() << "[editude] applySetKeySignature: sharps out of range" << sharps;
@@ -747,7 +704,6 @@ bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
         return false;
     }
 
-    Part* part = m_partUuidToPart.value(uuid);
     const staff_idx_t firstStaff = part->startTrack() / VOICES;
     const staff_idx_t nStaves    = static_cast<staff_idx_t>(part->nstaves());
     const Key key = static_cast<Key>(sharps);
@@ -768,27 +724,25 @@ bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applySetClef(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["part_id"].toString();
-    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
-        LOGW() << "[editude] applySetClef: unknown part_id" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetClef: unknown part_id";
         return false;
     }
 
     const QJsonValue clefVal = op["clef"];
     if (clefVal.isNull() || clefVal.isUndefined()) {
-        // Remove the clef at the given beat/staff for this part.
         const QJsonObject beat = op["beat"].toObject();
         const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
         const int staffIdx = op["staff"].toInt(0);
         Measure* measure = score->tick2measure(tick);
         if (!measure) {
-            return true; // nothing to remove
+            return true;
         }
         Segment* seg = measure->findSegment(SegmentType::Clef, tick);
         if (!seg) {
-            return true; // no Clef segment at this tick
+            return true;
         }
-        Part* part = m_partUuidToPart.value(uuid);
         const track_idx_t track = (part->startTrack() / VOICES + staffIdx) * VOICES;
         EngravingItem* el = seg->element(track);
         if (el && el->isClef()) {
@@ -831,7 +785,6 @@ bool ScoreApplicator::applySetClef(Score* score, const QJsonObject& op)
         return false;
     }
 
-    Part* part = m_partUuidToPart.value(uuid);
     if (staffIdx < 0 || staffIdx >= static_cast<int>(part->nstaves())) {
         LOGW() << "[editude] applySetClef: staff index out of range" << staffIdx;
         return false;
@@ -858,12 +811,11 @@ bool ScoreApplicator::applySetClef(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applySetPartName(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["part_id"].toString();
-    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
-        LOGW() << "[editude] applySetPartName: unknown part_id" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetPartName: unknown part_id";
         return false;
     }
-    Part* part = m_partUuidToPart.value(uuid);
     const QString name = op["name"].toString();
     score->startCmd(TranslatableString("undoableAction", "Set part name"));
     part->setPartName(String(name));
@@ -873,12 +825,11 @@ bool ScoreApplicator::applySetPartName(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applySetStaffCount(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["part_id"].toString();
-    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
-        LOGW() << "[editude] applySetStaffCount: unknown part_id" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetStaffCount: unknown part_id";
         return false;
     }
-    Part* part = m_partUuidToPart.value(uuid);
     const int target = op["staff_count"].toInt(0);
     if (target <= 0) {
         LOGW() << "[editude] applySetStaffCount: invalid staff_count" << target;
@@ -895,7 +846,6 @@ bool ScoreApplicator::applySetStaffCount(Score* score, const QJsonObject& op)
             score->undoInsertStaff(staff, static_cast<staff_idx_t>(i), false);
         }
     } else {
-        // Remove from the tail of this part's staves.
         const staff_idx_t partStart = part->startTrack() / VOICES;
         for (int i = current; i > target; --i) {
             score->cmdRemoveStaff(static_cast<staff_idx_t>(partStart + i - 1));
@@ -928,7 +878,6 @@ bool ScoreApplicator::applyAddPart(Score* score, const QJsonObject& op)
         if (registered.contains(existing)) {
             continue;
         }
-        // Found an existing part not yet registered — adopt it.
         m_partUuidToPart[uuid] = existing;
         LOGD() << "[editude] applyAddPart: adopted existing part for uuid" << uuid;
         return true;
@@ -945,11 +894,6 @@ bool ScoreApplicator::applyAddPart(Score* score, const QJsonObject& op)
         const QString msId      = instr["musescore_id"].toString();
         const QString longName  = instr["name"].toString(name);
         const QString shortName = instr["short_name"].toString();
-        // Modify the Part's existing default Instrument in-place rather than
-        // replacing it.  Part() already initialises a properly constructed
-        // Instrument at tick -1; calling setInstrument() with a minimal stack
-        // Instrument creates a second InstrumentList entry at a different tick
-        // and leaves the list in a state that asserts during undo.
         Instrument* existing = part->instrument();
         if (existing && !msId.isEmpty()) {
             existing->setId(String(msId));
@@ -960,11 +904,6 @@ bool ScoreApplicator::applyAddPart(Score* score, const QJsonObject& op)
         part->setShortNameAll(String(shortName));
     }
 
-    // Insert Part FIRST, then staves.  During undo (reversed order),
-    // staves are removed before the Part.  The previous staves-first
-    // ordering caused InsertPart::undo to call removePart while the
-    // Part's staves were still in Score::m_staves — rebuildMidiMapping
-    // then processed orphaned staves, corrupting state.
     score->startCmd(TranslatableString("undoableAction", "Add part"));
     score->undoInsertPart(part, score->parts().size());
     for (int i = 0; i < staffCount; ++i) {
@@ -995,9 +934,9 @@ bool ScoreApplicator::applyRemovePart(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applySetPartInstrument(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["part_id"].toString();
-    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
-        LOGW() << "[editude] applySetPartInstrument: unknown part_id" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetPartInstrument: unknown part_id";
         return false;
     }
     const QJsonObject instr = op["instrument"].toObject();
@@ -1005,19 +944,16 @@ bool ScoreApplicator::applySetPartInstrument(Score* score, const QJsonObject& op
         LOGW() << "[editude] applySetPartInstrument: null instrument — ignored";
         return false;
     }
-    Part* part = m_partUuidToPart.value(uuid);
     const QString msId      = instr["musescore_id"].toString();
     const QString longName  = instr["name"].toString();
     const QString shortName = instr["short_name"].toString();
     score->startCmd(TranslatableString("undoableAction", "Set part instrument"));
-    // Modify existing Instrument in-place — same rationale as applyAddPart.
     Instrument* existing = part->instrument();
     if (existing && !msId.isEmpty()) {
         existing->setId(String(msId));
         existing->setLongName(String(longName));
         existing->setShortName(String(shortName));
 
-        // Apply optional StringData override from the instrument payload.
         const QJsonObject sdObj = instr["string_data"].toObject();
         if (!sdObj.isEmpty()) {
             const QJsonArray strings = sdObj["strings"].toArray();
@@ -1031,7 +967,6 @@ bool ScoreApplicator::applySetPartInstrument(Score* score, const QJsonObject& op
             existing->setStringData(sd);
         }
 
-        // Apply optional drumset override from the instrument payload.
         const bool useDrumset = instr["use_drumset"].toBool(false);
         if (useDrumset) {
             existing->setUseDrumset(true);
@@ -1080,12 +1015,11 @@ bool ScoreApplicator::applySetPartInstrument(Score* score, const QJsonObject& op
 
 bool ScoreApplicator::applySetStringData(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["part_id"].toString();
-    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
-        LOGW() << "[editude] applySetStringData: unknown part_id" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetStringData: unknown part_id";
         return false;
     }
-    Part* part = m_partUuidToPart.value(uuid);
     Instrument* inst = part->instrument();
     if (!inst) {
         LOGW() << "[editude] applySetStringData: part has no instrument";
@@ -1095,7 +1029,6 @@ bool ScoreApplicator::applySetStringData(Score* score, const QJsonObject& op)
     const QJsonObject sdObj = op["string_data"].toObject();
     score->startCmd(TranslatableString("undoableAction", "Set string data"));
     if (sdObj.isEmpty()) {
-        // Clearing string data — set empty StringData.
         inst->setStringData(StringData());
     } else {
         const QJsonArray strings = sdObj["strings"].toArray();
@@ -1114,31 +1047,36 @@ bool ScoreApplicator::applySetStringData(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applySetCapo(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["part_id"].toString();
-    if (uuid.isEmpty() || !m_partUuidToPart.contains(uuid)) {
-        LOGW() << "[editude] applySetCapo: unknown part_id" << uuid;
-        return false;
-    }
-    // Capo is stored as staff-level property in MuseScore.  For now we
-    // acknowledge the op without applying it to the C++ model — the Python
-    // server tracks capo state, and the C++ side will consume it when
-    // tab rendering is fully wired.  This ensures the op round-trips
-    // without error.
     Q_UNUSED(score);
+    Q_UNUSED(op);
     return true;
 }
 
 bool ScoreApplicator::applySetTabNote(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["event_id"].toString();
-    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
-        LOGW() << "[editude] applySetTabNote: unknown uuid" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetTabNote: unknown or missing part_id";
         return false;
     }
 
-    Note* note = dynamic_cast<Note*>(m_uuidToElement.value(uuid));
+    const QJsonObject beat     = op["beat"].toObject();
+    const QJsonObject pitchObj = op["pitch"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int midi = pitchToMidi(pitchObj["step"].toString(),
+                                 pitchObj["octave"].toInt(),
+                                 pitchObj["accidental"].toString());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+
+    if (midi < 0 || midi > 127) {
+        LOGW() << "[editude] applySetTabNote: invalid pitch";
+        return false;
+    }
+
+    Note* note = findNoteAtCoord(score, part, tick, midi, voice, stf);
     if (!note) {
-        LOGW() << "[editude] applySetTabNote: element is not a Note";
+        LOGW() << "[editude] applySetTabNote: note not found at coordinate";
         return false;
     }
 
@@ -1158,10 +1096,9 @@ bool ScoreApplicator::applySetTabNote(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applySetDrumset(Score* score, const QJsonObject& op)
 {
-    const QString partUuid = op["part_id"].toString();
-    Part* part = m_partUuidToPart.value(partUuid);
+    Part* part = resolvePart(op);
     if (!part) {
-        LOGW() << "[editude] applySetDrumset: unknown part_id" << partUuid;
+        LOGW() << "[editude] applySetDrumset: unknown part_id";
         return false;
     }
 
@@ -1173,7 +1110,6 @@ bool ScoreApplicator::applySetDrumset(Score* score, const QJsonObject& op)
 
     const QJsonObject dsObj = op["drumset"].toObject();
     if (dsObj.isEmpty()) {
-        // Clear drumset overrides — reset to template default.
         return true;
     }
 
@@ -1209,7 +1145,6 @@ bool ScoreApplicator::applySetDrumset(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Set drumset"));
     inst->setDrumset(&drumset);
     inst->setUseDrumset(true);
-    // Trigger Pass 10 via identity STAFF_LONG_NAME change.
     part->undoChangeProperty(Pid::STAFF_LONG_NAME, PropertyValue(String(part->longName())));
     score->endCmd();
     return true;
@@ -1217,15 +1152,29 @@ bool ScoreApplicator::applySetDrumset(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applySetNoteHead(Score* score, const QJsonObject& op)
 {
-    const QString uuid = op["event_id"].toString();
-    if (uuid.isEmpty() || !m_uuidToElement.contains(uuid)) {
-        LOGW() << "[editude] applySetNoteHead: unknown uuid" << uuid;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetNoteHead: unknown or missing part_id";
         return false;
     }
 
-    Note* note = dynamic_cast<Note*>(m_uuidToElement.value(uuid));
+    const QJsonObject beat     = op["beat"].toObject();
+    const QJsonObject pitchObj = op["pitch"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int midi = pitchToMidi(pitchObj["step"].toString(),
+                                 pitchObj["octave"].toInt(),
+                                 pitchObj["accidental"].toString());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+
+    if (midi < 0 || midi > 127) {
+        LOGW() << "[editude] applySetNoteHead: invalid pitch";
+        return false;
+    }
+
+    Note* note = findNoteAtCoord(score, part, tick, midi, voice, stf);
     if (!note) {
-        LOGW() << "[editude] applySetNoteHead: element is not a Note";
+        LOGW() << "[editude] applySetNoteHead: note not found at coordinate";
         return false;
     }
 
@@ -1237,16 +1186,15 @@ bool ScoreApplicator::applySetNoteHead(Score* score, const QJsonObject& op)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// apply() — dispatch table
+// ---------------------------------------------------------------------------
+
 bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
 {
     const QString type = payload["type"].toString();
 
-    // op_batch — apply each sub-op in sequence.  Each handler manages its own
-    // startCmd/endCmd scope.  We intentionally do NOT wrap the batch in an
-    // outer startCmd/endCmd because MuseScore does not support nested command
-    // scopes: the inner endCmd would prematurely close the outer scope,
-    // leaving the score in a corrupted layout state (SIGSEGV in
-    // Segment::createShape during the next scene-graph paint).
+    // op_batch — apply each sub-op in sequence.
     if (type == QLatin1String("op_batch")) {
         const QJsonArray ops = payload["ops"].toArray();
         if (ops.isEmpty()) {
@@ -1261,17 +1209,15 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
         return ok;
     }
 
-    // Tier 1 — stream event operations
-    if (type == QLatin1String("InsertNote"))      return applyInsertNote(score, payload);
-    if (type == QLatin1String("InsertRest"))      return applyInsertRest(score, payload);
-    if (type == QLatin1String("InsertChord"))     return applyInsertChord(score, payload);
-    if (type == QLatin1String("DeleteEvent"))     return applyDeleteEvent(score, payload);
-    if (type == QLatin1String("SetPitch"))        return applySetPitch(score, payload);
-    if (type == QLatin1String("AddChordNote"))    return applyAddChordNote(score, payload);
-    if (type == QLatin1String("RemoveChordNote")) return applyRemoveChordNote(score, payload);
-    if (type == QLatin1String("SetDuration"))     return applySetDuration(score, payload);
-    if (type == QLatin1String("SetTie"))          return applySetTie(score, payload);
-    if (type == QLatin1String("SetTrack"))        return applySetTrack(score, payload);
+    // Tier 1 — coordinate-addressed note/rest operations
+    if (type == QLatin1String("InsertNote"))   return applyInsertNote(score, payload);
+    if (type == QLatin1String("InsertRest"))   return applyInsertRest(score, payload);
+    if (type == QLatin1String("DeleteNote"))   return applyDeleteNote(score, payload);
+    if (type == QLatin1String("DeleteRest"))   return applyDeleteRest(score, payload);
+    if (type == QLatin1String("SetPitch"))     return applySetPitch(score, payload);
+    if (type == QLatin1String("SetDuration"))  return applySetDuration(score, payload);
+    if (type == QLatin1String("SetTie"))       return applySetTie(score, payload);
+    if (type == QLatin1String("SetVoice"))     return applySetVoice(score, payload);
 
     // Tier 2 — score directive operations
     if (type == QLatin1String("SetTimeSignature")) return applySetTimeSignature(score, payload);
@@ -1383,15 +1329,7 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3 — implementation stubs
-// ---------------------------------------------------------------------------
-//
-// Each stub logs the op and returns true (non-fatal) so the OT engine continues
-// normally.  Full INotationInteraction calls will be wired in a follow-up once
-// the MuseScore API surface for each element type is confirmed.
-
-// ---------------------------------------------------------------------------
-// Tier 3 articulation helpers
+// Tier 3 — articulations (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 static SymId articulationSymId(const QString& name)
@@ -1471,36 +1409,26 @@ static SymId articulationSymId(const QString& name)
     if (mapped != SymId::noSym) {
         return mapped;
     }
-    // Fallback: the name may be a raw SMuFL symbol name sent by the
-    // translator for a SymId not in our explicit map.
     return SymNames::symIdByName(name.toUtf8().constData());
 }
 
 bool ScoreApplicator::applyAddArticulation(Score* score, const QJsonObject& op)
 {
-    const QString id       = op["id"].toString();
-    const QString eventId  = op["event_id"].toString();
-    const QString artName  = op["articulation"].toString();
-
-    if (id.isEmpty() || eventId.isEmpty()) {
-        LOGW() << "[editude] applyAddArticulation: missing id or event_id";
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddArticulation: unknown or missing part_id";
         return false;
     }
 
-    EngravingObject* evObj = m_uuidToElement.value(eventId);
-    if (!evObj) {
-        LOGW() << "[editude] applyAddArticulation: unknown event_id" << eventId;
-        return false;
-    }
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+    const QString artName = op["articulation"].toString();
 
-    ChordRest* cr = nullptr;
-    if (evObj->isNote()) {
-        cr = toNote(static_cast<EngravingItem*>(evObj))->chord();
-    } else if (evObj->isChordRest()) {
-        cr = toChordRest(static_cast<EngravingItem*>(evObj));
-    }
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
     if (!cr) {
-        LOGW() << "[editude] applyAddArticulation: event is not a note/chordrest" << eventId;
+        LOGW() << "[editude] applyAddArticulation: no ChordRest at coordinate";
         return false;
     }
 
@@ -1517,37 +1445,58 @@ bool ScoreApplicator::applyAddArticulation(Score* score, const QJsonObject& op)
     art->setTrack(cr->track());
     score->undoAddElement(art);
     score->endCmd();
-
-    m_uuidToElement[id] = art;
-    m_elementToUuid[art] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveArticulation(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveArticulation: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveArticulation: unknown or missing part_id";
         return false;
     }
 
-    Articulation* art = dynamic_cast<Articulation*>(m_uuidToElement.value(id));
-    if (!art) {
-        LOGW() << "[editude] applyRemoveArticulation: element is not Articulation" << id;
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+    const QString artName = op["articulation"].toString();
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
+    if (!cr || !cr->isChord()) {
+        LOGW() << "[editude] applyRemoveArticulation: no Chord at coordinate";
         return false;
     }
+    Chord* chord = toChord(cr);
 
-    m_elementToUuid.remove(art);
-    m_uuidToElement.remove(id);
+    const SymId targetSym = articulationSymId(artName);
+
+    // Scan the chord's articulations for one matching the target name/symbol.
+    Articulation* target = nullptr;
+    for (Articulation* a : chord->articulations()) {
+        if (a->symId() == targetSym) {
+            target = a;
+            break;
+        }
+        // Also match by canonical name for fallback cases.
+        if (articulationNameFromSymId(a->symId()) == artName) {
+            target = a;
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveArticulation: articulation not found" << artName;
+        return false;
+    }
 
     score->startCmd(TranslatableString("undoableAction", "Remove articulation"));
-    score->undoRemoveElement(art);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3 dynamic helpers
+// Tier 3 — dynamics (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 static DynamicType dynamicTypeFromName(const QString& name)
@@ -1586,20 +1535,14 @@ static DynamicType dynamicTypeFromName(const QString& name)
 
 bool ScoreApplicator::applyAddDynamic(Score* score, const QJsonObject& op)
 {
-    const QString id      = op["id"].toString();
-    const QString partId  = op["part_id"].toString();
-    const QString kind    = op["kind"].toString();
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddDynamic: unknown or missing part_id";
+        return false;
+    }
+
+    const QString kind     = op["kind"].toString();
     const QJsonObject beat = op["beat"].toObject();
-
-    if (id.isEmpty() || partId.isEmpty()) {
-        LOGW() << "[editude] applyAddDynamic: missing id or part_id";
-        return false;
-    }
-
-    if (!m_partUuidToPart.contains(partId)) {
-        LOGW() << "[editude] applyAddDynamic: unknown part_id" << partId;
-        return false;
-    }
 
     const DynamicType dt = dynamicTypeFromName(kind);
     if (dt == DynamicType::OTHER) {
@@ -1614,7 +1557,6 @@ bool ScoreApplicator::applyAddDynamic(Score* score, const QJsonObject& op)
         return false;
     }
 
-    Part* part = m_partUuidToPart.value(partId);
     const track_idx_t track = part->startTrack();
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
 
@@ -1625,31 +1567,51 @@ bool ScoreApplicator::applyAddDynamic(Score* score, const QJsonObject& op)
     dyn->setDynamicType(dt);
     score->undoAddElement(dyn);
     score->endCmd();
-
-    m_uuidToElement[id] = dyn;
-    m_elementToUuid[dyn] = id;
     return true;
 }
 
 bool ScoreApplicator::applySetDynamic(Score* score, const QJsonObject& op)
 {
-    const QString id   = op["id"].toString();
-    const QString kind = op["kind"].toString();
-
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applySetDynamic: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetDynamic: unknown or missing part_id";
         return false;
     }
 
-    Dynamic* dyn = dynamic_cast<Dynamic*>(m_uuidToElement.value(id));
-    if (!dyn) {
-        LOGW() << "[editude] applySetDynamic: element is not Dynamic" << id;
-        return false;
-    }
+    const QJsonObject beat = op["beat"].toObject();
+    const QString kind     = op["kind"].toString();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const track_idx_t track = part->startTrack();
 
     const DynamicType dt = dynamicTypeFromName(kind);
     if (dt == DynamicType::OTHER) {
         LOGW() << "[editude] applySetDynamic: unknown dynamic kind" << kind;
+        return false;
+    }
+
+    // Find the Dynamic at this tick/track.
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        // Try TimeTick segment.
+        Measure* m = score->tick2measure(tick);
+        if (m) {
+            seg = m->undoGetChordRestOrTimeTickSegment(tick);
+        }
+    }
+    if (!seg) {
+        LOGW() << "[editude] applySetDynamic: no segment at tick" << tick.toString();
+        return false;
+    }
+
+    Dynamic* dyn = nullptr;
+    for (EngravingItem* el : seg->annotations()) {
+        if (el->isDynamic() && el->track() == track) {
+            dyn = toDynamic(el);
+            break;
+        }
+    }
+    if (!dyn) {
+        LOGW() << "[editude] applySetDynamic: no dynamic found at coordinate";
         return false;
     }
 
@@ -1661,20 +1623,40 @@ bool ScoreApplicator::applySetDynamic(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applyRemoveDynamic(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveDynamic: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveDynamic: unknown or missing part_id";
         return false;
     }
 
-    Dynamic* dyn = dynamic_cast<Dynamic*>(m_uuidToElement.value(id));
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const track_idx_t track = part->startTrack();
+
+    // Find the Dynamic at this tick/track.
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        Measure* m = score->tick2measure(tick);
+        if (m) {
+            seg = m->undoGetChordRestOrTimeTickSegment(tick);
+        }
+    }
+    if (!seg) {
+        LOGW() << "[editude] applyRemoveDynamic: no segment at tick" << tick.toString();
+        return false;
+    }
+
+    Dynamic* dyn = nullptr;
+    for (EngravingItem* el : seg->annotations()) {
+        if (el->isDynamic() && el->track() == track) {
+            dyn = toDynamic(el);
+            break;
+        }
+    }
     if (!dyn) {
-        LOGW() << "[editude] applyRemoveDynamic: element is not Dynamic" << id;
+        LOGW() << "[editude] applyRemoveDynamic: no dynamic found at coordinate";
         return false;
     }
-
-    m_elementToUuid.remove(dyn);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove dynamic"));
     score->undoRemoveElement(dyn);
@@ -1682,35 +1664,31 @@ bool ScoreApplicator::applyRemoveDynamic(Score* score, const QJsonObject& op)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Tier 3 — slurs (coordinate-addressed)
+// ---------------------------------------------------------------------------
+
 bool ScoreApplicator::applyAddSlur(Score* score, const QJsonObject& op)
 {
-    const QString id           = op["id"].toString();
-    const QString startEventId = op["start_event_id"].toString();
-    const QString endEventId   = op["end_event_id"].toString();
-
-    if (id.isEmpty() || startEventId.isEmpty() || endEventId.isEmpty()) {
-        LOGW() << "[editude] applyAddSlur: missing id, start_event_id, or end_event_id";
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddSlur: unknown or missing part_id";
         return false;
     }
 
-    EngravingObject* startObj = m_uuidToElement.value(startEventId);
-    EngravingObject* endObj   = m_uuidToElement.value(endEventId);
-    if (!startObj || !endObj) {
-        LOGW() << "[editude] applyAddSlur: unknown start or end event_id";
-        return false;
-    }
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const int startVoice = op["start_voice"].toInt(1);
+    const int startStaff = op["start_staff"].toInt(0);
+    const int endVoice   = op["end_voice"].toInt(1);
+    const int endStaff   = op["end_staff"].toInt(0);
 
-    auto toCR = [](EngravingObject* obj) -> ChordRest* {
-        if (!obj) return nullptr;
-        if (obj->isNote()) return toNote(static_cast<EngravingItem*>(obj))->chord();
-        if (obj->isChordRest()) return toChordRest(static_cast<EngravingItem*>(obj));
-        return nullptr;
-    };
-
-    ChordRest* startCR = toCR(startObj);
-    ChordRest* endCR   = toCR(endObj);
+    ChordRest* startCR = findChordRestAtCoord(score, part, startTick, startVoice, startStaff);
+    ChordRest* endCR   = findChordRestAtCoord(score, part, endTick, endVoice, endStaff);
     if (!startCR || !endCR) {
-        LOGW() << "[editude] applyAddSlur: start or end is not a note/chordrest";
+        LOGW() << "[editude] applyAddSlur: start or end ChordRest not found";
         return false;
     }
 
@@ -1725,52 +1703,62 @@ bool ScoreApplicator::applyAddSlur(Score* score, const QJsonObject& op)
     slur->setEndElement(endCR);
     score->undoAddElement(slur);
     score->endCmd();
-
-    m_uuidToElement[id] = slur;
-    m_elementToUuid[slur] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveSlur(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveSlur: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveSlur: unknown or missing part_id";
         return false;
     }
 
-    Slur* slur = dynamic_cast<Slur*>(m_uuidToElement.value(id));
-    if (!slur) {
-        LOGW() << "[editude] applyRemoveSlur: element is not a Slur" << id;
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const int startVoice = op["start_voice"].toInt(1);
+    const int startStaff = op["start_staff"].toInt(0);
+    const track_idx_t startTrack = trackFromCoord(part, startVoice, startStaff);
+
+    // Scan spanner map for a Slur matching the start/end ticks and track.
+    Slur* target = nullptr;
+    for (auto it = score->spanner().lower_bound(startTick.ticks());
+         it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+        Spanner* sp = it->second;
+        if (sp->isSlur() && sp->track() == startTrack
+            && sp->tick() == startTick && sp->tick2() == endTick) {
+            target = toSlur(sp);
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveSlur: slur not found at coordinates";
         return false;
     }
-
-    m_elementToUuid.remove(slur);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove slur"));
-    score->undoRemoveElement(slur);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Tier 3 — hairpins (coordinate-addressed)
+// ---------------------------------------------------------------------------
+
 bool ScoreApplicator::applyAddHairpin(Score* score, const QJsonObject& op)
 {
-    const QString id       = op["id"].toString();
-    const QString partId   = op["part_id"].toString();
-    const QString kind     = op["kind"].toString();
-    const QJsonObject sb   = op["start_beat"].toObject();
-    const QJsonObject eb   = op["end_beat"].toObject();
-
-    if (id.isEmpty() || partId.isEmpty()) {
-        LOGW() << "[editude] applyAddHairpin: missing id or part_id";
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddHairpin: unknown or missing part_id";
         return false;
     }
 
-    if (!m_partUuidToPart.contains(partId)) {
-        LOGW() << "[editude] applyAddHairpin: unknown part_id" << partId;
-        return false;
-    }
+    const QString kind   = op["kind"].toString();
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
 
     const HairpinType hpType = (kind == QStringLiteral("crescendo"))
                                ? HairpinType::CRESC_HAIRPIN
@@ -1778,73 +1766,86 @@ bool ScoreApplicator::applyAddHairpin(Score* score, const QJsonObject& op)
 
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = m_partUuidToPart.value(partId)->startTrack();
+    const track_idx_t track = part->startTrack();
 
     score->startCmd(TranslatableString("undoableAction", "Add hairpin"));
-    Hairpin* hp = score->addHairpin(hpType, startTick, endTick, track);
+    score->addHairpin(hpType, startTick, endTick, track);
     score->endCmd();
-
-    if (hp) {
-        m_uuidToElement[id] = hp;
-        m_elementToUuid[hp] = id;
-    }
     return true;
 }
 
 bool ScoreApplicator::applyRemoveHairpin(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveHairpin: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveHairpin: unknown or missing part_id";
         return false;
     }
 
-    Hairpin* hp = dynamic_cast<Hairpin*>(m_uuidToElement.value(id));
-    if (!hp) {
-        LOGW() << "[editude] applyRemoveHairpin: element is not a Hairpin" << id;
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const track_idx_t track = part->startTrack();
+
+    // Scan spanner map for a Hairpin matching the range and track.
+    Hairpin* target = nullptr;
+    for (auto it = score->spanner().lower_bound(startTick.ticks());
+         it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+        Spanner* sp = it->second;
+        if (sp->isHairpin() && sp->track() == track
+            && sp->tick() == startTick && sp->tick2() == endTick) {
+            target = toHairpin(sp);
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveHairpin: hairpin not found at coordinates";
         return false;
     }
-
-    m_elementToUuid.remove(hp);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove hairpin"));
-    score->undoRemoveElement(hp);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Tier 3 — tuplets (coordinate-addressed)
+// ---------------------------------------------------------------------------
+
 bool ScoreApplicator::applyAddTuplet(Score* score, const QJsonObject& op)
 {
-    const QString id          = op["id"].toString();
-    const QString partId      = op["part_id"].toString();
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddTuplet: unknown or missing part_id";
+        return false;
+    }
+
     const int actualNotes     = op["actual_notes"].toInt(0);
     const int normalNotes     = op["normal_notes"].toInt(0);
     const QJsonObject beat    = op["beat"].toObject();
     const QJsonObject baseDur = op["base_duration"].toObject();
-    const QJsonArray members  = op["members"].toArray();
 
-    if (id.isEmpty() || actualNotes <= 0 || normalNotes <= 0) {
+    if (actualNotes <= 0 || normalNotes <= 0) {
         LOGW() << "[editude] applyAddTuplet: invalid payload";
         return false;
     }
 
-    if (!m_partUuidToPart.contains(partId)) {
-        LOGW() << "[editude] applyAddTuplet: unknown part_id" << partId;
-        return false;
-    }
-
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+    const track_idx_t track = trackFromCoord(part, voice, stf);
+
     const QByteArray baseTypeUtf8 = baseDur["type"].toString().toUtf8();
     const DurationType baseType = TConv::fromXml(
         muse::AsciiStringView(baseTypeUtf8.constData()), DurationType::V_INVALID);
     if (baseType == DurationType::V_INVALID) {
-        LOGW() << "[editude] applyAddTuplet: unknown base duration" << baseDur["type"].toString();
+        LOGW() << "[editude] applyAddTuplet: unknown base duration"
+               << baseDur["type"].toString();
         return false;
     }
 
-    // Find ChordRest at tick on the part's first track.
-    const track_idx_t track = m_partUuidToPart.value(partId)->startTrack();
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
         LOGW() << "[editude] applyAddTuplet: no measure at tick" << tick.toString();
@@ -1865,7 +1866,6 @@ bool ScoreApplicator::applyAddTuplet(Score* score, const QJsonObject& op)
     }
 
     const TDuration baseLen(baseType);
-    // total ticks = normal_notes * base_duration
     const Fraction totalTicks = baseLen.fraction() * normalNotes;
 
     score->startCmd(TranslatableString("undoableAction", "Add tuplet"));
@@ -1878,56 +1878,92 @@ bool ScoreApplicator::applyAddTuplet(Score* score, const QJsonObject& op)
     tuplet->setParent(measure);
     score->cmdCreateTuplet(ocr, tuplet);
     score->endCmd();
-
-    m_uuidToElement[id] = tuplet;
-    m_elementToUuid[tuplet] = id;
-
-    // Map member UUIDs to the created elements in order.
-    const auto& elems = tuplet->elements();
-    for (int i = 0; i < static_cast<int>(elems.size()) && i < members.size(); ++i) {
-        const QString memberId = members[i].toObject()["id"].toString();
-        if (!memberId.isEmpty() && elems[i]) {
-            m_uuidToElement[memberId]  = elems[i];
-            m_elementToUuid[elems[i]] = memberId;
-        }
-    }
-
     return true;
 }
 
 bool ScoreApplicator::applyRemoveTuplet(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveTuplet: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveTuplet: unknown or missing part_id";
         return false;
     }
 
-    Tuplet* tuplet = dynamic_cast<Tuplet*>(m_uuidToElement.value(id));
-    if (!tuplet) {
-        LOGW() << "[editude] applyRemoveTuplet: element is not Tuplet" << id;
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+    const track_idx_t track = trackFromCoord(part, voice, stf);
+
+    // Find a tuplet at this tick on the given track.
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyRemoveTuplet: no measure at tick" << tick.toString();
         return false;
     }
 
-    // Unregister members before removal.
-    for (DurationElement* elem : tuplet->elements()) {
-        const QString memberUuid = m_elementToUuid.value(elem);
-        if (!memberUuid.isEmpty()) {
-            m_uuidToElement.remove(memberUuid);
-            m_elementToUuid.remove(elem);
+    Tuplet* tuplet = nullptr;
+    for (Segment* seg = measure->first(SegmentType::ChordRest); seg;
+         seg = seg->next(SegmentType::ChordRest)) {
+        if (seg->tick() == tick) {
+            EngravingItem* el = seg->element(track);
+            if (el && el->isChordRest()) {
+                ChordRest* cr = toChordRest(el);
+                if (cr->tuplet()) {
+                    tuplet = cr->tuplet();
+                    break;
+                }
+            }
         }
     }
-    m_elementToUuid.remove(tuplet);
-    m_uuidToElement.remove(id);
+    if (!tuplet) {
+        LOGW() << "[editude] applyRemoveTuplet: no tuplet at coordinate";
+        return false;
+    }
 
     score->startCmd(TranslatableString("undoableAction", "Remove tuplet"));
     score->cmdDeleteTuplet(tuplet, /*replaceWithRest=*/true);
+
+    // After removing the tuplet, if the voice is now all rests, replace
+    // them with a single V_MEASURE rest.  This matches the state produced
+    // by the editor's undo stack (which restores the original full-measure
+    // rest).  We can't use setNoteRest() here because cmdDeleteTuplet may
+    // leave the measure in a state where the remaining rest doesn't cover
+    // the full measure, causing setNoteRest to silently do nothing.
+    {
+        bool allRests = true;
+        QVector<EngravingItem*> toRemove;
+        for (Segment* s = measure->first(SegmentType::ChordRest); s;
+             s = s->next(SegmentType::ChordRest)) {
+            EngravingItem* e = s->element(track);
+            if (e && !e->isRest()) {
+                allRests = false;
+                break;
+            }
+            if (e) {
+                toRemove.append(e);
+            }
+        }
+        if (allRests && !toRemove.isEmpty()) {
+            for (EngravingItem* e : toRemove) {
+                score->undoRemoveElement(e);
+            }
+            Segment* seg0 = measure->getSegmentR(
+                SegmentType::ChordRest, Fraction(0, 1));
+            Rest* fmr = Factory::createRest(
+                seg0, TDuration(DurationType::V_MEASURE));
+            fmr->setTrack(track);
+            fmr->setTicks(measure->ticks());
+            score->undoAddElement(fmr);
+        }
+    }
+
     score->endCmd();
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3 lyric helpers
+// Tier 3 — lyrics (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 static LyricsSyllabic lyricSyllabicFromName(const QString& name)
@@ -1941,31 +1977,23 @@ static LyricsSyllabic lyricSyllabicFromName(const QString& name)
 
 bool ScoreApplicator::applyAddLyric(Score* score, const QJsonObject& op)
 {
-    const QString id      = op["id"].toString();
-    const QString eventId = op["event_id"].toString();
-    const int verse       = op["verse"].toInt(0);
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddLyric: unknown or missing part_id";
+        return false;
+    }
+
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice    = opVoice(op);
+    const int stf      = opStaff(op);
+    const int verse    = op["verse"].toInt(0);
     const QString syllabic = op["syllabic"].toString(QStringLiteral("single"));
-    const QString text    = op["text"].toString();
+    const QString text = op["text"].toString();
 
-    if (id.isEmpty() || eventId.isEmpty()) {
-        LOGW() << "[editude] applyAddLyric: missing id or event_id";
-        return false;
-    }
-
-    EngravingObject* evObj = m_uuidToElement.value(eventId);
-    if (!evObj) {
-        LOGW() << "[editude] applyAddLyric: unknown event_id" << eventId;
-        return false;
-    }
-
-    ChordRest* cr = nullptr;
-    if (evObj->isNote()) {
-        cr = toNote(static_cast<EngravingItem*>(evObj))->chord();
-    } else if (evObj->isChordRest()) {
-        cr = toChordRest(static_cast<EngravingItem*>(evObj));
-    }
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
     if (!cr) {
-        LOGW() << "[editude] applyAddLyric: event is not a note/chordrest" << eventId;
+        LOGW() << "[editude] applyAddLyric: no ChordRest at coordinate";
         return false;
     }
 
@@ -1978,34 +2006,50 @@ bool ScoreApplicator::applyAddLyric(Score* score, const QJsonObject& op)
     lyric->setPlainText(String(text));
     score->undoAddElement(lyric);
     score->endCmd();
-
-    m_uuidToElement[id] = lyric;
-    m_elementToUuid[lyric] = id;
     return true;
 }
 
 bool ScoreApplicator::applySetLyric(Score* score, const QJsonObject& op)
 {
-    const QString id       = op["id"].toString();
-    const QString text     = op["text"].toString();
-    const QString syllabic = op["syllabic"].toString();
-
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applySetLyric: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetLyric: unknown or missing part_id";
         return false;
     }
 
-    Lyrics* lyric = dynamic_cast<Lyrics*>(m_uuidToElement.value(id));
-    if (!lyric) {
-        LOGW() << "[editude] applySetLyric: element is not Lyrics" << id;
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice    = opVoice(op);
+    const int stf      = opStaff(op);
+    const int verse    = op["verse"].toInt(0);
+    const QString text     = op["text"].toString();
+    const QString syllabic = op["syllabic"].toString();
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
+    if (!cr) {
+        LOGW() << "[editude] applySetLyric: no ChordRest at coordinate";
+        return false;
+    }
+
+    // Find the Lyrics element matching the verse number.
+    Lyrics* target = nullptr;
+    for (Lyrics* l : cr->lyrics()) {
+        if (l->verse() == verse) {
+            target = l;
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applySetLyric: lyric not found at coordinate verse" << verse;
         return false;
     }
 
     score->startCmd(TranslatableString("undoableAction", "Set lyric"));
-    lyric->undoChangeProperty(Pid::TEXT, PropertyValue(String(text)));
+    target->undoChangeProperty(Pid::TEXT, PropertyValue(String(text)));
     if (!syllabic.isEmpty()) {
-        lyric->undoChangeProperty(Pid::SYLLABIC,
-                                   PropertyValue(static_cast<int>(lyricSyllabicFromName(syllabic))));
+        target->undoChangeProperty(
+            Pid::SYLLABIC,
+            PropertyValue(static_cast<int>(lyricSyllabicFromName(syllabic))));
     }
     score->endCmd();
     return true;
@@ -2013,35 +2057,53 @@ bool ScoreApplicator::applySetLyric(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applyRemoveLyric(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveLyric: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveLyric: unknown or missing part_id";
         return false;
     }
 
-    Lyrics* lyric = dynamic_cast<Lyrics*>(m_uuidToElement.value(id));
-    if (!lyric) {
-        LOGW() << "[editude] applyRemoveLyric: element is not Lyrics" << id;
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+    const int verse = op["verse"].toInt(0);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
+    if (!cr) {
+        LOGW() << "[editude] applyRemoveLyric: no ChordRest at coordinate";
         return false;
     }
 
-    m_elementToUuid.remove(lyric);
-    m_uuidToElement.remove(id);
+    Lyrics* target = nullptr;
+    for (Lyrics* l : cr->lyrics()) {
+        if (l->verse() == verse) {
+            target = l;
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveLyric: lyric not found at coordinate verse" << verse;
+        return false;
+    }
 
     score->startCmd(TranslatableString("undoableAction", "Remove lyric"));
-    score->undoRemoveElement(lyric);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Tier 3 — chord symbols (score-global, beat-addressed)
+// ---------------------------------------------------------------------------
+
 bool ScoreApplicator::applyAddChordSymbol(Score* score, const QJsonObject& op)
 {
-    const QString id   = op["id"].toString();
-    const QString name = op["name"].toString();
+    const QString name     = op["name"].toString();
     const QJsonObject beat = op["beat"].toObject();
 
-    if (id.isEmpty() || name.isEmpty()) {
-        LOGW() << "[editude] applyAddChordSymbol: missing id or name";
+    if (name.isEmpty()) {
+        LOGW() << "[editude] applyAddChordSymbol: missing name";
         return false;
     }
 
@@ -2062,25 +2124,37 @@ bool ScoreApplicator::applyAddChordSymbol(Score* score, const QJsonObject& op)
     harmony->setHarmony(String(name));
     score->undoAddElement(harmony);
     score->endCmd();
-
-    m_uuidToElement[id] = harmony;
-    m_elementToUuid[harmony] = id;
     return true;
 }
 
 bool ScoreApplicator::applySetChordSymbol(Score* score, const QJsonObject& op)
 {
-    const QString id   = op["id"].toString();
-    const QString name = op["name"].toString();
+    const QJsonObject beat = op["beat"].toObject();
+    const QString name     = op["name"].toString();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
 
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applySetChordSymbol: unknown id" << id;
+    // Find the Harmony at this tick on track 0.
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        Measure* m = score->tick2measure(tick);
+        if (m) {
+            seg = m->undoGetChordRestOrTimeTickSegment(tick);
+        }
+    }
+    if (!seg) {
+        LOGW() << "[editude] applySetChordSymbol: no segment at tick" << tick.toString();
         return false;
     }
 
-    Harmony* harmony = dynamic_cast<Harmony*>(m_uuidToElement.value(id));
+    Harmony* harmony = nullptr;
+    for (EngravingItem* el : seg->annotations()) {
+        if (el->isHarmony() && el->track() == 0) {
+            harmony = toHarmony(el);
+            break;
+        }
+    }
     if (!harmony) {
-        LOGW() << "[editude] applySetChordSymbol: element is not Harmony" << id;
+        LOGW() << "[editude] applySetChordSymbol: harmony not found at beat";
         return false;
     }
 
@@ -2092,20 +2166,32 @@ bool ScoreApplicator::applySetChordSymbol(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applyRemoveChordSymbol(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveChordSymbol: unknown id" << id;
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        Measure* m = score->tick2measure(tick);
+        if (m) {
+            seg = m->undoGetChordRestOrTimeTickSegment(tick);
+        }
+    }
+    if (!seg) {
+        LOGW() << "[editude] applyRemoveChordSymbol: no segment at tick" << tick.toString();
         return false;
     }
 
-    Harmony* harmony = dynamic_cast<Harmony*>(m_uuidToElement.value(id));
+    Harmony* harmony = nullptr;
+    for (EngravingItem* el : seg->annotations()) {
+        if (el->isHarmony() && el->track() == 0) {
+            harmony = toHarmony(el);
+            break;
+        }
+    }
     if (!harmony) {
-        LOGW() << "[editude] applyRemoveChordSymbol: element is not Harmony" << id;
+        LOGW() << "[editude] applyRemoveChordSymbol: harmony not found at beat";
         return false;
     }
-
-    m_elementToUuid.remove(harmony);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove chord symbol"));
     score->undoRemoveElement(harmony);
@@ -2114,34 +2200,27 @@ bool ScoreApplicator::applyRemoveChordSymbol(Score* score, const QJsonObject& op
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3 — staff text (part-scoped)
+// Tier 3 — staff text (part-scoped, beat-addressed)
 // ---------------------------------------------------------------------------
 
 bool ScoreApplicator::applyAddStaffText(Score* score, const QJsonObject& op)
 {
-    const QString id      = op["id"].toString();
-    const QString partId  = op["part_id"].toString();
-    const QString text    = op["text"].toString();
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddStaffText: unknown or missing part_id";
+        return false;
+    }
+
+    const QString text     = op["text"].toString();
     const QJsonObject beat = op["beat"].toObject();
-
-    if (id.isEmpty() || partId.isEmpty()) {
-        LOGW() << "[editude] applyAddStaffText: missing id or part_id";
-        return false;
-    }
-
-    if (!m_partUuidToPart.contains(partId)) {
-        LOGW() << "[editude] applyAddStaffText: unknown part_id" << partId;
-        return false;
-    }
-
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
         LOGW() << "[editude] applyAddStaffText: no measure at tick" << tick.toString();
         return false;
     }
 
-    Part* part = m_partUuidToPart.value(partId);
     const track_idx_t track = part->startTrack();
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
 
@@ -2152,25 +2231,43 @@ bool ScoreApplicator::applyAddStaffText(Score* score, const QJsonObject& op)
     st->setPlainText(String(text));
     score->undoAddElement(st);
     score->endCmd();
-
-    m_uuidToElement[id] = st;
-    m_elementToUuid[st] = id;
     return true;
 }
 
 bool ScoreApplicator::applySetStaffText(Score* score, const QJsonObject& op)
 {
-    const QString id   = op["id"].toString();
-    const QString text = op["text"].toString();
-
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applySetStaffText: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applySetStaffText: unknown or missing part_id";
         return false;
     }
 
-    StaffText* st = dynamic_cast<StaffText*>(m_uuidToElement.value(id));
+    const QJsonObject beat = op["beat"].toObject();
+    const QString text     = op["text"].toString();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const track_idx_t track = part->startTrack();
+
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        Measure* m = score->tick2measure(tick);
+        if (m) {
+            seg = m->undoGetChordRestOrTimeTickSegment(tick);
+        }
+    }
+    if (!seg) {
+        LOGW() << "[editude] applySetStaffText: no segment at tick" << tick.toString();
+        return false;
+    }
+
+    StaffText* st = nullptr;
+    for (EngravingItem* el : seg->annotations()) {
+        if (el->isStaffText() && el->track() == track) {
+            st = toStaffText(el);
+            break;
+        }
+    }
     if (!st) {
-        LOGW() << "[editude] applySetStaffText: element is not StaffText" << id;
+        LOGW() << "[editude] applySetStaffText: staff text not found at coordinate";
         return false;
     }
 
@@ -2182,20 +2279,39 @@ bool ScoreApplicator::applySetStaffText(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applyRemoveStaffText(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveStaffText: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveStaffText: unknown or missing part_id";
         return false;
     }
 
-    StaffText* st = dynamic_cast<StaffText*>(m_uuidToElement.value(id));
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const track_idx_t track = part->startTrack();
+
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        Measure* m = score->tick2measure(tick);
+        if (m) {
+            seg = m->undoGetChordRestOrTimeTickSegment(tick);
+        }
+    }
+    if (!seg) {
+        LOGW() << "[editude] applyRemoveStaffText: no segment at tick" << tick.toString();
+        return false;
+    }
+
+    StaffText* st = nullptr;
+    for (EngravingItem* el : seg->annotations()) {
+        if (el->isStaffText() && el->track() == track) {
+            st = toStaffText(el);
+            break;
+        }
+    }
     if (!st) {
-        LOGW() << "[editude] applyRemoveStaffText: element is not StaffText" << id;
+        LOGW() << "[editude] applyRemoveStaffText: staff text not found at coordinate";
         return false;
     }
-
-    m_elementToUuid.remove(st);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove staff text"));
     score->undoRemoveElement(st);
@@ -2204,21 +2320,15 @@ bool ScoreApplicator::applyRemoveStaffText(Score* score, const QJsonObject& op)
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3 — system text (score-global)
+// Tier 3 — system text (score-global, beat-addressed)
 // ---------------------------------------------------------------------------
 
 bool ScoreApplicator::applyAddSystemText(Score* score, const QJsonObject& op)
 {
-    const QString id   = op["id"].toString();
-    const QString text = op["text"].toString();
+    const QString text     = op["text"].toString();
     const QJsonObject beat = op["beat"].toObject();
-
-    if (id.isEmpty()) {
-        LOGW() << "[editude] applyAddSystemText: missing id";
-        return false;
-    }
-
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
         LOGW() << "[editude] applyAddSystemText: no measure at tick" << tick.toString();
@@ -2234,25 +2344,36 @@ bool ScoreApplicator::applyAddSystemText(Score* score, const QJsonObject& op)
     st->setPlainText(String(text));
     score->undoAddElement(st);
     score->endCmd();
-
-    m_uuidToElement[id] = st;
-    m_elementToUuid[st] = id;
     return true;
 }
 
 bool ScoreApplicator::applySetSystemText(Score* score, const QJsonObject& op)
 {
-    const QString id   = op["id"].toString();
-    const QString text = op["text"].toString();
+    const QJsonObject beat = op["beat"].toObject();
+    const QString text     = op["text"].toString();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
 
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applySetSystemText: unknown id" << id;
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        Measure* m = score->tick2measure(tick);
+        if (m) {
+            seg = m->undoGetChordRestOrTimeTickSegment(tick);
+        }
+    }
+    if (!seg) {
+        LOGW() << "[editude] applySetSystemText: no segment at tick" << tick.toString();
         return false;
     }
 
-    SystemText* st = dynamic_cast<SystemText*>(m_uuidToElement.value(id));
+    SystemText* st = nullptr;
+    for (EngravingItem* el : seg->annotations()) {
+        if (el->isSystemText() && el->track() == 0) {
+            st = toSystemText(el);
+            break;
+        }
+    }
     if (!st) {
-        LOGW() << "[editude] applySetSystemText: element is not SystemText" << id;
+        LOGW() << "[editude] applySetSystemText: system text not found at beat";
         return false;
     }
 
@@ -2264,20 +2385,32 @@ bool ScoreApplicator::applySetSystemText(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applyRemoveSystemText(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveSystemText: unknown id" << id;
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        Measure* m = score->tick2measure(tick);
+        if (m) {
+            seg = m->undoGetChordRestOrTimeTickSegment(tick);
+        }
+    }
+    if (!seg) {
+        LOGW() << "[editude] applyRemoveSystemText: no segment at tick" << tick.toString();
         return false;
     }
 
-    SystemText* st = dynamic_cast<SystemText*>(m_uuidToElement.value(id));
+    SystemText* st = nullptr;
+    for (EngravingItem* el : seg->annotations()) {
+        if (el->isSystemText() && el->track() == 0) {
+            st = toSystemText(el);
+            break;
+        }
+    }
     if (!st) {
-        LOGW() << "[editude] applyRemoveSystemText: element is not SystemText" << id;
+        LOGW() << "[editude] applyRemoveSystemText: system text not found at beat";
         return false;
     }
-
-    m_elementToUuid.remove(st);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove system text"));
     score->undoRemoveElement(st);
@@ -2286,21 +2419,15 @@ bool ScoreApplicator::applyRemoveSystemText(Score* score, const QJsonObject& op)
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3 — rehearsal marks (score-global)
+// Tier 3 — rehearsal marks (score-global, beat-addressed)
 // ---------------------------------------------------------------------------
 
 bool ScoreApplicator::applyAddRehearsalMark(Score* score, const QJsonObject& op)
 {
-    const QString id   = op["id"].toString();
-    const QString text = op["text"].toString();
+    const QString text     = op["text"].toString();
     const QJsonObject beat = op["beat"].toObject();
-
-    if (id.isEmpty()) {
-        LOGW() << "[editude] applyAddRehearsalMark: missing id";
-        return false;
-    }
-
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
         LOGW() << "[editude] applyAddRehearsalMark: no measure at tick" << tick.toString();
@@ -2316,25 +2443,36 @@ bool ScoreApplicator::applyAddRehearsalMark(Score* score, const QJsonObject& op)
     rm->setPlainText(String(text));
     score->undoAddElement(rm);
     score->endCmd();
-
-    m_uuidToElement[id] = rm;
-    m_elementToUuid[rm] = id;
     return true;
 }
 
 bool ScoreApplicator::applySetRehearsalMark(Score* score, const QJsonObject& op)
 {
-    const QString id   = op["id"].toString();
-    const QString text = op["text"].toString();
+    const QJsonObject beat = op["beat"].toObject();
+    const QString text     = op["text"].toString();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
 
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applySetRehearsalMark: unknown id" << id;
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        Measure* m = score->tick2measure(tick);
+        if (m) {
+            seg = m->undoGetChordRestOrTimeTickSegment(tick);
+        }
+    }
+    if (!seg) {
+        LOGW() << "[editude] applySetRehearsalMark: no segment at tick" << tick.toString();
         return false;
     }
 
-    RehearsalMark* rm = dynamic_cast<RehearsalMark*>(m_uuidToElement.value(id));
+    RehearsalMark* rm = nullptr;
+    for (EngravingItem* el : seg->annotations()) {
+        if (el->isRehearsalMark() && el->track() == 0) {
+            rm = toRehearsalMark(el);
+            break;
+        }
+    }
     if (!rm) {
-        LOGW() << "[editude] applySetRehearsalMark: element is not RehearsalMark" << id;
+        LOGW() << "[editude] applySetRehearsalMark: rehearsal mark not found at beat";
         return false;
     }
 
@@ -2346,20 +2484,32 @@ bool ScoreApplicator::applySetRehearsalMark(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applyRemoveRehearsalMark(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveRehearsalMark: unknown id" << id;
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        Measure* m = score->tick2measure(tick);
+        if (m) {
+            seg = m->undoGetChordRestOrTimeTickSegment(tick);
+        }
+    }
+    if (!seg) {
+        LOGW() << "[editude] applyRemoveRehearsalMark: no segment at tick" << tick.toString();
         return false;
     }
 
-    RehearsalMark* rm = dynamic_cast<RehearsalMark*>(m_uuidToElement.value(id));
+    RehearsalMark* rm = nullptr;
+    for (EngravingItem* el : seg->annotations()) {
+        if (el->isRehearsalMark() && el->track() == 0) {
+            rm = toRehearsalMark(el);
+            break;
+        }
+    }
     if (!rm) {
-        LOGW() << "[editude] applyRemoveRehearsalMark: element is not RehearsalMark" << id;
+        LOGW() << "[editude] applyRemoveRehearsalMark: rehearsal mark not found at beat";
         return false;
     }
-
-    m_elementToUuid.remove(rm);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove rehearsal mark"));
     score->undoRemoveElement(rm);
@@ -2368,26 +2518,20 @@ bool ScoreApplicator::applyRemoveRehearsalMark(Score* score, const QJsonObject& 
 }
 
 // ---------------------------------------------------------------------------
-// Advanced spanners — octave lines, glissandos, pedal lines, trill lines
+// Advanced spanners — octave lines (beat-range + part-addressed)
 // ---------------------------------------------------------------------------
 
 bool ScoreApplicator::applyAddOctaveLine(Score* score, const QJsonObject& op)
 {
-    const QString id       = op["id"].toString();
-    const QString partId   = op["part_id"].toString();
-    const QString kind     = op["kind"].toString();
-    const QJsonObject sb   = op["start_beat"].toObject();
-    const QJsonObject eb   = op["end_beat"].toObject();
-
-    if (id.isEmpty() || partId.isEmpty()) {
-        LOGW() << "[editude] applyAddOctaveLine: missing id or part_id";
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddOctaveLine: unknown or missing part_id";
         return false;
     }
 
-    if (!m_partUuidToPart.contains(partId)) {
-        LOGW() << "[editude] applyAddOctaveLine: unknown part_id" << partId;
-        return false;
-    }
+    const QString kind   = op["kind"].toString();
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
 
     OttavaType ottType = OttavaType::OTTAVA_8VA;
     if (kind == QStringLiteral("8vb"))        ottType = OttavaType::OTTAVA_8VB;
@@ -2396,7 +2540,7 @@ bool ScoreApplicator::applyAddOctaveLine(Score* score, const QJsonObject& op)
 
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = m_partUuidToPart.value(partId)->startTrack();
+    const track_idx_t track = part->startTrack();
 
     score->startCmd(TranslatableString("undoableAction", "Add octave line"));
     Ottava* ottava = Factory::createOttava(score->dummy());
@@ -2406,69 +2550,76 @@ bool ScoreApplicator::applyAddOctaveLine(Score* score, const QJsonObject& op)
     ottava->setTick2(endTick);
     score->undoAddElement(ottava);
     score->endCmd();
-
-    m_uuidToElement[id] = ottava;
-    m_elementToUuid[ottava] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveOctaveLine(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveOctaveLine: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveOctaveLine: unknown or missing part_id";
         return false;
     }
 
-    Ottava* ottava = dynamic_cast<Ottava*>(m_uuidToElement.value(id));
-    if (!ottava) {
-        LOGW() << "[editude] applyRemoveOctaveLine: element is not an Ottava" << id;
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const track_idx_t track = part->startTrack();
+
+    Ottava* target = nullptr;
+    for (auto it = score->spanner().lower_bound(startTick.ticks());
+         it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+        Spanner* sp = it->second;
+        if (sp->isOttava() && sp->track() == track
+            && sp->tick() == startTick && sp->tick2() == endTick) {
+            target = toOttava(sp);
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveOctaveLine: ottava not found at coordinates";
         return false;
     }
-
-    m_elementToUuid.remove(ottava);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove octave line"));
-    score->undoRemoveElement(ottava);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Advanced spanners — glissandos (dual-anchor, coordinate-addressed)
+// ---------------------------------------------------------------------------
+
 bool ScoreApplicator::applyAddGlissando(Score* score, const QJsonObject& op)
 {
-    const QString id           = op["id"].toString();
-    const QString startEventId = op["start_event_id"].toString();
-    const QString endEventId   = op["end_event_id"].toString();
-    const QString style        = op["style"].toString();
-
-    if (id.isEmpty() || startEventId.isEmpty() || endEventId.isEmpty()) {
-        LOGW() << "[editude] applyAddGlissando: missing id, start_event_id, or end_event_id";
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddGlissando: unknown or missing part_id";
         return false;
     }
 
-    EngravingObject* startObj = m_uuidToElement.value(startEventId);
-    EngravingObject* endObj   = m_uuidToElement.value(endEventId);
-    if (!startObj || !endObj) {
-        LOGW() << "[editude] applyAddGlissando: unknown start or end event_id";
-        return false;
-    }
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
+    const QJsonObject sp = op["start_pitch"].toObject();
+    const QJsonObject ep = op["end_pitch"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const int startMidi = pitchToMidi(sp["step"].toString(), sp["octave"].toInt(),
+                                      sp["accidental"].toString());
+    const int endMidi   = pitchToMidi(ep["step"].toString(), ep["octave"].toInt(),
+                                      ep["accidental"].toString());
+    const int startVoice = op["start_voice"].toInt(1);
+    const int startStaff = op["start_staff"].toInt(0);
+    const int endVoice   = op["end_voice"].toInt(1);
+    const int endStaff   = op["end_staff"].toInt(0);
+    const QString style  = op["style"].toString();
 
-    // Resolve to Note* — glissandos anchor to notes, not chord-rests.
-    Note* startNote = nullptr;
-    Note* endNote   = nullptr;
-    if (startObj->isNote()) {
-        startNote = toNote(static_cast<EngravingItem*>(startObj));
-    } else if (startObj->isChord()) {
-        startNote = toChord(static_cast<EngravingItem*>(startObj))->upNote();
-    }
-    if (endObj->isNote()) {
-        endNote = toNote(static_cast<EngravingItem*>(endObj));
-    } else if (endObj->isChord()) {
-        endNote = toChord(static_cast<EngravingItem*>(endObj))->upNote();
-    }
+    Note* startNote = findNoteAtCoord(score, part, startTick, startMidi, startVoice, startStaff);
+    Note* endNote   = findNoteAtCoord(score, part, endTick, endMidi, endVoice, endStaff);
     if (!startNote || !endNote) {
-        LOGW() << "[editude] applyAddGlissando: start or end is not a note/chord";
+        LOGW() << "[editude] applyAddGlissando: start or end note not found";
         return false;
     }
 
@@ -2487,55 +2638,67 @@ bool ScoreApplicator::applyAddGlissando(Score* score, const QJsonObject& op)
     gliss->setParent(startNote);
     score->undoAddElement(gliss);
     score->endCmd();
-
-    m_uuidToElement[id] = gliss;
-    m_elementToUuid[gliss] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveGlissando(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveGlissando: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveGlissando: unknown or missing part_id";
         return false;
     }
 
-    Glissando* gliss = dynamic_cast<Glissando*>(m_uuidToElement.value(id));
-    if (!gliss) {
-        LOGW() << "[editude] applyRemoveGlissando: element is not a Glissando" << id;
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject sp = op["start_pitch"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const int startMidi = pitchToMidi(sp["step"].toString(), sp["octave"].toInt(),
+                                      sp["accidental"].toString());
+    const int startVoice = op["start_voice"].toInt(1);
+    const int startStaff = op["start_staff"].toInt(0);
+
+    Note* startNote = findNoteAtCoord(score, part, startTick, startMidi, startVoice, startStaff);
+    if (!startNote) {
+        LOGW() << "[editude] applyRemoveGlissando: start note not found";
         return false;
     }
 
-    m_elementToUuid.remove(gliss);
-    m_uuidToElement.remove(id);
+    // Find glissando starting from this note.
+    Glissando* target = nullptr;
+    for (Spanner* sp2 : startNote->spannerFor()) {
+        if (sp2->isGlissando()) {
+            target = toGlissando(sp2);
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveGlissando: glissando not found on start note";
+        return false;
+    }
 
     score->startCmd(TranslatableString("undoableAction", "Remove glissando"));
-    score->undoRemoveElement(gliss);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Advanced spanners — pedal lines (beat-range + part-addressed)
+// ---------------------------------------------------------------------------
+
 bool ScoreApplicator::applyAddPedalLine(Score* score, const QJsonObject& op)
 {
-    const QString id       = op["id"].toString();
-    const QString partId   = op["part_id"].toString();
-    const QJsonObject sb   = op["start_beat"].toObject();
-    const QJsonObject eb   = op["end_beat"].toObject();
-
-    if (id.isEmpty() || partId.isEmpty()) {
-        LOGW() << "[editude] applyAddPedalLine: missing id or part_id";
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddPedalLine: unknown or missing part_id";
         return false;
     }
 
-    if (!m_partUuidToPart.contains(partId)) {
-        LOGW() << "[editude] applyAddPedalLine: unknown part_id" << partId;
-        return false;
-    }
-
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = m_partUuidToPart.value(partId)->startTrack();
+    const track_idx_t track = part->startTrack();
 
     score->startCmd(TranslatableString("undoableAction", "Add pedal line"));
     Pedal* pedal = Factory::createPedal(score->dummy());
@@ -2544,52 +2707,59 @@ bool ScoreApplicator::applyAddPedalLine(Score* score, const QJsonObject& op)
     pedal->setTick2(endTick);
     score->undoAddElement(pedal);
     score->endCmd();
-
-    m_uuidToElement[id] = pedal;
-    m_elementToUuid[pedal] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemovePedalLine(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemovePedalLine: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemovePedalLine: unknown or missing part_id";
         return false;
     }
 
-    Pedal* pedal = dynamic_cast<Pedal*>(m_uuidToElement.value(id));
-    if (!pedal) {
-        LOGW() << "[editude] applyRemovePedalLine: element is not a Pedal" << id;
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const track_idx_t track = part->startTrack();
+
+    Pedal* target = nullptr;
+    for (auto it = score->spanner().lower_bound(startTick.ticks());
+         it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+        Spanner* sp = it->second;
+        if (sp->isPedal() && sp->track() == track
+            && sp->tick() == startTick && sp->tick2() == endTick) {
+            target = toPedal(sp);
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemovePedalLine: pedal not found at coordinates";
         return false;
     }
-
-    m_elementToUuid.remove(pedal);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove pedal line"));
-    score->undoRemoveElement(pedal);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Advanced spanners — trill lines (beat-range + part-addressed)
+// ---------------------------------------------------------------------------
+
 bool ScoreApplicator::applyAddTrillLine(Score* score, const QJsonObject& op)
 {
-    const QString id       = op["id"].toString();
-    const QString partId   = op["part_id"].toString();
-    const QString kind     = op["kind"].toString();
-    const QJsonObject sb   = op["start_beat"].toObject();
-    const QJsonObject eb   = op["end_beat"].toObject();
-
-    if (id.isEmpty() || partId.isEmpty()) {
-        LOGW() << "[editude] applyAddTrillLine: missing id or part_id";
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddTrillLine: unknown or missing part_id";
         return false;
     }
 
-    if (!m_partUuidToPart.contains(partId)) {
-        LOGW() << "[editude] applyAddTrillLine: unknown part_id" << partId;
-        return false;
-    }
+    const QString kind   = op["kind"].toString();
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
 
     TrillType trType = TrillType::TRILL_LINE;
     if (kind == QStringLiteral("upprall"))         trType = TrillType::UPPRALL_LINE;
@@ -2598,7 +2768,7 @@ bool ScoreApplicator::applyAddTrillLine(Score* score, const QJsonObject& op)
 
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = m_partUuidToPart.value(partId)->startTrack();
+    const track_idx_t track = part->startTrack();
 
     score->startCmd(TranslatableString("undoableAction", "Add trill line"));
     Trill* trill = Factory::createTrill(score->dummy());
@@ -2607,8 +2777,6 @@ bool ScoreApplicator::applyAddTrillLine(Score* score, const QJsonObject& op)
     trill->setTick(startTick);
     trill->setTick2(endTick);
 
-    // Set accidental on the Ornament (created by setTrillType) so that
-    // layout propagates it to trill->m_accidental during endCmd().
     const QJsonValue accVal = op.value("accidental");
     if (accVal.isString()) {
         const QString accStr = accVal.toString();
@@ -2627,37 +2795,46 @@ bool ScoreApplicator::applyAddTrillLine(Score* score, const QJsonObject& op)
 
     score->undoAddElement(trill);
     score->endCmd();
-
-    m_uuidToElement[id] = trill;
-    m_elementToUuid[trill] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveTrillLine(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveTrillLine: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveTrillLine: unknown or missing part_id";
         return false;
     }
 
-    Trill* trill = dynamic_cast<Trill*>(m_uuidToElement.value(id));
-    if (!trill) {
-        LOGW() << "[editude] applyRemoveTrillLine: element is not a Trill" << id;
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const track_idx_t track = part->startTrack();
+
+    Trill* target = nullptr;
+    for (auto it = score->spanner().lower_bound(startTick.ticks());
+         it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+        Spanner* sp = it->second;
+        if (sp->isTrill() && sp->track() == track
+            && sp->tick() == startTick && sp->tick2() == endTick) {
+            target = toTrill(sp);
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveTrillLine: trill not found at coordinates";
         return false;
     }
-
-    m_elementToUuid.remove(trill);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove trill line"));
-    score->undoRemoveElement(trill);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// Arpeggios
+// Arpeggios (beat/voice/staff coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 static ArpeggioType arpeggioTypeFromName(const QString& name)
@@ -2673,34 +2850,26 @@ static ArpeggioType arpeggioTypeFromName(const QString& name)
     return s_map.value(name, ArpeggioType::NORMAL);
 }
 
-
 bool ScoreApplicator::applyAddArpeggio(Score* score, const QJsonObject& op)
 {
-    const QString id       = op["id"].toString();
-    const QString eventId  = op["event_id"].toString();
-    const QString dirName  = op["direction"].toString();
-
-    if (id.isEmpty() || eventId.isEmpty()) {
-        LOGW() << "[editude] applyAddArpeggio: missing id or event_id";
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddArpeggio: unknown or missing part_id";
         return false;
     }
 
-    EngravingObject* evObj = m_uuidToElement.value(eventId);
-    if (!evObj) {
-        LOGW() << "[editude] applyAddArpeggio: unknown event_id" << eventId;
-        return false;
-    }
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice    = opVoice(op);
+    const int stf      = opStaff(op);
+    const QString dirName = op["direction"].toString();
 
-    Chord* chord = nullptr;
-    if (evObj->isNote()) {
-        chord = toNote(static_cast<EngravingItem*>(evObj))->chord();
-    } else if (evObj->isChord()) {
-        chord = toChord(static_cast<EngravingItem*>(evObj));
-    }
-    if (!chord) {
-        LOGW() << "[editude] applyAddArpeggio: event is not a note/chord" << eventId;
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
+    if (!cr || !cr->isChord()) {
+        LOGW() << "[editude] applyAddArpeggio: no chord at coordinate";
         return false;
     }
+    Chord* chord = toChord(cr);
 
     score->startCmd(TranslatableString("undoableAction", "Add arpeggio"));
     Arpeggio* arp = Factory::createArpeggio(chord);
@@ -2709,28 +2878,34 @@ bool ScoreApplicator::applyAddArpeggio(Score* score, const QJsonObject& op)
     arp->setTrack(chord->track());
     score->undoAddElement(arp);
     score->endCmd();
-
-    m_uuidToElement[id] = arp;
-    m_elementToUuid[arp] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveArpeggio(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveArpeggio: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveArpeggio: unknown or missing part_id";
         return false;
     }
 
-    Arpeggio* arp = dynamic_cast<Arpeggio*>(m_uuidToElement.value(id));
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
+    if (!cr || !cr->isChord()) {
+        LOGW() << "[editude] applyRemoveArpeggio: no chord at coordinate";
+        return false;
+    }
+    Chord* chord = toChord(cr);
+
+    Arpeggio* arp = chord->arpeggio();
     if (!arp) {
-        LOGW() << "[editude] applyRemoveArpeggio: element is not Arpeggio" << id;
+        LOGW() << "[editude] applyRemoveArpeggio: chord has no arpeggio";
         return false;
     }
-
-    m_elementToUuid.remove(arp);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove arpeggio"));
     score->undoRemoveElement(arp);
@@ -2739,7 +2914,7 @@ bool ScoreApplicator::applyRemoveArpeggio(Score* score, const QJsonObject& op)
 }
 
 // ---------------------------------------------------------------------------
-// Grace notes
+// Grace notes (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 static NoteType graceNoteTypeFromName(const QString& name)
@@ -2771,33 +2946,26 @@ static DurationType graceNoteDurationType(NoteType nt)
 
 bool ScoreApplicator::applyAddGraceNote(Score* score, const QJsonObject& op)
 {
-    const QString id        = op["id"].toString();
-    const QString eventId   = op["event_id"].toString();
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddGraceNote: unknown or missing part_id";
+        return false;
+    }
+
+    const QJsonObject beat  = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice         = opVoice(op);
+    const int stf           = opStaff(op);
     const int order         = op["order"].toInt(0);
     const QString typeName  = op["grace_type"].toString();
     const QJsonObject pitch = op["pitch"].toObject();
 
-    if (id.isEmpty() || eventId.isEmpty()) {
-        LOGW() << "[editude] applyAddGraceNote: missing id or event_id";
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
+    if (!cr || !cr->isChord()) {
+        LOGW() << "[editude] applyAddGraceNote: no chord at coordinate";
         return false;
     }
-
-    EngravingObject* evObj = m_uuidToElement.value(eventId);
-    if (!evObj) {
-        LOGW() << "[editude] applyAddGraceNote: unknown event_id" << eventId;
-        return false;
-    }
-
-    Chord* parentChord = nullptr;
-    if (evObj->isNote()) {
-        parentChord = toNote(static_cast<EngravingItem*>(evObj))->chord();
-    } else if (evObj->isChord()) {
-        parentChord = toChord(static_cast<EngravingItem*>(evObj));
-    }
-    if (!parentChord) {
-        LOGW() << "[editude] applyAddGraceNote: event is not a note/chord" << eventId;
-        return false;
-    }
+    Chord* parentChord = toChord(cr);
 
     const NoteType nt = graceNoteTypeFromName(typeName);
     const int midi = pitchToMidi(pitch["step"].toString(),
@@ -2829,65 +2997,92 @@ bool ScoreApplicator::applyAddGraceNote(Score* score, const QJsonObject& op)
 
     score->undoAddElement(graceChord);
     score->endCmd();
-
-    m_uuidToElement[id] = graceChord;
-    m_elementToUuid[graceChord] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveGraceNote(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveGraceNote: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveGraceNote: unknown or missing part_id";
         return false;
     }
 
-    Chord* graceChord = dynamic_cast<Chord*>(m_uuidToElement.value(id));
-    if (!graceChord || !graceChord->isGrace()) {
-        LOGW() << "[editude] applyRemoveGraceNote: element is not a grace chord" << id;
+    const QJsonObject beat  = op["beat"].toObject();
+    const QJsonObject pitch = op["pitch"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+    const int order = op["order"].toInt(0);
+    const int midi  = pitchToMidi(pitch["step"].toString(),
+                                  pitch["octave"].toInt(),
+                                  pitch["accidental"].toString());
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
+    if (!cr || !cr->isChord()) {
+        LOGW() << "[editude] applyRemoveGraceNote: no chord at coordinate";
         return false;
     }
+    Chord* parentChord = toChord(cr);
 
-    m_elementToUuid.remove(graceChord);
-    m_uuidToElement.remove(id);
+    // Find the grace chord by order and pitch.
+    Chord* target = nullptr;
+    int idx = 0;
+    for (Chord* gc : parentChord->graceNotes()) {
+        if (idx == order) {
+            // Verify pitch if provided.
+            if (midi >= 0 && midi <= 127) {
+                bool pitchMatch = false;
+                for (Note* n : gc->notes()) {
+                    if (n->pitch() == midi) {
+                        pitchMatch = true;
+                        break;
+                    }
+                }
+                if (!pitchMatch) {
+                    ++idx;
+                    continue;
+                }
+            }
+            target = gc;
+            break;
+        }
+        ++idx;
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveGraceNote: grace note not found at coordinate";
+        return false;
+    }
 
     score->startCmd(TranslatableString("undoableAction", "Remove grace note"));
-    score->undoRemoveElement(graceChord);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// Breath marks / caesuras
+// Breath marks / caesuras (beat + part-addressed)
 // ---------------------------------------------------------------------------
 
 bool ScoreApplicator::applyAddBreathMark(Score* score, const QJsonObject& op)
 {
-    const QString id         = op["id"].toString();
-    const QString partId     = op["part_id"].toString();
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddBreathMark: unknown or missing part_id";
+        return false;
+    }
+
     const QString typeName   = op["breath_type"].toString();
     const QJsonObject beat   = op["beat"].toObject();
     const double pause       = op["pause"].toDouble(0.0);
-
-    if (id.isEmpty() || partId.isEmpty()) {
-        LOGW() << "[editude] applyAddBreathMark: missing id or part_id";
-        return false;
-    }
-
-    if (!m_partUuidToPart.contains(partId)) {
-        LOGW() << "[editude] applyAddBreathMark: unknown part_id" << partId;
-        return false;
-    }
-
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
         LOGW() << "[editude] applyAddBreathMark: no measure at tick" << tick.toString();
         return false;
     }
 
-    Part* part = m_partUuidToPart.value(partId);
     const track_idx_t track = part->startTrack();
 
     score->startCmd(TranslatableString("undoableAction", "Add breath mark"));
@@ -2899,28 +3094,42 @@ bool ScoreApplicator::applyAddBreathMark(Score* score, const QJsonObject& op)
     breath->setPause(pause);
     score->undoAddElement(breath);
     score->endCmd();
-
-    m_tier3UuidToElement[id] = breath;
-    m_tier3ElementToUuid[breath] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveBreathMark(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_tier3UuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveBreathMark: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveBreathMark: unknown or missing part_id";
         return false;
     }
 
-    Breath* breath = dynamic_cast<Breath*>(m_tier3UuidToElement.value(id));
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const track_idx_t track = part->startTrack();
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyRemoveBreathMark: no measure at tick" << tick.toString();
+        return false;
+    }
+
+    Segment* seg = measure->findSegment(SegmentType::Breath, tick);
+    if (!seg) {
+        LOGW() << "[editude] applyRemoveBreathMark: no breath segment at tick";
+        return false;
+    }
+
+    Breath* breath = nullptr;
+    EngravingItem* el = seg->element(track);
+    if (el && el->isBreath()) {
+        breath = toBreath(el);
+    }
     if (!breath) {
-        LOGW() << "[editude] applyRemoveBreathMark: element is not Breath" << id;
+        LOGW() << "[editude] applyRemoveBreathMark: breath not found at coordinate";
         return false;
     }
-
-    m_tier3ElementToUuid.remove(breath);
-    m_tier3UuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove breath mark"));
     score->undoRemoveElement(breath);
@@ -2929,36 +3138,29 @@ bool ScoreApplicator::applyRemoveBreathMark(Score* score, const QJsonObject& op)
 }
 
 // ---------------------------------------------------------------------------
-// Single-note tremolos
+// Single-note tremolos (beat/voice/staff coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 bool ScoreApplicator::applyAddTremolo(Score* score, const QJsonObject& op)
 {
-    const QString id       = op["id"].toString();
-    const QString eventId  = op["event_id"].toString();
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddTremolo: unknown or missing part_id";
+        return false;
+    }
+
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice    = opVoice(op);
+    const int stf      = opStaff(op);
     const QString typeName = op["tremolo_type"].toString();
 
-    if (id.isEmpty() || eventId.isEmpty()) {
-        LOGW() << "[editude] applyAddTremolo: missing id or event_id";
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
+    if (!cr || !cr->isChord()) {
+        LOGW() << "[editude] applyAddTremolo: no chord at coordinate";
         return false;
     }
-
-    EngravingObject* evObj = m_uuidToElement.value(eventId);
-    if (!evObj) {
-        LOGW() << "[editude] applyAddTremolo: unknown event_id" << eventId;
-        return false;
-    }
-
-    Chord* chord = nullptr;
-    if (evObj->isNote()) {
-        chord = toNote(static_cast<EngravingItem*>(evObj))->chord();
-    } else if (evObj->isChord()) {
-        chord = toChord(static_cast<EngravingItem*>(evObj));
-    }
-    if (!chord) {
-        LOGW() << "[editude] applyAddTremolo: event is not a note/chord" << eventId;
-        return false;
-    }
+    Chord* chord = toChord(cr);
 
     score->startCmd(TranslatableString("undoableAction", "Add tremolo"));
     TremoloSingleChord* trem = Factory::createTremoloSingleChord(chord);
@@ -2967,28 +3169,34 @@ bool ScoreApplicator::applyAddTremolo(Score* score, const QJsonObject& op)
     trem->setTrack(chord->track());
     score->undoAddElement(trem);
     score->endCmd();
-
-    m_uuidToElement[id] = trem;
-    m_elementToUuid[trem] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveTremolo(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveTremolo: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveTremolo: unknown or missing part_id";
         return false;
     }
 
-    TremoloSingleChord* trem = dynamic_cast<TremoloSingleChord*>(m_uuidToElement.value(id));
+    const QJsonObject beat = op["beat"].toObject();
+    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, stf);
+    if (!cr || !cr->isChord()) {
+        LOGW() << "[editude] applyRemoveTremolo: no chord at coordinate";
+        return false;
+    }
+    Chord* chord = toChord(cr);
+
+    TremoloSingleChord* trem = chord->tremoloSingleChord();
     if (!trem) {
-        LOGW() << "[editude] applyRemoveTremolo: element is not TremoloSingleChord" << id;
+        LOGW() << "[editude] applyRemoveTremolo: chord has no single tremolo";
         return false;
     }
-
-    m_elementToUuid.remove(trem);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove tremolo"));
     score->undoRemoveElement(trem);
@@ -2997,45 +3205,35 @@ bool ScoreApplicator::applyRemoveTremolo(Score* score, const QJsonObject& op)
 }
 
 // ---------------------------------------------------------------------------
-// Two-note tremolos
+// Two-note tremolos (dual-anchor, coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 bool ScoreApplicator::applyAddTwoNoteTremolo(Score* score, const QJsonObject& op)
 {
-    const QString id           = op["id"].toString();
-    const QString startEventId = op["start_event_id"].toString();
-    const QString endEventId   = op["end_event_id"].toString();
-    const QString typeName     = op["tremolo_type"].toString();
-
-    if (id.isEmpty() || startEventId.isEmpty() || endEventId.isEmpty()) {
-        LOGW() << "[editude] applyAddTwoNoteTremolo: missing id, start_event_id, or end_event_id";
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddTwoNoteTremolo: unknown or missing part_id";
         return false;
     }
 
-    EngravingObject* startObj = m_uuidToElement.value(startEventId);
-    EngravingObject* endObj   = m_uuidToElement.value(endEventId);
-    if (!startObj || !endObj) {
-        LOGW() << "[editude] applyAddTwoNoteTremolo: unknown start or end event_id";
-        return false;
-    }
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const int startVoice = op["start_voice"].toInt(1);
+    const int startStaff = op["start_staff"].toInt(0);
+    const int endVoice   = op["end_voice"].toInt(1);
+    const int endStaff   = op["end_staff"].toInt(0);
+    const QString typeName = op["tremolo_type"].toString();
 
-    // Resolve to Chord* — two-note tremolos require chords, not rests.
-    Chord* chord1 = nullptr;
-    Chord* chord2 = nullptr;
-    if (startObj->isNote()) {
-        chord1 = toNote(static_cast<EngravingItem*>(startObj))->chord();
-    } else if (startObj->isChord()) {
-        chord1 = toChord(static_cast<EngravingItem*>(startObj));
-    }
-    if (endObj->isNote()) {
-        chord2 = toNote(static_cast<EngravingItem*>(endObj))->chord();
-    } else if (endObj->isChord()) {
-        chord2 = toChord(static_cast<EngravingItem*>(endObj));
-    }
-    if (!chord1 || !chord2) {
-        LOGW() << "[editude] applyAddTwoNoteTremolo: start or end is not a note/chord";
+    ChordRest* cr1 = findChordRestAtCoord(score, part, startTick, startVoice, startStaff);
+    ChordRest* cr2 = findChordRestAtCoord(score, part, endTick, endVoice, endStaff);
+    if (!cr1 || !cr1->isChord() || !cr2 || !cr2->isChord()) {
+        LOGW() << "[editude] applyAddTwoNoteTremolo: start or end chord not found";
         return false;
     }
+    Chord* chord1 = toChord(cr1);
+    Chord* chord2 = toChord(cr2);
 
     score->startCmd(TranslatableString("undoableAction", "Add two-note tremolo"));
     TremoloTwoChord* trem = Factory::createTremoloTwoChord(chord1);
@@ -3045,28 +3243,34 @@ bool ScoreApplicator::applyAddTwoNoteTremolo(Score* score, const QJsonObject& op
     trem->setTrack(chord1->track());
     score->undoAddElement(trem);
     score->endCmd();
-
-    m_uuidToElement[id] = trem;
-    m_elementToUuid[trem] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveTwoNoteTremolo(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveTwoNoteTremolo: unknown id" << id;
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveTwoNoteTremolo: unknown or missing part_id";
         return false;
     }
 
-    TremoloTwoChord* trem = dynamic_cast<TremoloTwoChord*>(m_uuidToElement.value(id));
+    const QJsonObject sb = op["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const int startVoice = op["start_voice"].toInt(1);
+    const int startStaff = op["start_staff"].toInt(0);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, startTick, startVoice, startStaff);
+    if (!cr || !cr->isChord()) {
+        LOGW() << "[editude] applyRemoveTwoNoteTremolo: no chord at start coordinate";
+        return false;
+    }
+    Chord* chord = toChord(cr);
+
+    TremoloTwoChord* trem = chord->tremoloTwoChord();
     if (!trem) {
-        LOGW() << "[editude] applyRemoveTwoNoteTremolo: element is not TremoloTwoChord" << id;
+        LOGW() << "[editude] applyRemoveTwoNoteTremolo: chord has no two-note tremolo";
         return false;
     }
-
-    m_elementToUuid.remove(trem);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove two-note tremolo"));
     score->undoRemoveElement(trem);
@@ -3075,7 +3279,7 @@ bool ScoreApplicator::applyRemoveTwoNoteTremolo(Score* score, const QJsonObject&
 }
 
 // ---------------------------------------------------------------------------
-// Tier 4 — navigation marks
+// Tier 4 — navigation marks (already position-addressed)
 // ---------------------------------------------------------------------------
 
 bool ScoreApplicator::applySetStartRepeat(Score* score, const QJsonObject& op)
@@ -3121,12 +3325,6 @@ bool ScoreApplicator::applySetEndRepeat(Score* score, const QJsonObject& op)
 
 bool ScoreApplicator::applyInsertVolta(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty()) {
-        LOGW() << "[editude] applyInsertVolta: missing id";
-        return false;
-    }
-
     const QJsonObject startBeatObj = op["start_beat"].toObject();
     const QJsonObject endBeatObj   = op["end_beat"].toObject();
     const Fraction startTick(startBeatObj["numerator"].toInt(),
@@ -3141,7 +3339,6 @@ bool ScoreApplicator::applyInsertVolta(Score* score, const QJsonObject& op)
         return false;
     }
 
-    // Build endings vector from JSON array.
     std::vector<int> endings;
     const QJsonArray numbersArr = op["numbers"].toArray();
     for (const auto& v : numbersArr) {
@@ -3158,41 +3355,59 @@ bool ScoreApplicator::applyInsertVolta(Score* score, const QJsonObject& op)
     volta->setVoltaType(openEnd ? Volta::Type::OPEN : Volta::Type::CLOSED);
     score->undoAddElement(volta);
     score->endCmd();
-
-    m_uuidToElement[id] = volta;
-    m_elementToUuid[volta] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveVolta(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveVolta: unknown id" << id;
+    const QJsonObject startBeatObj = op["start_beat"].toObject();
+    const QJsonObject endBeatObj   = op["end_beat"].toObject();
+    const Fraction startTick(startBeatObj["numerator"].toInt(),
+                             startBeatObj["denominator"].toInt());
+    const Fraction endTick(endBeatObj["numerator"].toInt(),
+                           endBeatObj["denominator"].toInt());
+
+    Volta* target = nullptr;
+    for (auto it = score->spanner().lower_bound(startTick.ticks());
+         it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+        Spanner* sp = it->second;
+        if (sp->isVolta() && sp->tick() == startTick && sp->tick2() == endTick) {
+            target = toVolta(sp);
+            break;
+        }
+    }
+    // Also try matching by measure boundaries (volta tick2 = endMeasure.endTick).
+    if (!target) {
+        Measure* endMeasure = score->tick2measure(endTick);
+        if (endMeasure) {
+            const Fraction endMeasureTick2 = endMeasure->endTick();
+            for (auto it = score->spanner().lower_bound(startTick.ticks());
+                 it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+                Spanner* sp = it->second;
+                if (sp->isVolta() && sp->tick() == startTick
+                    && sp->tick2() == endMeasureTick2) {
+                    target = toVolta(sp);
+                    break;
+                }
+            }
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveVolta: volta not found at coordinates";
         return false;
     }
-
-    Volta* volta = dynamic_cast<Volta*>(m_uuidToElement.value(id));
-    if (!volta) {
-        LOGW() << "[editude] applyRemoveVolta: element is not Volta" << id;
-        return false;
-    }
-
-    m_elementToUuid.remove(volta);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove volta"));
-    score->undoRemoveElement(volta);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
 bool ScoreApplicator::applyInsertMarker(Score* score, const QJsonObject& op)
 {
-    const QString id   = op["id"].toString();
     const QString kind = op["kind"].toString();
-    if (id.isEmpty() || kind.isEmpty()) {
-        LOGW() << "[editude] applyInsertMarker: missing id or kind";
+    if (kind.isEmpty()) {
+        LOGW() << "[editude] applyInsertMarker: missing kind";
         return false;
     }
 
@@ -3205,7 +3420,6 @@ bool ScoreApplicator::applyInsertMarker(Score* score, const QJsonObject& op)
         return false;
     }
 
-    // Map Python MarkerKind → MuseScore MarkerType.
     static const QHash<QString, MarkerType> s_markerKindMap = {
         { "segno",     MarkerType::SEGNO   },
         { "coda",      MarkerType::CODA    },
@@ -3227,43 +3441,54 @@ bool ScoreApplicator::applyInsertMarker(Score* score, const QJsonObject& op)
     }
     score->undoAddElement(marker);
     score->endCmd();
-
-    m_uuidToElement[id] = marker;
-    m_elementToUuid[marker] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveMarker(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveMarker: unknown id" << id;
+    const QString kind = op["kind"].toString();
+    const QJsonObject beatObj = op["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyRemoveMarker: no measure at tick" << tick.toString();
         return false;
     }
 
-    Marker* marker = dynamic_cast<Marker*>(m_uuidToElement.value(id));
-    if (!marker) {
-        LOGW() << "[editude] applyRemoveMarker: element is not Marker" << id;
+    // Find the marker by kind on this measure.
+    static const QHash<QString, MarkerType> s_markerKindMap = {
+        { "segno",     MarkerType::SEGNO   },
+        { "coda",      MarkerType::CODA    },
+        { "fine",      MarkerType::FINE    },
+        { "to_coda",   MarkerType::TOCODA  },
+        { "segno_var", MarkerType::VARSEGNO },
+    };
+    MarkerType mt = s_markerKindMap.value(kind, MarkerType::SEGNO);
+
+    Marker* target = nullptr;
+    for (EngravingItem* el : measure->el()) {
+        if (el->isMarker()) {
+            Marker* m = toMarker(el);
+            if (m->markerType() == mt) {
+                target = m;
+                break;
+            }
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveMarker: marker not found" << kind;
         return false;
     }
-
-    m_elementToUuid.remove(marker);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove marker"));
-    score->undoRemoveElement(marker);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
 bool ScoreApplicator::applyInsertJump(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty()) {
-        LOGW() << "[editude] applyInsertJump: missing id";
-        return false;
-    }
-
     const QJsonObject beatObj = op["beat"].toObject();
     const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
 
@@ -3296,37 +3521,41 @@ bool ScoreApplicator::applyInsertJump(Score* score, const QJsonObject& op)
     }
     score->undoAddElement(jump);
     score->endCmd();
-
-    m_uuidToElement[id] = jump;
-    m_elementToUuid[jump] = id;
     return true;
 }
 
 bool ScoreApplicator::applyRemoveJump(Score* score, const QJsonObject& op)
 {
-    const QString id = op["id"].toString();
-    if (id.isEmpty() || !m_uuidToElement.contains(id)) {
-        LOGW() << "[editude] applyRemoveJump: unknown id" << id;
+    const QJsonObject beatObj = op["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    Measure* measure = score->tick2measure(tick);
+    if (!measure) {
+        LOGW() << "[editude] applyRemoveJump: no measure at tick" << tick.toString();
         return false;
     }
 
-    Jump* jump = dynamic_cast<Jump*>(m_uuidToElement.value(id));
-    if (!jump) {
-        LOGW() << "[editude] applyRemoveJump: element is not Jump" << id;
+    // Find the jump on this measure.
+    Jump* target = nullptr;
+    for (EngravingItem* el : measure->el()) {
+        if (el->isJump()) {
+            target = toJump(el);
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveJump: jump not found at beat";
         return false;
     }
-
-    m_elementToUuid.remove(jump);
-    m_uuidToElement.remove(id);
 
     score->startCmd(TranslatableString("undoableAction", "Remove jump"));
-    score->undoRemoveElement(jump);
+    score->undoRemoveElement(target);
     score->endCmd();
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// Structural ops
+// Structural ops (already position-based — no UUID involvement)
 // ---------------------------------------------------------------------------
 
 bool ScoreApplicator::applySetScoreMetadata(Score* score, const QJsonObject& op)
@@ -3339,7 +3568,6 @@ bool ScoreApplicator::applySetScoreMetadata(Score* score, const QJsonObject& op)
         return false;
     }
 
-    // Map Python field names to MuseScore meta tag names.
     static const QHash<QString, QString> s_fieldMap = {
         { "title",           "workTitle"       },
         { "subtitle",        "subtitle"        },
@@ -3354,10 +3582,6 @@ bool ScoreApplicator::applySetScoreMetadata(Score* score, const QJsonObject& op)
 
     const QString tag = s_fieldMap.value(field, field);
 
-    // Use ChangeMetaText undo command instead of bare setMetaTag so the change
-    // goes through the undo system.  Without a real undo command, endCmd sees
-    // an empty macro and may not fire changesChannel().send(), which means the
-    // translator never picks up the change and the op never reaches the server.
     score->startCmd(TranslatableString("undoableAction", "Set score metadata"));
     score->undo(new ChangeMetaText(score, String(tag), String(value)));
     score->endCmd();
@@ -3376,7 +3600,6 @@ bool ScoreApplicator::applySetMeasureLen(Score* score, const QJsonObject& op)
     }
 
     if (op["actual_len"].isNull() || op["actual_len"].isUndefined()) {
-        // Clear override — restore full time-signature length.
         const Fraction fullLen = measure->timesig();
         if (measure->ticks() == fullLen) {
             LOGD() << "[editude] applySetMeasureLen: measure already at full length";
@@ -3422,13 +3645,10 @@ bool ScoreApplicator::applyInsertBeats(Score* score, const QJsonObject& op)
         return false;
     }
 
-    // Insert one measure at a time until we have filled `duration` of time.
-    // Each new measure inherits the time signature of the target position.
     score->startCmd(TranslatableString("undoableAction", "Insert beats"));
 
     Fraction remaining = duration;
     while (remaining > Fraction(0, 1)) {
-        // Re-resolve target each iteration because prior inserts shift ticks.
         Measure* m = score->tick2measure(atTick);
         if (!m) {
             break;
@@ -3466,7 +3686,6 @@ bool ScoreApplicator::applyDeleteBeats(Score* score, const QJsonObject& op)
         return false;
     }
 
-    // Collect all measures whose tick falls strictly before endTick.
     Measure* lastMeasure = nullptr;
     for (Measure* m = firstMeasure; m; m = m->nextMeasure()) {
         if (m->tick() >= endTick) {
@@ -3477,21 +3696,6 @@ bool ScoreApplicator::applyDeleteBeats(Score* score, const QJsonObject& op)
     if (!lastMeasure) {
         LOGW() << "[editude] applyDeleteBeats: no measures in range";
         return false;
-    }
-
-    // Purge UUID maps for any element inside the deleted range so stale
-    // pointers do not outlive the undo stack.
-    const Fraction actualEndTick = lastMeasure->tick() + lastMeasure->ticks();
-    QList<QString> keysToRemove;
-    for (auto it = m_uuidToElement.constBegin(); it != m_uuidToElement.constEnd(); ++it) {
-        auto* item = dynamic_cast<EngravingItem*>(it.value());
-        if (item && item->tick() >= atTick && item->tick() < actualEndTick) {
-            m_elementToUuid.remove(it.value());
-            keysToRemove.append(it.key());
-        }
-    }
-    for (const QString& k : keysToRemove) {
-        m_uuidToElement.remove(k);
     }
 
     score->startCmd(TranslatableString("undoableAction", "Delete beats"));

@@ -35,20 +35,6 @@ public:
     // Dispatches on payload["type"]. Returns false for unrecognised types.
     bool apply(mu::engraving::Score* score, const QJsonObject& payload);
 
-    // Read-only view of the element→uuid reverse map, used by OperationTranslator
-    // to produce DeleteEvent / SetPitch ops from local MuseScore changes.
-    const QHash<mu::engraving::EngravingObject*, QString>& elementToUuid() const
-    {
-        return m_elementToUuid;
-    }
-
-    // Read-only view of the Tier 3 element→uuid reverse map, used by
-    // EditudeTestServer to resolve articulation/dynamic/slur/hairpin/lyric UUIDs.
-    const QHash<mu::engraving::EngravingObject*, QString>& tier3ElementToUuid() const
-    {
-        return m_tier3ElementToUuid;
-    }
-
     // Read-only view of the part UUID → Part* map, used by EditudeService
     // to sync part registrations from the applicator into the translator
     // after applying sync ops.
@@ -60,12 +46,10 @@ public:
     // Bootstraps m_partUuidToPart from ApplyAddPart registrations.
     // Call after loading a snapshot so that part-keyed ops (SetPartName,
     // SetKeySignature, SetClef, RemovePart) can resolve Part* by UUID.
-    // Note: parts baked into an MSCZ snapshot do not carry editude UUIDs;
-    // this map is populated incrementally via applyAddPart / applyRemovePart.
     void bootstrapPartMap(mu::engraving::Score* score);
 
-    // Clear all internal UUID ↔ element maps.  Called when connecting to a
-    // new project so stale mappings from the previous session are discarded.
+    // Clear internal state. Called when connecting to a new project so
+    // stale mappings from the previous session are discarded.
     void reset();
 
     // Register an existing Part* with an editude UUID without creating a new part.
@@ -78,17 +62,18 @@ public:
     static mu::engraving::DurationType parseDurationType(const QString& name);
 
 private:
-    // Tier 1 — stream event operations
+    // Resolve Part* from part_id in payload. Returns nullptr on failure.
+    mu::engraving::Part* resolvePart(const QJsonObject& op) const;
+
+    // Tier 1 — stream event operations (coordinate-addressed)
     bool applyInsertNote(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyInsertRest(mu::engraving::Score* score, const QJsonObject& payload);
-    bool applyInsertChord(mu::engraving::Score* score, const QJsonObject& payload);
-    bool applyDeleteEvent(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyDeleteNote(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyDeleteRest(mu::engraving::Score* score, const QJsonObject& payload);
     bool applySetPitch(mu::engraving::Score* score, const QJsonObject& payload);
-    bool applyAddChordNote(mu::engraving::Score* score, const QJsonObject& payload);
-    bool applyRemoveChordNote(mu::engraving::Score* score, const QJsonObject& payload);
     bool applySetDuration(mu::engraving::Score* score, const QJsonObject& payload);
     bool applySetTie(mu::engraving::Score* score, const QJsonObject& payload);
-    bool applySetTrack(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetVoice(mu::engraving::Score* score, const QJsonObject& payload);
 
     // Tier 2 — score directive operations
     bool applySetTimeSignature(mu::engraving::Score* score, const QJsonObject& payload);
@@ -196,18 +181,7 @@ private:
     bool applyInsertBeats(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyDeleteBeats(mu::engraving::Score* score, const QJsonObject& payload);
 
-    // Tier 1+2 UUID ↔ element maps, maintained across all apply* calls.
-    // Keyed by the "id" field present in Insert* ops (and echoed in op_ack.payload).
-    QHash<QString, mu::engraving::EngravingObject*> m_uuidToElement;
-    QHash<mu::engraving::EngravingObject*, QString> m_elementToUuid;
-
-    // Part UUID map, populated by AddPart once that handler is implemented.
-    // Reserved for SetKeySignature / SetClef / SetPartName / SetStaffCount / RemovePart.
+    // Part UUID map — populated by AddPart, retained (parts are axes, not points).
     QHash<QString, mu::engraving::Part*> m_partUuidToPart;
-
-    // Tier 3 UUID ↔ element maps.
-    // Keyed by the "id" field in AddArticulation / AddDynamic / AddSlur / etc.
-    QHash<QString, mu::engraving::EngravingObject*> m_tier3UuidToElement;
-    QHash<mu::engraving::EngravingObject*, QString> m_tier3ElementToUuid;
 };
 } // namespace mu::editude::internal

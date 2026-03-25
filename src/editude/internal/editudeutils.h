@@ -1,20 +1,151 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// Shared inline helpers used by both OperationTranslator (translation) and
-// EditudeTestServer (serialization). Defined inline here to avoid ODR
-// violations in Unity builds where both .cpp files compile into the same TU.
+// Shared inline helpers used by ScoreApplicator, OperationTranslator, and
+// EditudeTestServer. Defined inline here to avoid ODR violations in Unity
+// builds where both .cpp files compile into the same TU.
 
+#include <QJsonObject>
 #include <QString>
 
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/breath.h"
+#include "engraving/dom/chord.h"
+#include "engraving/dom/chordrest.h"
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/marker.h"
+#include "engraving/dom/note.h"
+#include "engraving/dom/part.h"
+#include "engraving/dom/rest.h"
+#include "engraving/dom/score.h"
+#include "engraving/dom/segment.h"
+#include "engraving/dom/staff.h"
+#include "engraving/dom/pitchspelling.h"
+#include "engraving/types/fraction.h"
 #include "engraving/types/symnames.h"
 #include "engraving/types/types.h"
 
 namespace mu::editude::internal {
+
+// ---------------------------------------------------------------------------
+// Coordinate ↔ MuseScore track conversion
+// ---------------------------------------------------------------------------
+// Wire format: voice = 1–4, staff = 0-indexed within part.
+// MuseScore:   track = global_staff_index * VOICES + voice_0_based.
+
+inline mu::engraving::track_idx_t trackFromCoord(
+    mu::engraving::Part* part, int voice, int staff)
+{
+    const mu::engraving::staff_idx_t firstStaff =
+        part->startTrack() / mu::engraving::VOICES;
+    return static_cast<mu::engraving::track_idx_t>(
+        (firstStaff + staff) * mu::engraving::VOICES + (voice - 1));
+}
+
+inline int voiceFromTrack(mu::engraving::Part* /*part*/,
+                          mu::engraving::track_idx_t track)
+{
+    return static_cast<int>(track % mu::engraving::VOICES) + 1;  // 1–4
+}
+
+inline int staffFromTrack(mu::engraving::Part* part,
+                          mu::engraving::track_idx_t track)
+{
+    const mu::engraving::staff_idx_t firstStaff =
+        part->startTrack() / mu::engraving::VOICES;
+    return static_cast<int>(track / mu::engraving::VOICES - firstStaff);
+}
+
+// ---------------------------------------------------------------------------
+// Pitch JSON helpers — build/parse the {step, octave, accidental} object
+// ---------------------------------------------------------------------------
+
+inline QJsonObject pitchJsonFromNote(mu::engraving::Note* note)
+{
+    static const char* const kSteps[] = { "F", "C", "G", "D", "A", "E", "B" };
+    static const int kNaturalTpc[]    = { 13, 14, 15, 16, 17, 18, 19 };
+    static const char* const kAccidentals[] = {
+        "double-flat", "flat", nullptr, "sharp", "double-sharp"
+    };
+
+    const int tpc      = note->tpc1();
+    const int octave   = mu::engraving::playingOctave(note->pitch(), tpc);
+    const int stepIndex = (tpc + 1) % 7;
+    const int accOffset = (tpc - kNaturalTpc[stepIndex]) / 7;
+
+    QJsonObject pitch;
+    pitch["step"]   = QString::fromLatin1(kSteps[stepIndex]);
+    pitch["octave"] = octave;
+    if (accOffset >= -2 && accOffset <= 2 && accOffset != 0) {
+        pitch["accidental"] = QString::fromLatin1(kAccidentals[accOffset + 2]);
+    } else {
+        pitch["accidental"] = QJsonValue(QJsonValue::Null);
+    }
+    return pitch;
+}
+
+// ---------------------------------------------------------------------------
+// Beat JSON helper
+// ---------------------------------------------------------------------------
+
+inline QJsonObject beatJsonFromTick(const mu::engraving::Fraction& tick)
+{
+    const mu::engraving::Fraction r = tick.reduced();
+    return QJsonObject{
+        { "numerator",   r.numerator() },
+        { "denominator", r.denominator() },
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Coordinate-based element lookup
+// ---------------------------------------------------------------------------
+
+// Find ChordRest at (part, beat, voice, staff).
+inline mu::engraving::ChordRest* findChordRestAtCoord(
+    mu::engraving::Score* score, mu::engraving::Part* part,
+    const mu::engraving::Fraction& tick, int voice, int staff)
+{
+    using namespace mu::engraving;
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) return nullptr;
+    track_idx_t track = trackFromCoord(part, voice, staff);
+    EngravingItem* el = seg->element(track);
+    if (!el) return nullptr;
+    if (el->isChordRest()) return toChordRest(el);
+    return nullptr;
+}
+
+// Find a specific Note at (part, beat, pitch_midi, voice, staff).
+// Returns nullptr if no chord at that track, or pitch not found.
+inline mu::engraving::Note* findNoteAtCoord(
+    mu::engraving::Score* score, mu::engraving::Part* part,
+    const mu::engraving::Fraction& tick, int midi, int voice, int staff)
+{
+    using namespace mu::engraving;
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr || !cr->isChord()) return nullptr;
+    Chord* chord = toChord(cr);
+    for (Note* n : chord->notes()) {
+        if (n->pitch() == midi) return n;
+    }
+    return nullptr;
+}
+
+// Find a Rest at (part, beat, voice, staff).
+inline mu::engraving::Rest* findRestAtCoord(
+    mu::engraving::Score* score, mu::engraving::Part* part,
+    const mu::engraving::Fraction& tick, int voice, int staff)
+{
+    using namespace mu::engraving;
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr || !cr->isRest()) return nullptr;
+    return toRest(cr);
+}
+
+// Parse voice and staff from an op payload (defaults: voice=1, staff=0).
+inline int opVoice(const QJsonObject& op) { return op["voice"].toInt(1); }
+inline int opStaff(const QJsonObject& op) { return op["staff"].toInt(0); }
 
 inline QString articulationNameFromSymId(mu::engraving::SymId id)
 {

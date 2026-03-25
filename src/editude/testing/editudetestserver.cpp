@@ -221,13 +221,11 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
 
     if (action == QLatin1String("insert_note"))   return actionInsertNote(body);
     if (action == QLatin1String("insert_rest"))   return actionInsertRest(body);
-    if (action == QLatin1String("insert_chord"))  return actionInsertChord(body);
-    if (action == QLatin1String("delete_event"))  return actionDeleteEvent(body);
+    if (action == QLatin1String("delete_note"))   return actionDeleteNote(body);
+    if (action == QLatin1String("delete_rest"))   return actionDeleteRest(body);
     if (action == QLatin1String("set_pitch"))     return actionSetPitch(body);
-    if (action == QLatin1String("add_chord_note"))    return actionAddChordNote(body);
-    if (action == QLatin1String("remove_chord_note")) return actionRemoveChordNote(body);
     if (action == QLatin1String("set_tie"))       return actionSetTie(body);
-    if (action == QLatin1String("set_track"))     return actionSetTrack(body);
+    if (action == QLatin1String("set_voice"))     return actionSetVoice(body);
     if (action == QLatin1String("undo"))          return actionUndo();
     if (action == QLatin1String("set_time_signature")) return actionSetTimeSignature(body);
     if (action == QLatin1String("set_tempo"))          return actionSetTempo(body);
@@ -307,8 +305,8 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
 EditudeTestServer::Reply EditudeTestServer::handleAction(const QJsonObject& body)
 {
     // Defer score mutation to the next event-loop iteration.  Action
-    // handlers call ScoreApplicator::apply() which runs startCmd →
-    // insertMeasure → endCmd → doLayoutRange.  Running that layout
+    // handlers call ScoreApplicator::apply() which runs startCmd ->
+    // insertMeasure -> endCmd -> doLayoutRange.  Running that layout
     // pass inside QTcpSocket::readyRead corrupts score-DOM pointers
     // because Qt's scene-graph (NotationPaintView) still holds live
     // references to the pre-edit layout data.  Deferring with
@@ -325,7 +323,7 @@ EditudeTestServer::Reply EditudeTestServer::handleAction(const QJsonObject& body
 
     // Flush pending events so that any WebSocket data queued by
     // EditudeService::onScoreChanges (called synchronously during the
-    // action's endCmd → changesChannel) is actually written to the
+    // action's endCmd -> changesChannel) is actually written to the
     // network before the HTTP response reaches the Python harness.
     // Without this, the harness may call peer.wait_revision() before
     // the editor's op_batch has left the process.
@@ -334,12 +332,34 @@ EditudeTestServer::Reply EditudeTestServer::handleAction(const QJsonObject& body
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Coordinate-based Part lookup helper
+// ---------------------------------------------------------------------------
+
+static Part* resolvePartFromBody(const QJsonObject& body, EditudeService* svc)
+{
+    const QString partId = body["part_id"].toString();
+    if (partId.isEmpty()) return nullptr;
+    const auto& partMap = svc->applicatorPartUuidToPart();
+    Part* part = partMap.value(partId);
+    if (part) return part;
+    // Fall back to translator map (reverse lookup).
+    const auto& knownParts = svc->translatorKnownPartUuids();
+    for (auto it = knownParts.cbegin(); it != knownParts.cend(); ++it) {
+        if (it.value() == partId) return it.key();
+    }
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 1 action handlers — coordinate-addressed
+// ---------------------------------------------------------------------------
+
 EditudeTestServer::Reply EditudeTestServer::actionInsertNote(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const QJsonObject beatObj = body["beat"].toObject();
@@ -347,28 +367,36 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertNote(const QJsonObject& 
 
     const QJsonObject pitchObj = body["pitch"].toObject();
     const QJsonObject durObj   = body["duration"].toObject();
-    const track_idx_t track    = static_cast<track_idx_t>(body.value("track").toInt(0));
+
+    // Resolve track from part_id + voice + staff (coordinate addressing).
+    Part* part = resolvePartFromBody(body, m_svc);
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+    track_idx_t track;
+    if (part) {
+        track = trackFromCoord(part, voice, staff);
+    } else {
+        // Legacy fallback: bare track field (should not happen in new tests).
+        track = static_cast<track_idx_t>(body.value("track").toInt(0));
+    }
 
     const int midi = ScoreApplicator::pitchToMidi(
         pitchObj["step"].toString(),
         pitchObj["octave"].toInt(),
         pitchObj["accidental"].toString());
     if (midi < 0 || midi > 127) {
-        return errorResponse(422,
-                             "invalid pitch");
+        return errorResponse(422, "invalid pitch");
     }
 
     const DurationType dt = ScoreApplicator::parseDurationType(durObj["type"].toString());
     if (dt == DurationType::V_INVALID) {
-        return errorResponse(422,
-                             "invalid duration type");
+        return errorResponse(422, "invalid duration type");
     }
     const int dots = durObj["dots"].toInt(0);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
-        return errorResponse(422,
-                             "beat not found in score");
+        return errorResponse(422, "beat not found in score");
     }
 
     TDuration dur(dt);
@@ -376,7 +404,14 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertNote(const QJsonObject& 
     NoteVal nval(midi);
 
     score->startCmd(TranslatableString("test", "insert note"));
-    score->setNoteRest(seg, track, nval, dur.ticks());
+    // If a chord already exists at this segment/track, add the note to it
+    // instead of replacing the entire ChordRest (which setNoteRest does).
+    EngravingItem* existing = seg->element(track);
+    if (existing && existing->isChord()) {
+        score->addNote(toChord(existing), nval);
+    } else {
+        score->setNoteRest(seg, track, nval, dur.ticks());
+    }
     score->endCmd();
 
     return okResponse();
@@ -386,27 +421,33 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertRest(const QJsonObject& 
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const QJsonObject beatObj = body["beat"].toObject();
     const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
 
     const QJsonObject durObj  = body["duration"].toObject();
-    const track_idx_t track   = static_cast<track_idx_t>(body.value("track").toInt(0));
+
+    Part* part = resolvePartFromBody(body, m_svc);
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+    track_idx_t track;
+    if (part) {
+        track = trackFromCoord(part, voice, staff);
+    } else {
+        track = static_cast<track_idx_t>(body.value("track").toInt(0));
+    }
 
     const DurationType dt = ScoreApplicator::parseDurationType(durObj["type"].toString());
     if (dt == DurationType::V_INVALID) {
-        return errorResponse(422,
-                             "invalid duration type");
+        return errorResponse(422, "invalid duration type");
     }
     const int dots = durObj["dots"].toInt(0);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
-        return errorResponse(422,
-                             "beat not found in score");
+        return errorResponse(422, "beat not found in score");
     }
 
     TDuration dur(dt);
@@ -419,49 +460,96 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertRest(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionDeleteEvent(const QJsonObject& body)
+EditudeTestServer::Reply EditudeTestServer::actionDeleteNote(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString eventId = body["event_id"].toString();
-    if (eventId.isEmpty()) {
-        return errorResponse(400,
-                             "event_id required");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    EngravingObject* obj = nullptr;
-    for (auto it = m_svc->translatorLocalElementToUuid().begin();
-         it != m_svc->translatorLocalElementToUuid().end(); ++it) {
-        if (it.value() == eventId) {
-            obj = it.key();
-            break;
-        }
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    const QJsonObject pitchObj = body["pitch"].toObject();
+    const int midi = ScoreApplicator::pitchToMidi(
+        pitchObj["step"].toString(),
+        pitchObj["octave"].toInt(),
+        pitchObj["accidental"].toString());
+    if (midi < 0 || midi > 127) {
+        return errorResponse(422, "invalid pitch");
     }
-    if (!obj) {
-        for (auto it = m_svc->applicatorElementToUuid().begin();
-             it != m_svc->applicatorElementToUuid().end(); ++it) {
-            if (it.value() == eventId) {
-                obj = it.key();
+
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    Note* note = findNoteAtCoord(score, part, tick, midi, voice, staff);
+    if (!note) {
+        return errorResponse(404, "note not found at coordinate");
+    }
+
+    Chord* chord = note->chord();
+    const bool lastNote = (chord->notes().size() == 1);
+    Measure* measure = chord->measure();
+    const track_idx_t track = chord->track();
+
+    score->startCmd(TranslatableString("test", "delete note"));
+    score->deleteItem(note);
+
+    // When deleting the last note in a chord, deleteItem converts the chord
+    // to a rest but leaves adjacent fill-rests intact.  If the voice now
+    // contains only rests, consolidate them into a full-measure rest so the
+    // editor state matches what undo/redo would produce.
+    if (lastNote) {
+        bool allRests = true;
+        for (Segment* s = measure->first(SegmentType::ChordRest); s;
+             s = s->next(SegmentType::ChordRest)) {
+            EngravingItem* e = s->element(track);
+            if (e && !e->isRest()) {
+                allRests = false;
                 break;
             }
         }
+        if (allRests) {
+            Segment* seg0 = measure->getSegmentR(SegmentType::ChordRest,
+                                                  measure->tick());
+            score->setNoteRest(seg0, track, NoteVal(), measure->ticks());
+        }
     }
-    if (!obj) {
-        return errorResponse(404, "event not found");
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionDeleteRest(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
     }
 
-    auto* item = dynamic_cast<EngravingItem*>(obj);
-    if (!item) {
-        return errorResponse(422,
-                             "element is not an EngravingItem");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    score->startCmd(TranslatableString("test", "delete event"));
-    score->deleteItem(item);
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    Rest* rest = findRestAtCoord(score, part, tick, voice, staff);
+    if (!rest) {
+        return errorResponse(404, "rest not found at coordinate");
+    }
+
+    score->startCmd(TranslatableString("test", "delete rest"));
+    score->deleteItem(rest);
     score->endCmd();
 
     return okResponse();
@@ -471,51 +559,43 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPitch(const QJsonObject& bo
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString eventId = body["event_id"].toString();
-    if (eventId.isEmpty()) {
-        return errorResponse(400,
-                             "event_id required");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    EngravingObject* obj = nullptr;
-    for (auto it = m_svc->translatorLocalElementToUuid().begin();
-         it != m_svc->translatorLocalElementToUuid().end(); ++it) {
-        if (it.value() == eventId) {
-            obj = it.key();
-            break;
-        }
-    }
-    if (!obj) {
-        for (auto it = m_svc->applicatorElementToUuid().begin();
-             it != m_svc->applicatorElementToUuid().end(); ++it) {
-            if (it.value() == eventId) {
-                obj = it.key();
-                break;
-            }
-        }
-    }
-    if (!obj) {
-        return errorResponse(404, "event not found");
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    // Old pitch to locate the note.
+    const QJsonObject oldPitchObj = body["pitch"].toObject();
+    const int oldMidi = ScoreApplicator::pitchToMidi(
+        oldPitchObj["step"].toString(),
+        oldPitchObj["octave"].toInt(),
+        oldPitchObj["accidental"].toString());
+    if (oldMidi < 0 || oldMidi > 127) {
+        return errorResponse(422, "invalid pitch");
     }
 
-    Note* note = dynamic_cast<Note*>(obj);
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    Note* note = findNoteAtCoord(score, part, tick, oldMidi, voice, staff);
     if (!note) {
-        return errorResponse(422,
-                             "element is not a Note");
+        return errorResponse(404, "note not found at coordinate");
     }
 
-    const QJsonObject pitchObj = body["pitch"].toObject();
+    // New pitch to apply.
+    const QJsonObject newPitchObj = body["new_pitch"].toObject();
     const int midi = ScoreApplicator::pitchToMidi(
-        pitchObj["step"].toString(),
-        pitchObj["octave"].toInt(),
-        pitchObj["accidental"].toString());
+        newPitchObj["step"].toString(),
+        newPitchObj["octave"].toInt(),
+        newPitchObj["accidental"].toString());
     if (midi < 0 || midi > 127) {
-        return errorResponse(422,
-                             "invalid pitch");
+        return errorResponse(422, "invalid new_pitch");
     }
 
     // Set PITCH, TPC1, and TPC2 together — setPitch(int) does NOT update
@@ -536,8 +616,7 @@ EditudeTestServer::Reply EditudeTestServer::actionUndo()
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
     // Use Score::undoRedo instead of bare undoStack()->undo().
     // undoRedo calls update() (layout refresh), updateSelection(),
@@ -546,6 +625,129 @@ EditudeTestServer::Reply EditudeTestServer::actionUndo()
     // accessibility system or scene graph accesses it later.
     EditData ed;
     score->undoRedo(true, &ed);
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetTie(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    const QJsonObject pitchObj = body["pitch"].toObject();
+    const int midi = ScoreApplicator::pitchToMidi(
+        pitchObj["step"].toString(),
+        pitchObj["octave"].toInt(),
+        pitchObj["accidental"].toString());
+    if (midi < 0 || midi > 127) {
+        return errorResponse(422, "invalid pitch");
+    }
+
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    Note* note = findNoteAtCoord(score, part, tick, midi, voice, staff);
+    if (!note) {
+        return errorResponse(404, "note not found at coordinate");
+    }
+
+    const QJsonValue tieVal = body["tie"];
+    const bool wantTie = !tieVal.isNull() && !tieVal.isUndefined()
+                         && tieVal.toString() != QStringLiteral("stop");
+
+    score->startCmd(TranslatableString("test", "set tie"));
+    if (wantTie) {
+        if (!note->tieFor()) {
+            // Find the next chord/rest in the same track.
+            Note* endNote = nullptr;
+            for (Segment* s = note->chord()->segment()->next(SegmentType::ChordRest);
+                 s; s = s->next(SegmentType::ChordRest)) {
+                EngravingItem* el = s->element(note->track());
+                if (!el || !el->isChord()) {
+                    break;
+                }
+                Chord* nextChord = toChord(el);
+                for (Note* n : nextChord->notes()) {
+                    if (n->pitch() == note->pitch()) {
+                        endNote = n;
+                        break;
+                    }
+                }
+                if (endNote) break;
+            }
+            Tie* tie = Factory::createTie(note);
+            tie->setStartNote(note);
+            tie->setTrack(note->track());
+            tie->setTick(note->chord()->segment()->tick());
+            if (endNote) {
+                if (endNote->tieBack()) {
+                    score->undoRemoveElement(endNote->tieBack());
+                }
+                tie->setEndNote(endNote);
+                tie->setTicks(endNote->chord()->segment()->tick()
+                              - note->chord()->segment()->tick());
+            }
+            score->undoAddElement(tie);
+        }
+    } else {
+        if (note->tieFor()) {
+            score->undoRemoveElement(note->tieFor());
+        }
+    }
+    score->endCmd();
+    return okResponse();
+}
+
+EditudeTestServer::Reply EditudeTestServer::actionSetVoice(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    const int oldVoice = body.value("voice").toInt(1);
+    const int staff    = body.value("staff").toInt(0);
+    const int newVoice = body.value("new_voice").toInt(1);
+
+    // Check if we have a pitch (note) or not (rest/chord).
+    const QJsonObject pitchObj = body["pitch"].toObject();
+    ChordRest* cr = nullptr;
+    if (!pitchObj.isEmpty()) {
+        const int midi = ScoreApplicator::pitchToMidi(
+            pitchObj["step"].toString(),
+            pitchObj["octave"].toInt(),
+            pitchObj["accidental"].toString());
+        Note* note = findNoteAtCoord(score, part, tick, midi, oldVoice, staff);
+        if (note) cr = note->chord();
+    }
+    if (!cr) {
+        cr = findChordRestAtCoord(score, part, tick, oldVoice, staff);
+    }
+    if (!cr) {
+        return errorResponse(404, "element not found at coordinate");
+    }
+
+    const track_idx_t newTrack = trackFromCoord(part, newVoice, staff);
+    score->startCmd(TranslatableString("test", "set voice"));
+    cr->undoChangeProperty(Pid::TRACK, newTrack);
+    score->endCmd();
     return okResponse();
 }
 
@@ -713,49 +915,76 @@ QJsonArray EditudeTestServer::serializePartEvents(Part* part)
     Score* score = m_svc->scoreForTest();
     QJsonArray events;
 
+    // Diagnostic: count segments and elements for debugging.
+    int segCount = 0, elCount = 0, skipCount = 0, tupMemCount = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
+            segCount++;
             for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el) {
                     continue;
                 }
-                // Skip full-measure rests and generated elements.
+                elCount++;
+                if (el->isChordRest() && toChordRest(el)->tuplet()) {
+                    tupMemCount++;
+                }
+                // Skip full-measure rests, generated elements, and rests
+                // that fill the entire measure (e.g. V_WHOLE in 4/4).
+                // Exception: never skip rests inside tuplets — they are
+                // real member events even if MuseScore marks them generated.
                 if (el->isRest()) {
                     Rest* r = toRest(el);
-                    if (r->isFullMeasureRest() || r->generated()) {
-                        continue;
+                    if (!r->tuplet()) {
+                        if (r->isFullMeasureRest() || r->generated()
+                            || r->actualTicks() == r->measure()->ticks()) {
+                            LOGD() << "[editude-test] serializePartEvents: skipping rest at"
+                                   << seg->tick().toString()
+                                   << "fullMeas=" << r->isFullMeasureRest()
+                                   << "gen=" << r->generated()
+                                   << "actualTicks=" << r->actualTicks().toString()
+                                   << "measTicks=" << r->measure()->ticks().toString();
+                            skipCount++;
+                            continue;
+                        }
                     }
                 }
-                const QString uuid = uuidForChordRest(el);
-                if (uuid.isEmpty()) {
-                    continue;
-                }
                 const Fraction tick = seg->tick();
+                const int voice = voiceFromTrack(part, track);
+                const int staff = staffFromTrack(part, track);
                 if (el->isRest()) {
-                    events.append(serializeRest(toRest(el), uuid, tick));
+                    Rest* nr = toRest(el);
+                    LOGD() << "[editude-test] serializePartEvents: NOT skipping rest at"
+                           << tick.toString()
+                           << "durType=" << static_cast<int>(nr->durationType().type())
+                           << "actualTicks=" << nr->actualTicks().toString()
+                           << "measTicks=" << nr->measure()->ticks().toString()
+                           << "fullMeas=" << nr->isFullMeasureRest()
+                           << "gen=" << nr->generated()
+                           << "tuplet=" << (nr->tuplet() != nullptr);
+                    events.append(serializeRest(nr, tick, voice, staff));
                 } else if (el->isChord()) {
                     Chord* chord = toChord(el);
-                    if (chord->notes().size() == 1) {
-                        // Single-note chord → serialize as a "note" event.
-                        events.append(serializeNote(chord->notes().front(), uuid, tick));
-                    } else {
-                        events.append(serializeChord(chord, uuid, tick));
+                    // Serialize each note individually (chords are implicit).
+                    for (Note* note : chord->notes()) {
+                        events.append(serializeNote(note, tick, voice, staff));
                     }
                 }
             }
         }
     }
+    LOGD() << "[editude-test] serializePartEvents: segs=" << segCount
+           << "els=" << elCount << "tupMem=" << tupMemCount
+           << "skipped=" << skipCount << "serialized=" << events.size();
     return events;
 }
 
-QJsonObject EditudeTestServer::serializeNote(Note* note, const QString& uuid,
-                                              const Fraction& tick)
+QJsonObject EditudeTestServer::serializeNote(Note* note, const Fraction& tick,
+                                              int voice, int staff)
 {
     QJsonObject obj{
         { "kind",     "note" },
-        { "id",       uuid },
         { "beat",     beatJson(tick) },
         { "duration", QJsonObject{
             { "type", durationTypeName(note->chord()->durationType().type()) },
@@ -763,7 +992,8 @@ QJsonObject EditudeTestServer::serializeNote(Note* note, const QString& uuid,
         }},
         { "pitch",    pitchJson(note) },
         { "tie",      QJsonValue::Null },
-        { "track",    static_cast<int>(note->track()) },
+        { "voice",    voice },
+        { "staff",    staff },
     };
 
     // Tab fields: include fret/string if the note carries tab data.
@@ -779,97 +1009,30 @@ QJsonObject EditudeTestServer::serializeNote(Note* note, const QString& uuid,
     return obj;
 }
 
-QJsonObject EditudeTestServer::serializeRest(Rest* rest, const QString& uuid,
-                                              const Fraction& tick)
+QJsonObject EditudeTestServer::serializeRest(Rest* rest, const Fraction& tick,
+                                              int voice, int staff)
 {
     return QJsonObject{
         { "kind",     "rest" },
-        { "id",       uuid },
         { "beat",     beatJson(tick) },
         { "duration", QJsonObject{
             { "type", durationTypeName(rest->durationType().type()) },
             { "dots", rest->dots() }
         }},
-        { "track",    static_cast<int>(rest->track()) },
+        { "voice",    voice },
+        { "staff",    staff },
     };
-}
-
-QJsonObject EditudeTestServer::serializeChord(Chord* chord, const QString& uuid,
-                                               const Fraction& tick)
-{
-    QJsonArray pitches;
-    for (Note* n : chord->notes()) {
-        pitches.append(pitchJson(n));
-    }
-    return QJsonObject{
-        { "kind",     "chord" },
-        { "id",       uuid },
-        { "beat",     beatJson(tick) },
-        { "duration", QJsonObject{
-            { "type", durationTypeName(chord->durationType().type()) },
-            { "dots", chord->dots() }
-        }},
-        { "pitches",  pitches },
-        { "tie",      QJsonValue::Null },
-        { "track",    static_cast<int>(chord->track()) },
-    };
-}
-
-QString EditudeTestServer::uuidForElement(EngravingObject* obj) const
-{
-    // Check translator (locally-inserted) map first.
-    const auto& localMap = m_svc->translatorLocalElementToUuid();
-    auto it = localMap.find(obj);
-    if (it != localMap.end()) {
-        return it.value();
-    }
-    // Fall back to applicator (remotely-applied) map.
-    const auto& applMap = m_svc->applicatorElementToUuid();
-    auto it2 = applMap.find(obj);
-    if (it2 != applMap.end()) {
-        return it2.value();
-    }
-    // Fall back to Tier 3 applicator map.
-    const auto& tier3Map = m_svc->applicatorTier3ElementToUuid();
-    auto it3 = tier3Map.find(obj);
-    if (it3 != tier3Map.end()) {
-        return it3.value();
-    }
-    return QString();
-}
-
-mu::engraving::EngravingObject* EditudeTestServer::findByUuid(const QString& uuid) const
-{
-    const auto& localMap = m_svc->translatorLocalElementToUuid();
-    for (auto it = localMap.begin(); it != localMap.end(); ++it) {
-        if (it.value() == uuid) {
-            return it.key();
-        }
-    }
-    const auto& applMap = m_svc->applicatorElementToUuid();
-    for (auto it = applMap.begin(); it != applMap.end(); ++it) {
-        if (it.value() == uuid) {
-            return it.key();
-        }
-    }
-    const auto& tier3Map = m_svc->applicatorTier3ElementToUuid();
-    for (auto it = tier3Map.begin(); it != tier3Map.end(); ++it) {
-        if (it.value() == uuid) {
-            return it.key();
-        }
-    }
-    return nullptr;
 }
 
 QString EditudeTestServer::uuidForPart(Part* part) const
 {
-    // Check translator map (Part* → UUID).
+    // Check translator map (Part* -> UUID).
     const auto& knownParts = m_svc->translatorKnownPartUuids();
     auto it = knownParts.find(part);
     if (it != knownParts.end()) {
         return it.value();
     }
-    // Fall back to applicator map (UUID → Part*), reverse lookup.
+    // Fall back to applicator map (UUID -> Part*), reverse lookup.
     const auto& applMap = m_svc->applicatorPartUuidToPart();
     for (auto it2 = applMap.cbegin(); it2 != applMap.cend(); ++it2) {
         if (it2.value() == part) {
@@ -877,21 +1040,6 @@ QString EditudeTestServer::uuidForPart(Part* part) const
         }
     }
     return QString();
-}
-
-QString EditudeTestServer::uuidForChordRest(EngravingObject* obj) const
-{
-    const QString direct = uuidForElement(obj);
-    if (!direct.isEmpty()) {
-        return direct;
-    }
-    if (obj && obj->isChord()) {
-        Chord* chord = toChord(static_cast<EngravingItem*>(obj));
-        if (chord->notes().size() == 1) {
-            return uuidForElement(chord->notes().front());
-        }
-    }
-    return {};
 }
 
 QJsonObject EditudeTestServer::beatJson(const Fraction& tick)
@@ -927,7 +1075,7 @@ QJsonObject EditudeTestServer::pitchJson(Note* note)
     };
 
     const int tpc      = note->tpc1();
-    // Use playingOctave(concert MIDI, concert TPC) — NOT note->octave(),
+    // Use playingOctave(concert MIDI, concert TPC) -- NOT note->octave(),
     // which returns the written octave when concertPitch mode is OFF.
     const int octave   = playingOctave(note->pitch(), tpc);
     const int stepIndex = (tpc + 1) % 7;
@@ -937,7 +1085,7 @@ QJsonObject EditudeTestServer::pitchJson(Note* note)
     pitch["step"]   = kSteps[stepIndex];
     pitch["octave"] = octave;
 
-    const int accIdx = accOffset + 2; // map -2..+2 → 0..4
+    const int accIdx = accOffset + 2; // map -2..+2 -> 0..4
     if (accIdx >= 0 && accIdx <= 4 && kAccidentals[accIdx]) {
         pitch["accidental"] = kAccidentals[accIdx];
     } else {
@@ -947,15 +1095,14 @@ QJsonObject EditudeTestServer::pitchJson(Note* note)
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1 — Part/Staff action handlers
+// Phase 1 -- Part/Staff action handlers
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddPart(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const QString name = body["name"].toString();
@@ -983,14 +1130,14 @@ EditudeTestServer::Reply EditudeTestServer::actionAddPart(const QJsonObject& bod
         part->setShortNameAll(String(shortName));
     }
 
-    // Insert Part FIRST, then staves — same rationale as applyAddPart.
+    // Insert Part FIRST, then staves -- same rationale as applyAddPart.
     // During undo (reversed), staves are removed before the Part, so
     // removePart doesn't encounter orphaned staves in Score::m_staves.
     score->startCmd(TranslatableString("test", "add part"));
     score->undoInsertPart(part, score->parts().size());
     for (int i = 0; i < staffCount; ++i) {
-        Staff* staff = Factory::createStaff(part);
-        score->undoInsertStaff(staff, static_cast<staff_idx_t>(i), false);
+        Staff* s = Factory::createStaff(part);
+        score->undoInsertStaff(s, static_cast<staff_idx_t>(i), false);
     }
     score->endCmd();
 
@@ -1001,14 +1148,12 @@ EditudeTestServer::Reply EditudeTestServer::actionRemovePart(const QJsonObject& 
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
@@ -1022,14 +1167,12 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPartName(const QJsonObject&
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
@@ -1048,21 +1191,18 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStaffCount(const QJsonObjec
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
     const int target = body["staff_count"].toInt(0);
     if (target <= 0) {
-        return errorResponse(422,
-                             "invalid staff_count");
+        return errorResponse(422, "invalid staff_count");
     }
     const int current = static_cast<int>(part->nstaves());
     if (target == current) {
@@ -1072,9 +1212,9 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStaffCount(const QJsonObjec
     score->startCmd(TranslatableString("test", "set staff count"));
     if (target > current) {
         for (int i = current; i < target; ++i) {
-            Staff* staff = Factory::createStaff(part);
+            Staff* s = Factory::createStaff(part);
             // ridx is relative to the part, not absolute
-            score->undoInsertStaff(staff, static_cast<staff_idx_t>(i), false);
+            score->undoInsertStaff(s, static_cast<staff_idx_t>(i), false);
         }
     } else {
         const staff_idx_t partStart = part->startTrack() / VOICES;
@@ -1088,7 +1228,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStaffCount(const QJsonObjec
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3 serialization helpers
+// Tier 3 serialization helpers — coordinate-addressed (no UUIDs)
 // ---------------------------------------------------------------------------
 
 // articulationNameFromSymId, dynamicKindName, markerKindName are defined
@@ -1098,6 +1238,7 @@ QJsonObject EditudeTestServer::serializePartArticulations(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int artIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
@@ -1107,17 +1248,21 @@ QJsonObject EditudeTestServer::serializePartArticulations(Part* part)
                     continue;
                 }
                 Chord* chord = toChord(el);
+                const int voice = voiceFromTrack(part, track);
+                const int staff = staffFromTrack(part, track);
                 for (Articulation* art : chord->articulations()) {
-                    const QString artUuid = uuidForElement(art);
-                    if (artUuid.isEmpty()) {
-                        continue;
+                    // Build a coordinate-based key for the map.
+                    const QString key = QString::number(artIndex++);
+                    QJsonObject entry;
+                    entry["beat"]         = beatJson(seg->tick());
+                    entry["voice"]        = voice;
+                    entry["staff"]        = staff;
+                    entry["articulation"] = articulationNameFromSymId(art->symId());
+                    // Include pitch of parent note for note-scoped lookup.
+                    if (!chord->notes().empty()) {
+                        entry["pitch"] = pitchJson(chord->notes().front());
                     }
-                    const QString eventUuid = uuidForChordRest(chord);
-                    result[artUuid] = QJsonObject{
-                        { "id",           artUuid },
-                        { "event_id",     eventUuid },
-                        { "articulation", articulationNameFromSymId(art->symId()) },
-                    };
+                    result[key] = entry;
                 }
             }
         }
@@ -1129,6 +1274,8 @@ QJsonObject EditudeTestServer::serializePartTuplets(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    QSet<Tuplet*> seen;
+    int tupIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
@@ -1138,36 +1285,25 @@ QJsonObject EditudeTestServer::serializePartTuplets(Part* part)
                     continue;
                 }
                 Tuplet* tup = toChordRest(el)->tuplet();
-                if (!tup) {
+                if (!tup || seen.contains(tup)) {
                     continue;
                 }
-                const QString tupUuid = uuidForElement(tup);
-                if (tupUuid.isEmpty() || result.contains(tupUuid)) {
-                    continue;
-                }
-                QJsonArray memberIds;
-                bool allMembersValid = true;
-                for (DurationElement* member : tup->elements()) {
-                    const QString mid = uuidForChordRest(member);
-                    if (mid.isEmpty()) {
-                        allMembersValid = false;
-                        break;
-                    }
-                    memberIds.append(mid);
-                }
-                if (!allMembersValid) {
-                    continue;
-                }
+                seen.insert(tup);
+                const int voice = voiceFromTrack(part, track);
+                const int staff = staffFromTrack(part, track);
+
                 QJsonObject baseDur;
                 baseDur["type"] = durationTypeName(tup->baseLen().type());
                 baseDur["dots"] = tup->baseLen().dots();
-                result[tupUuid] = QJsonObject{
-                    { "id",            tupUuid },
+
+                const QString key = QString::number(tupIndex++);
+                result[key] = QJsonObject{
                     { "beat",          beatJson(tup->tick()) },
+                    { "voice",         voice },
+                    { "staff",         staff },
                     { "actual_notes",  tup->ratio().numerator() },
                     { "normal_notes",  tup->ratio().denominator() },
                     { "base_duration", baseDur },
-                    { "member_ids",    memberIds },
                 };
             }
         }
@@ -1207,6 +1343,7 @@ QJsonObject EditudeTestServer::serializePartArpeggios(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int arpIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
@@ -1220,14 +1357,13 @@ QJsonObject EditudeTestServer::serializePartArpeggios(Part* part)
                 if (!arp) {
                     continue;
                 }
-                const QString arpUuid = uuidForElement(arp);
-                if (arpUuid.isEmpty()) {
-                    continue;
-                }
-                const QString eventUuid = uuidForChordRest(chord);
-                result[arpUuid] = QJsonObject{
-                    { "id",        arpUuid },
-                    { "event_id",  eventUuid },
+                const int voice = voiceFromTrack(part, track);
+                const int staff = staffFromTrack(part, track);
+                const QString key = QString::number(arpIndex++);
+                result[key] = QJsonObject{
+                    { "beat",      beatJson(seg->tick()) },
+                    { "voice",     voice },
+                    { "staff",     staff },
                     { "direction", arpeggioDirectionName(arp->arpeggioType()) },
                 };
             }
@@ -1240,6 +1376,7 @@ QJsonObject EditudeTestServer::serializePartGraceNotes(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int gnIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
@@ -1249,22 +1386,21 @@ QJsonObject EditudeTestServer::serializePartGraceNotes(Part* part)
                     continue;
                 }
                 Chord* chord = toChord(el);
+                const int voice = voiceFromTrack(part, track);
+                const int staff = staffFromTrack(part, track);
                 for (Chord* gc : chord->graceNotes()) {
-                    const QString gnUuid = uuidForElement(gc);
-                    if (gnUuid.isEmpty()) {
-                        continue;
-                    }
-                    const QString eventUuid = uuidForChordRest(chord);
                     Note* firstNote = gc->notes().empty() ? nullptr : gc->notes().front();
                     QJsonObject entry;
-                    entry["id"]         = gnUuid;
-                    entry["event_id"]   = eventUuid;
+                    entry["beat"]       = beatJson(seg->tick());
+                    entry["voice"]      = voice;
+                    entry["staff"]      = staff;
                     entry["order"]      = static_cast<int>(gc->graceIndex());
                     entry["grace_type"] = testGraceNoteTypeName(gc->noteType());
                     if (firstNote) {
                         entry["pitch"] = pitchJson(firstNote);
                     }
-                    result[gnUuid] = entry;
+                    const QString key = QString::number(gnIndex++);
+                    result[key] = entry;
                 }
             }
         }
@@ -1276,6 +1412,7 @@ QJsonObject EditudeTestServer::serializePartBreaths(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int breathIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(); seg; seg = seg->next()) {
             for (EngravingItem* el : seg->elist()) {
@@ -1286,16 +1423,12 @@ QJsonObject EditudeTestServer::serializePartBreaths(Part* part)
                     continue;
                 }
                 Breath* breath = static_cast<Breath*>(el);
-                const QString bUuid = uuidForElement(breath);
-                if (bUuid.isEmpty()) {
-                    continue;
-                }
                 QJsonObject entry;
-                entry["id"]          = bUuid;
                 entry["beat"]        = beatJson(seg->tick());
                 entry["breath_type"] = breathTypeToString(breath->symId());
                 entry["pause"]       = breath->pause();
-                result[bUuid] = entry;
+                const QString key = QString::number(breathIndex++);
+                result[key] = entry;
             }
         }
     }
@@ -1306,6 +1439,7 @@ QJsonObject EditudeTestServer::serializePartTremolos(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int tremIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
@@ -1319,14 +1453,13 @@ QJsonObject EditudeTestServer::serializePartTremolos(Part* part)
                 if (!trem) {
                     continue;
                 }
-                const QString tremUuid = uuidForElement(trem);
-                if (tremUuid.isEmpty()) {
-                    continue;
-                }
-                const QString eventUuid = uuidForChordRest(chord);
-                result[tremUuid] = QJsonObject{
-                    { "id",           tremUuid },
-                    { "event_id",     eventUuid },
+                const int voice = voiceFromTrack(part, track);
+                const int staff = staffFromTrack(part, track);
+                const QString key = QString::number(tremIndex++);
+                result[key] = QJsonObject{
+                    { "beat",         beatJson(seg->tick()) },
+                    { "voice",        voice },
+                    { "staff",        staff },
                     { "tremolo_type", tremoloTypeToString(trem->tremoloType()) },
                 };
             }
@@ -1339,6 +1472,7 @@ QJsonObject EditudeTestServer::serializePartTwoNoteTremolos(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int tremIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
@@ -1356,18 +1490,26 @@ QJsonObject EditudeTestServer::serializePartTwoNoteTremolos(Part* part)
                 if (chord != trem->chord1()) {
                     continue;
                 }
-                const QString tremUuid = uuidForElement(trem);
-                if (tremUuid.isEmpty()) {
-                    continue;
-                }
-                const QString startUuid = uuidForChordRest(trem->chord1());
-                const QString endUuid   = uuidForChordRest(trem->chord2());
-                result[tremUuid] = QJsonObject{
-                    { "id",             tremUuid },
-                    { "start_event_id", startUuid },
-                    { "end_event_id",   endUuid },
-                    { "tremolo_type",   tremoloTypeToString(trem->tremoloType()) },
+                const int startVoice = voiceFromTrack(part, trem->chord1()->track());
+                const int startStaff = staffFromTrack(part, trem->chord1()->track());
+                const int endVoice   = voiceFromTrack(part, trem->chord2()->track());
+                const int endStaff   = staffFromTrack(part, trem->chord2()->track());
+
+                QJsonObject tremObj{
+                    { "start_beat",  beatJson(trem->chord1()->tick()) },
+                    { "start_voice", startVoice },
+                    { "start_staff", startStaff },
+                    { "end_beat",    beatJson(trem->chord2()->tick()) },
+                    { "end_voice",   endVoice },
+                    { "end_staff",   endStaff },
+                    { "tremolo_type", tremoloTypeToString(trem->tremoloType()) },
                 };
+                if (!trem->chord1()->notes().empty())
+                    tremObj["start_pitch"] = pitchJson(trem->chord1()->notes().front());
+                if (!trem->chord2()->notes().empty())
+                    tremObj["end_pitch"] = pitchJson(trem->chord2()->notes().front());
+                const QString key = QString::number(tremIndex++);
+                result[key] = tremObj;
             }
         }
     }
@@ -1378,6 +1520,7 @@ QJsonObject EditudeTestServer::serializePartDynamics(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int dynIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(); seg; seg = seg->next()) {
             for (EngravingItem* el : seg->annotations()) {
@@ -1388,12 +1531,8 @@ QJsonObject EditudeTestServer::serializePartDynamics(Part* part)
                     continue;
                 }
                 Dynamic* dyn = toDynamic(el);
-                const QString uuid = uuidForElement(dyn);
-                if (uuid.isEmpty()) {
-                    continue;
-                }
-                result[uuid] = QJsonObject{
-                    { "id",   uuid },
+                const QString key = QString::number(dynIndex++);
+                result[key] = QJsonObject{
                     { "beat", beatJson(dyn->tick()) },
                     { "kind", dynamicKindName(dyn->dynamicType()) },
                 };
@@ -1407,6 +1546,7 @@ QJsonObject EditudeTestServer::serializePartSlurs(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int slurIndex = 0;
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isSlur()) {
@@ -1415,19 +1555,32 @@ QJsonObject EditudeTestServer::serializePartSlurs(Part* part)
         if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
             continue;
         }
-        const QString uuid = uuidForElement(sp);
-        if (uuid.isEmpty()) {
-            continue;
-        }
         ChordRest* startCR = dynamic_cast<ChordRest*>(sp->startElement());
         ChordRest* endCR   = dynamic_cast<ChordRest*>(sp->endElement());
-        const QString startUuid = startCR ? uuidForChordRest(startCR) : QString();
-        const QString endUuid   = endCR   ? uuidForChordRest(endCR)   : QString();
-        result[uuid] = QJsonObject{
-            { "id",             uuid      },
-            { "start_event_id", startUuid },
-            { "end_event_id",   endUuid   },
-        };
+
+        QJsonObject entry;
+        if (startCR) {
+            entry["start_beat"]  = beatJson(startCR->tick());
+            entry["start_voice"] = voiceFromTrack(part, startCR->track());
+            entry["start_staff"] = staffFromTrack(part, startCR->track());
+            if (startCR->isChord()) {
+                Chord* sc = toChord(startCR);
+                if (!sc->notes().empty())
+                    entry["start_pitch"] = pitchJson(sc->notes().front());
+            }
+        }
+        if (endCR) {
+            entry["end_beat"]  = beatJson(endCR->tick());
+            entry["end_voice"] = voiceFromTrack(part, endCR->track());
+            entry["end_staff"] = staffFromTrack(part, endCR->track());
+            if (endCR->isChord()) {
+                Chord* ec = toChord(endCR);
+                if (!ec->notes().empty())
+                    entry["end_pitch"] = pitchJson(ec->notes().front());
+            }
+        }
+        const QString key = QString::number(slurIndex++);
+        result[key] = entry;
     }
     return result;
 }
@@ -1436,6 +1589,7 @@ QJsonObject EditudeTestServer::serializePartHairpins(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int hpIndex = 0;
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isHairpin()) {
@@ -1444,16 +1598,12 @@ QJsonObject EditudeTestServer::serializePartHairpins(Part* part)
         if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
             continue;
         }
-        const QString uuid = uuidForElement(sp);
-        if (uuid.isEmpty()) {
-            continue;
-        }
         Hairpin* hp = toHairpin(sp);
         const QString kind = hp->isCrescendo()
             ? QStringLiteral("crescendo")
             : QStringLiteral("decrescendo");
-        result[uuid] = QJsonObject{
-            { "id",         uuid },
+        const QString key = QString::number(hpIndex++);
+        result[key] = QJsonObject{
             { "start_beat", beatJson(hp->tick()) },
             { "end_beat",   beatJson(hp->tick2()) },
             { "kind",       kind },
@@ -1466,16 +1616,13 @@ QJsonObject EditudeTestServer::serializePartOctaveLines(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int otIndex = 0;
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isOttava()) {
             continue;
         }
         if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
-            continue;
-        }
-        const QString uuid = uuidForElement(sp);
-        if (uuid.isEmpty()) {
             continue;
         }
         Ottava* ot = toOttava(sp);
@@ -1487,8 +1634,8 @@ QJsonObject EditudeTestServer::serializePartOctaveLines(Part* part)
         case OttavaType::OTTAVA_15MB: kind = QStringLiteral("15mb"); break;
         default:                      kind = QStringLiteral("8va");  break;
         }
-        result[uuid] = QJsonObject{
-            { "id",         uuid },
+        const QString key = QString::number(otIndex++);
+        result[key] = QJsonObject{
             { "start_beat", beatJson(ot->tick()) },
             { "end_beat",   beatJson(ot->tick2()) },
             { "kind",       kind },
@@ -1503,6 +1650,7 @@ QJsonObject EditudeTestServer::serializePartGlissandos(Part* part)
     // NOT in score->spanner().  Iterate notes in the part to find them.
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int glIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
@@ -1512,32 +1660,36 @@ QJsonObject EditudeTestServer::serializePartGlissandos(Part* part)
                     continue;
                 }
                 Chord* chord = toChord(el);
+                const int startVoice = voiceFromTrack(part, track);
+                const int startStaff = staffFromTrack(part, track);
                 for (Note* note : chord->notes()) {
                     for (Spanner* sp : note->spannerFor()) {
                         if (!sp->isGlissando()) {
-                            continue;
-                        }
-                        const QString uuid = uuidForElement(sp);
-                        if (uuid.isEmpty()) {
                             continue;
                         }
                         Glissando* gl = toGlissando(sp);
                         const QString style = (gl->glissandoType() == GlissandoType::WAVY)
                             ? QStringLiteral("wavy")
                             : QStringLiteral("straight");
-                        const QString startUuid = uuidForChordRest(chord);
+
+                        QJsonObject entry;
+                        entry["start_beat"]  = beatJson(seg->tick());
+                        entry["start_pitch"] = pitchJson(note);
+                        entry["start_voice"] = startVoice;
+                        entry["start_staff"] = startStaff;
+                        entry["style"]       = style;
+
                         EngravingItem* endEl = sp->endElement();
-                        ChordRest* endCR = nullptr;
                         if (endEl && endEl->isNote()) {
-                            endCR = toNote(endEl)->chord();
+                            Note* endNote = toNote(endEl);
+                            Chord* endChord = endNote->chord();
+                            entry["end_beat"]  = beatJson(endChord->tick());
+                            entry["end_pitch"] = pitchJson(endNote);
+                            entry["end_voice"] = voiceFromTrack(part, endChord->track());
+                            entry["end_staff"] = staffFromTrack(part, endChord->track());
                         }
-                        const QString endUuid = endCR ? uuidForChordRest(endCR) : QString();
-                        result[uuid] = QJsonObject{
-                            { "id",             uuid      },
-                            { "start_event_id", startUuid },
-                            { "end_event_id",   endUuid   },
-                            { "style",          style     },
-                        };
+                        const QString key = QString::number(glIndex++);
+                        result[key] = entry;
                     }
                 }
             }
@@ -1550,6 +1702,7 @@ QJsonObject EditudeTestServer::serializePartPedalLines(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int pedIndex = 0;
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isPedal()) {
@@ -1558,12 +1711,8 @@ QJsonObject EditudeTestServer::serializePartPedalLines(Part* part)
         if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
             continue;
         }
-        const QString uuid = uuidForElement(sp);
-        if (uuid.isEmpty()) {
-            continue;
-        }
-        result[uuid] = QJsonObject{
-            { "id",         uuid },
+        const QString key = QString::number(pedIndex++);
+        result[key] = QJsonObject{
             { "start_beat", beatJson(sp->tick()) },
             { "end_beat",   beatJson(sp->tick2()) },
         };
@@ -1575,16 +1724,13 @@ QJsonObject EditudeTestServer::serializePartTrillLines(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int trIndex = 0;
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isTrill()) {
             continue;
         }
         if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
-            continue;
-        }
-        const QString uuid = uuidForElement(sp);
-        if (uuid.isEmpty()) {
             continue;
         }
         Trill* tr = toTrill(sp);
@@ -1600,8 +1746,8 @@ QJsonObject EditudeTestServer::serializePartTrillLines(Part* part)
             default:                      break;
             }
         }
-        result[uuid] = QJsonObject{
-            { "id",         uuid },
+        const QString key = QString::number(trIndex++);
+        result[key] = QJsonObject{
             { "start_beat", beatJson(sp->tick()) },
             { "end_beat",   beatJson(sp->tick2()) },
             { "accidental", accVal },
@@ -1614,6 +1760,7 @@ QJsonObject EditudeTestServer::serializePartLyricsMap(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int lyrIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
@@ -1623,12 +1770,9 @@ QJsonObject EditudeTestServer::serializePartLyricsMap(Part* part)
                     continue;
                 }
                 ChordRest* cr = toChordRest(el);
+                const int voice = voiceFromTrack(part, track);
+                const int staff = staffFromTrack(part, track);
                 for (Lyrics* lyr : cr->lyrics()) {
-                    const QString uuid = uuidForElement(lyr);
-                    if (uuid.isEmpty()) {
-                        continue;
-                    }
-                    const QString eventUuid = uuidForChordRest(cr);
                     static const QHash<LyricsSyllabic, QString> s_syl = {
                         { LyricsSyllabic::SINGLE, QStringLiteral("single") },
                         { LyricsSyllabic::BEGIN,  QStringLiteral("begin")  },
@@ -1636,9 +1780,11 @@ QJsonObject EditudeTestServer::serializePartLyricsMap(Part* part)
                         { LyricsSyllabic::END,    QStringLiteral("end")    },
                     };
                     const QString syllabic = s_syl.value(lyr->syllabic(), QStringLiteral("single"));
-                    result[uuid] = QJsonObject{
-                        { "id",       uuid },
-                        { "event_id", eventUuid },
+                    const QString key = QString::number(lyrIndex++);
+                    result[key] = QJsonObject{
+                        { "beat",     beatJson(seg->tick()) },
+                        { "voice",    voice },
+                        { "staff",    staff },
                         { "verse",    lyr->verse() },
                         { "syllabic", syllabic },
                         { "text",     lyr->plainText().toQString() },
@@ -1681,13 +1827,10 @@ QJsonObject EditudeTestServer::serializeScoreVoltas()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int voltaIndex = 0;
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isVolta()) {
-            continue;
-        }
-        const QString uuid = uuidForElement(sp);
-        if (uuid.isEmpty()) {
             continue;
         }
         Volta* volta = toVolta(sp);
@@ -1695,8 +1838,8 @@ QJsonObject EditudeTestServer::serializeScoreVoltas()
         for (int n : volta->endings()) {
             numbers.append(n);
         }
-        result[uuid] = QJsonObject{
-            { "id",         uuid },
+        const QString key = QString::number(voltaIndex++);
+        result[key] = QJsonObject{
             { "start_beat", beatJson(volta->tick()) },
             { "end_beat",   beatJson(volta->tick2()) },
             { "numbers",    numbers },
@@ -1710,24 +1853,21 @@ QJsonObject EditudeTestServer::serializeScoreMarkers()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int markerIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (EngravingItem* el : m->el()) {
             if (!el || !el->isMarker()) {
                 continue;
             }
             Marker* marker = toMarker(el);
-            const QString uuid = uuidForElement(marker);
-            if (uuid.isEmpty()) {
-                continue;
-            }
             const QString label = marker->label().toQString();
+            const QString key = QString::number(markerIndex++);
             QJsonObject obj{
-                { "id",   uuid },
                 { "beat", beatJson(marker->tick()) },
                 { "kind", markerKindName(marker->markerType()) },
                 { "label", label.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(label) },
             };
-            result[uuid] = obj;
+            result[key] = obj;
         }
     }
     return result;
@@ -1737,21 +1877,18 @@ QJsonObject EditudeTestServer::serializeScoreJumps()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int jumpIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (EngravingItem* el : m->el()) {
             if (!el || !el->isJump()) {
                 continue;
             }
             Jump* jump = toJump(el);
-            const QString uuid = uuidForElement(jump);
-            if (uuid.isEmpty()) {
-                continue;
-            }
             auto toJsonOrNull = [](const String& s) -> QJsonValue {
                 return s.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(s.toQString());
             };
-            result[uuid] = QJsonObject{
-                { "id",          uuid },
+            const QString key = QString::number(jumpIndex++);
+            result[key] = QJsonObject{
                 { "beat",        beatJson(jump->tick()) },
                 { "jump_to",     jump->jumpTo().toQString() },
                 { "play_until",  toJsonOrNull(jump->playUntil()) },
@@ -1779,35 +1916,32 @@ QJsonArray EditudeTestServer::serializeMeasureLenOverrides()
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3 action handlers
+// Tier 3 action handlers — coordinate-addressed
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionSetPartInstrument(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
     const QJsonObject instr = body["instrument"].toObject();
     if (instr.isEmpty()) {
-        return errorResponse(422,
-                             "instrument required");
+        return errorResponse(422, "instrument required");
     }
     const QString msId      = instr["musescore_id"].toString();
     const QString longName  = instr["name"].toString();
     const QString shortName = instr["short_name"].toString();
 
     score->startCmd(TranslatableString("test", "set part instrument"));
-    // Modify existing Instrument in-place — same rationale as actionAddPart.
+    // Modify existing Instrument in-place -- same rationale as actionAddPart.
     Instrument* existing = part->instrument();
     if (existing && !msId.isEmpty()) {
         existing->setId(String(msId));
@@ -1867,7 +2001,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStringData(const QJsonObjec
 EditudeTestServer::Reply EditudeTestServer::actionSetCapo(const QJsonObject& body)
 {
     // Capo is tracked in the Python model.  The C++ test server acknowledges
-    // the action without modifying the score — this mirrors the applicator's
+    // the action without modifying the score -- this mirrors the applicator's
     // behaviour and ensures the op round-trips cleanly in e2e tests.
     Q_UNUSED(body);
     return okResponse();
@@ -1880,20 +2014,31 @@ EditudeTestServer::Reply EditudeTestServer::actionSetTabNote(const QJsonObject& 
         return errorResponse(503, "score not ready");
     }
 
-    const QString eventId = body["event_id"].toString();
+    // Coordinate-based lookup for the target note.
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const QJsonObject pitchObj = body["pitch"].toObject();
+    const int midi = ScoreApplicator::pitchToMidi(
+        pitchObj["step"].toString(),
+        pitchObj["octave"].toInt(),
+        pitchObj["accidental"].toString());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    Note* note = findNoteAtCoord(score, part, tick, midi, voice, staff);
+    if (!note) {
+        return errorResponse(422, "note not found at coordinate");
+    }
+
     const int fret   = body["fret"].toInt(-1);
     const int string = body["string"].toInt(-1);
     if (fret < 0 || string < 0) {
         return errorResponse(422, "fret and string required");
-    }
-
-    EngravingObject* obj = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(422, "event not found");
-    }
-    Note* note = dynamic_cast<Note*>(obj);
-    if (!note) {
-        return errorResponse(422, "event is not a Note");
     }
 
     score->startCmd(TranslatableString("test", "set tab note"));
@@ -1966,19 +2111,30 @@ EditudeTestServer::Reply EditudeTestServer::actionSetNoteHead(const QJsonObject&
         return errorResponse(503, "score not ready");
     }
 
-    const QString eventId = body["event_id"].toString();
+    // Coordinate-based lookup.
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const QJsonObject pitchObj = body["pitch"].toObject();
+    const int midi = ScoreApplicator::pitchToMidi(
+        pitchObj["step"].toString(),
+        pitchObj["octave"].toInt(),
+        pitchObj["accidental"].toString());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    Note* note = findNoteAtCoord(score, part, tick, midi, voice, staff);
+    if (!note) {
+        return errorResponse(422, "note not found at coordinate");
+    }
+
     const QString headStr = body["notehead"].toString();
     if (headStr.isEmpty()) {
         return errorResponse(422, "notehead required");
-    }
-
-    EngravingObject* obj = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(422, "event not found");
-    }
-    Note* note = dynamic_cast<Note*>(obj);
-    if (!note) {
-        return errorResponse(422, "event is not a Note");
     }
 
     const NoteHeadGroup headGroup = noteheadGroupFromString(headStr);
@@ -1993,27 +2149,24 @@ EditudeTestServer::Reply EditudeTestServer::actionAddArticulation(const QJsonObj
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString eventId = body["event_id"].toString();
+    // Coordinate-based lookup for the parent chord.
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
     const QString artName = body["articulation"].toString();
 
-    EngravingObject* obj = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(404, "event not found");
-    }
-
-    ChordRest* cr = nullptr;
-    if (obj->isNote()) {
-        cr = toNote(static_cast<EngravingItem*>(obj))->chord();
-    } else if (obj->isChordRest()) {
-        cr = toChordRest(static_cast<EngravingItem*>(obj));
-    }
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
     if (!cr) {
-        return errorResponse(422,
-                             "event is not a note or chordrest");
+        return errorResponse(404, "chordrest not found at coordinate");
     }
 
     static const QHash<QString, SymId> s_artMap = {
@@ -2087,8 +2240,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddArticulation(const QJsonObj
         symId = SymNames::symIdByName(artName.toUtf8().constData());
     }
     if (symId == SymId::noSym) {
-        return errorResponse(422,
-                             "unknown articulation type");
+        return errorResponse(422, "unknown articulation type");
     }
 
     score->startCmd(TranslatableString("test", "add articulation"));
@@ -2106,24 +2258,103 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveArticulation(const QJson
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "articulation not found");
+    // Find articulation by coordinate: (part_id, beat, voice, staff, articulation name).
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    Articulation* art = dynamic_cast<Articulation*>(obj);
-    if (!art) {
-        return errorResponse(422,
-                             "element is not an Articulation");
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+    const QString artName = body["articulation"].toString();
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr || !cr->isChord()) {
+        return errorResponse(404, "chord not found at coordinate");
+    }
+
+    // Resolve the target SymId.
+    static const QHash<QString, SymId> s_artMap = {
+        { "staccato",                    SymId::articStaccatoAbove                 },
+        { "accent",                      SymId::articAccentAbove                   },
+        { "tenuto",                      SymId::articTenutoAbove                   },
+        { "marcato",                     SymId::articMarcatoAbove                  },
+        { "staccatissimo",               SymId::articStaccatissimoAbove            },
+        { "staccatissimo_stroke",        SymId::articStaccatissimoStrokeAbove      },
+        { "staccatissimo_wedge",         SymId::articStaccatissimoWedgeAbove       },
+        { "tenuto_staccato",             SymId::articTenutoStaccatoAbove           },
+        { "accent_staccato",             SymId::articAccentStaccatoAbove           },
+        { "marcato_staccato",            SymId::articMarcatoStaccatoAbove          },
+        { "marcato_tenuto",              SymId::articMarcatoTenutoAbove            },
+        { "tenuto_accent",               SymId::articTenutoAccentAbove             },
+        { "stress",                      SymId::articStressAbove                   },
+        { "unstress",                    SymId::articUnstressAbove                 },
+        { "soft_accent",                 SymId::articSoftAccentAbove               },
+        { "soft_accent_staccato",        SymId::articSoftAccentStaccatoAbove       },
+        { "soft_accent_tenuto",          SymId::articSoftAccentTenutoAbove         },
+        { "soft_accent_tenuto_staccato", SymId::articSoftAccentTenutoStaccatoAbove },
+        { "fermata",             SymId::fermataAbove          },
+        { "fermata_short",       SymId::fermataShortAbove     },
+        { "fermata_long",        SymId::fermataLongAbove      },
+        { "fermata_very_short",  SymId::fermataVeryShortAbove },
+        { "fermata_very_long",   SymId::fermataVeryLongAbove  },
+        { "fermata_long_henze",  SymId::fermataLongHenzeAbove },
+        { "fermata_short_henze", SymId::fermataShortHenzeAbove },
+        { "trill",                 SymId::ornamentTrill                     },
+        { "mordent",               SymId::ornamentMordent                   },
+        { "turn",                  SymId::ornamentTurn                      },
+        { "turn_inverted",         SymId::ornamentTurnInverted              },
+        { "turn_slash",            SymId::ornamentTurnSlash                 },
+        { "turn_up",               SymId::ornamentTurnUp                    },
+        { "short_trill",           SymId::ornamentShortTrill                },
+        { "tremblement",           SymId::ornamentTremblement               },
+        { "prall_mordent",         SymId::ornamentPrallMordent              },
+        { "up_prall",              SymId::ornamentUpPrall                   },
+        { "mordent_upper_prefix",  SymId::ornamentPrecompMordentUpperPrefix },
+        { "up_mordent",            SymId::ornamentUpMordent                 },
+        { "down_mordent",          SymId::ornamentDownMordent               },
+        { "prall_down",            SymId::ornamentPrallDown                 },
+        { "prall_up",              SymId::ornamentPrallUp                   },
+        { "line_prall",            SymId::ornamentLinePrall                 },
+        { "precomp_slide",         SymId::ornamentPrecompSlide              },
+        { "shake",                 SymId::ornamentShake3                    },
+        { "shake_muffat",          SymId::ornamentShakeMuffat1              },
+        { "tremblement_couperin",  SymId::ornamentTremblementCouperin       },
+        { "pince_couperin",        SymId::ornamentPinceCouperin             },
+        { "haydn",                 SymId::ornamentHaydn                     },
+        { "up_bow",               SymId::stringsUpBow              },
+        { "down_bow",             SymId::stringsDownBow            },
+        { "harmonic",             SymId::stringsHarmonic            },
+        { "snap_pizzicato",       SymId::pluckedSnapPizzicatoAbove },
+        { "left_hand_pizzicato",  SymId::pluckedLeftHandPizzicato  },
+        { "brass_mute_open",   SymId::brassMuteOpen   },
+        { "brass_mute_closed", SymId::brassMuteClosed },
+        { "guitar_fade_in",      SymId::guitarFadeIn      },
+        { "guitar_fade_out",     SymId::guitarFadeOut     },
+        { "guitar_volume_swell", SymId::guitarVolumeSwell },
+    };
+
+    // Match by articulation name (comparing the canonical name from the SymId).
+    Chord* chord = toChord(cr);
+    Articulation* target = nullptr;
+    for (Articulation* art : chord->articulations()) {
+        const QString name = articulationNameFromSymId(art->symId());
+        if (name == artName) {
+            target = art;
+            break;
+        }
+    }
+    if (!target) {
+        return errorResponse(404, "articulation not found on chord");
     }
 
     score->startCmd(TranslatableString("test", "remove articulation"));
-    score->undoRemoveElement(art);
+    score->undoRemoveElement(target);
     score->endCmd();
 
     return okResponse();
@@ -2136,23 +2367,22 @@ EditudeTestServer::Reply EditudeTestServer::actionAddArpeggio(const QJsonObject&
         return errorResponse(503, "score not ready");
     }
 
-    const QString eventId  = body["event_id"].toString();
-    const QString dirName  = body["direction"].toString();
-
-    EngravingObject* obj = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(404, "event not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    Chord* chord = nullptr;
-    if (obj->isNote()) {
-        chord = toNote(static_cast<EngravingItem*>(obj))->chord();
-    } else if (obj->isChord()) {
-        chord = toChord(static_cast<EngravingItem*>(obj));
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+    const QString dirName = body["direction"].toString();
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr || !cr->isChord()) {
+        return errorResponse(404, "chord not found at coordinate");
     }
-    if (!chord) {
-        return errorResponse(422, "event is not a note or chord");
-    }
+    Chord* chord = toChord(cr);
 
     static const QHash<QString, ArpeggioType> s_arpMap = {
         { QStringLiteral("normal"),        ArpeggioType::NORMAL },
@@ -2182,15 +2412,24 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveArpeggio(const QJsonObje
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "arpeggio not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    Arpeggio* arp = dynamic_cast<Arpeggio*>(obj);
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr || !cr->isChord()) {
+        return errorResponse(404, "chord not found at coordinate");
+    }
+    Chord* chord = toChord(cr);
+    Arpeggio* arp = chord->arpeggio();
     if (!arp) {
-        return errorResponse(422, "element is not an Arpeggio");
+        return errorResponse(404, "arpeggio not found on chord");
     }
 
     score->startCmd(TranslatableString("test", "remove arpeggio"));
@@ -2212,7 +2451,17 @@ EditudeTestServer::Reply EditudeTestServer::actionAddTuplet(const QJsonObject& b
     const int actualNotes = body["actual_notes"].toInt(0);
     const int normalNotes = body["normal_notes"].toInt(0);
     const QString baseType = body["base_duration"].toString();
-    const track_idx_t track = static_cast<track_idx_t>(body.value("track").toInt(0));
+
+    // Resolve track from coordinates.
+    Part* part = resolvePartFromBody(body, m_svc);
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+    track_idx_t track;
+    if (part) {
+        track = trackFromCoord(part, voice, staff);
+    } else {
+        track = static_cast<track_idx_t>(body.value("track").toInt(0));
+    }
 
     if (actualNotes <= 0 || normalNotes <= 0) {
         return errorResponse(422, "actual_notes and normal_notes must be positive");
@@ -2254,6 +2503,36 @@ EditudeTestServer::Reply EditudeTestServer::actionAddTuplet(const QJsonObject& b
     score->cmdCreateTuplet(cr, tuplet);
     score->endCmd();
 
+    // Diagnostic: verify tuplet state after creation.
+    {
+        int tupCount = 0;
+        Score* checkScore = m_svc->scoreForTest();
+        Measure* checkMeas = checkScore->firstMeasure();
+        LOGD() << "[editude-test] actionAddTuplet: score=" << (void*)score
+               << "checkScore=" << (void*)checkScore
+               << "measure=" << (void*)measure
+               << "checkMeas=" << (void*)checkMeas;
+        if (checkMeas) {
+            for (Segment* seg2 = checkMeas->first(SegmentType::ChordRest); seg2;
+                 seg2 = seg2->next(SegmentType::ChordRest)) {
+                for (track_idx_t t = 0; t < 8; ++t) {
+                    EngravingItem* el = seg2->element(t);
+                    if (el && el->isChordRest()) {
+                        Tuplet* tp = toChordRest(el)->tuplet();
+                        LOGD() << "[editude-test] actionAddTuplet check:"
+                               << "tick=" << seg2->tick().toString()
+                               << "track=" << t
+                               << "type=" << el->typeName()
+                               << "tuplet=" << (void*)tp
+                               << "gen=" << el->generated();
+                        if (tp) tupCount++;
+                    }
+                }
+            }
+        }
+        LOGD() << "[editude-test] actionAddTuplet: tupCount=" << tupCount;
+    }
+
     return okResponse();
 }
 
@@ -2266,7 +2545,17 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTuplet(const QJsonObject
 
     const QJsonObject beatObj = body["beat"].toObject();
     const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
-    const track_idx_t track = static_cast<track_idx_t>(body.value("track").toInt(0));
+
+    // Resolve track from coordinates.
+    Part* part = resolvePartFromBody(body, m_svc);
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+    track_idx_t track;
+    if (part) {
+        track = trackFromCoord(part, voice, staff);
+    } else {
+        track = static_cast<track_idx_t>(body.value("track").toInt(0));
+    }
 
     // Find the tuplet at the given beat/track by looking for a ChordRest inside one.
     Measure* measure = score->tick2measure(tick);
@@ -2294,6 +2583,37 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTuplet(const QJsonObject
 
     score->startCmd(TranslatableString("test", "remove tuplet"));
     score->cmdDeleteTuplet(tup, /*replaceWithRest=*/true);
+
+    // Consolidate: if voice is all rests, replace with a V_MEASURE rest
+    // for parity with the undo stack's state restoration.
+    {
+        bool allRests = true;
+        QVector<EngravingItem*> toRemove;
+        for (Segment* s = measure->first(SegmentType::ChordRest); s;
+             s = s->next(SegmentType::ChordRest)) {
+            EngravingItem* e = s->element(track);
+            if (e && !e->isRest()) {
+                allRests = false;
+                break;
+            }
+            if (e) {
+                toRemove.append(e);
+            }
+        }
+        if (allRests && !toRemove.isEmpty()) {
+            for (EngravingItem* e : toRemove) {
+                score->undoRemoveElement(e);
+            }
+            Segment* seg0 = measure->getSegmentR(
+                SegmentType::ChordRest, Fraction(0, 1));
+            Rest* fmr = Factory::createRest(
+                seg0, TDuration(DurationType::V_MEASURE));
+            fmr->setTrack(track);
+            fmr->setTicks(measure->ticks());
+            score->undoAddElement(fmr);
+        }
+    }
+
     score->endCmd();
 
     return okResponse();
@@ -2306,25 +2626,24 @@ EditudeTestServer::Reply EditudeTestServer::actionAddGraceNote(const QJsonObject
         return errorResponse(503, "score not ready");
     }
 
-    const QString eventId   = body["event_id"].toString();
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
     const int order         = body["order"].toInt(0);
     const QString typeName  = body["grace_type"].toString();
     const QJsonObject pitch = body["pitch"].toObject();
 
-    EngravingObject* obj = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(404, "event not found");
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr || !cr->isChord()) {
+        return errorResponse(404, "chord not found at coordinate");
     }
-
-    Chord* parentChord = nullptr;
-    if (obj->isNote()) {
-        parentChord = toNote(static_cast<EngravingItem*>(obj))->chord();
-    } else if (obj->isChord()) {
-        parentChord = toChord(static_cast<EngravingItem*>(obj));
-    }
-    if (!parentChord) {
-        return errorResponse(422, "event is not a note or chord");
-    }
+    Chord* parentChord = toChord(cr);
 
     static const QHash<QString, NoteType> s_gnMap = {
         { QStringLiteral("acciaccatura"),  NoteType::ACCIACCATURA },
@@ -2383,15 +2702,33 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveGraceNote(const QJsonObj
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "grace note not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    Chord* graceChord = dynamic_cast<Chord*>(obj);
-    if (!graceChord || !graceChord->isGrace()) {
-        return errorResponse(422, "element is not a grace chord");
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+    const int index = body.value("index").toInt(0);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr || !cr->isChord()) {
+        return errorResponse(404, "chord not found at coordinate");
+    }
+    Chord* parentChord = toChord(cr);
+
+    // Find grace chord by index.
+    Chord* graceChord = nullptr;
+    for (Chord* gc : parentChord->graceNotes()) {
+        if (static_cast<int>(gc->graceIndex()) == index) {
+            graceChord = gc;
+            break;
+        }
+    }
+    if (!graceChord) {
+        return errorResponse(404, "grace note not found at index");
     }
 
     score->startCmd(TranslatableString("test", "remove grace note"));
@@ -2444,15 +2781,33 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveBreathMark(const QJsonOb
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "breath mark not found");
+    // Find breath mark by coordinate: part_index + beat.
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
     }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
-    Breath* breath = dynamic_cast<Breath*>(obj);
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    // Search for the breath at the given tick within this part's tracks.
+    Breath* breath = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->elist()) {
+                if (!el || el->type() != ElementType::BREATH) continue;
+                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) continue;
+                breath = static_cast<Breath*>(el);
+                break;
+            }
+            if (breath) break;
+        }
+    }
     if (!breath) {
-        return errorResponse(422, "element is not a Breath");
+        return errorResponse(404, "breath mark not found");
     }
 
     score->startCmd(TranslatableString("test", "remove breath mark"));
@@ -2463,7 +2818,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveBreathMark(const QJsonOb
 }
 
 // ---------------------------------------------------------------------------
-// Tremolo actions (single-note)
+// Tremolo actions (single-note) -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddTremolo(const QJsonObject& body)
@@ -2473,23 +2828,22 @@ EditudeTestServer::Reply EditudeTestServer::actionAddTremolo(const QJsonObject& 
         return errorResponse(503, "score not ready");
     }
 
-    const QString eventId  = body["event_id"].toString();
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
     const QString typeName = body["tremolo_type"].toString();
 
-    EngravingObject* obj = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(404, "event not found");
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr || !cr->isChord()) {
+        return errorResponse(404, "chord not found at coordinate");
     }
-
-    Chord* chord = nullptr;
-    if (obj->isNote()) {
-        chord = toNote(static_cast<EngravingItem*>(obj))->chord();
-    } else if (obj->isChord()) {
-        chord = toChord(static_cast<EngravingItem*>(obj));
-    }
-    if (!chord) {
-        return errorResponse(422, "event is not a note or chord");
-    }
+    Chord* chord = toChord(cr);
 
     score->startCmd(TranslatableString("test", "add tremolo"));
     TremoloSingleChord* trem = Factory::createTremoloSingleChord(chord);
@@ -2509,15 +2863,23 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTremolo(const QJsonObjec
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "tremolo not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    TremoloSingleChord* trem = dynamic_cast<TremoloSingleChord*>(obj);
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr || !cr->isChord()) {
+        return errorResponse(404, "chord not found at coordinate");
+    }
+    TremoloSingleChord* trem = toChord(cr)->tremoloSingleChord();
     if (!trem) {
-        return errorResponse(422, "element is not a TremoloSingleChord");
+        return errorResponse(404, "tremolo not found on chord");
     }
 
     score->startCmd(TranslatableString("test", "remove tremolo"));
@@ -2528,7 +2890,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTremolo(const QJsonObjec
 }
 
 // ---------------------------------------------------------------------------
-// Two-note tremolo actions
+// Two-note tremolo actions -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddTwoNoteTremolo(const QJsonObject& body)
@@ -2538,31 +2900,32 @@ EditudeTestServer::Reply EditudeTestServer::actionAddTwoNoteTremolo(const QJsonO
         return errorResponse(503, "score not ready");
     }
 
-    const QString startId = body["start_event_id"].toString();
-    const QString endId   = body["end_event_id"].toString();
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    // Start chord coordinate.
+    const QJsonObject sb = body["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const int startVoice = body.value("start_voice").toInt(body.value("voice").toInt(1));
+    const int startStaff = body.value("start_staff").toInt(body.value("staff").toInt(0));
+
+    // End chord coordinate.
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const int endVoice = body.value("end_voice").toInt(startVoice);
+    const int endStaff = body.value("end_staff").toInt(startStaff);
+
     const QString typeName = body["tremolo_type"].toString();
 
-    EngravingObject* startObj = findByUuid(startId);
-    EngravingObject* endObj   = findByUuid(endId);
-    if (!startObj || !endObj) {
-        return errorResponse(404, "event not found");
-    }
-
-    Chord* chord1 = nullptr;
-    Chord* chord2 = nullptr;
-    if (startObj->isNote()) {
-        chord1 = toNote(static_cast<EngravingItem*>(startObj))->chord();
-    } else if (startObj->isChord()) {
-        chord1 = toChord(static_cast<EngravingItem*>(startObj));
-    }
-    if (endObj->isNote()) {
-        chord2 = toNote(static_cast<EngravingItem*>(endObj))->chord();
-    } else if (endObj->isChord()) {
-        chord2 = toChord(static_cast<EngravingItem*>(endObj));
-    }
-    if (!chord1 || !chord2) {
+    ChordRest* startCR = findChordRestAtCoord(score, part, startTick, startVoice, startStaff);
+    ChordRest* endCR   = findChordRestAtCoord(score, part, endTick, endVoice, endStaff);
+    if (!startCR || !startCR->isChord() || !endCR || !endCR->isChord()) {
         return errorResponse(422, "two-note tremolo requires chord endpoints");
     }
+    Chord* chord1 = toChord(startCR);
+    Chord* chord2 = toChord(endCR);
 
     score->startCmd(TranslatableString("test", "add two-note tremolo"));
     TremoloTwoChord* trem = Factory::createTremoloTwoChord(chord1);
@@ -2582,15 +2945,26 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTwoNoteTremolo(const QJs
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "two-note tremolo not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    TremoloTwoChord* trem = dynamic_cast<TremoloTwoChord*>(obj);
+    // Accept both "start_beat" (preferred, matches add handler) and "beat".
+    const QJsonObject beatObj = body.contains("start_beat")
+        ? body["start_beat"].toObject()
+        : body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr || !cr->isChord()) {
+        return errorResponse(404, "chord not found at coordinate");
+    }
+    TremoloTwoChord* trem = toChord(cr)->tremoloTwoChord();
     if (!trem) {
-        return errorResponse(422, "element is not a TremoloTwoChord");
+        return errorResponse(404, "two-note tremolo not found on chord");
     }
 
     score->startCmd(TranslatableString("test", "remove two-note tremolo"));
@@ -2604,14 +2978,12 @@ EditudeTestServer::Reply EditudeTestServer::actionAddDynamic(const QJsonObject& 
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(0);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
@@ -2637,14 +3009,12 @@ EditudeTestServer::Reply EditudeTestServer::actionAddDynamic(const QJsonObject& 
     };
     const DynamicType dt = s_dynMap.value(kind, DynamicType::OTHER);
     if (dt == DynamicType::OTHER) {
-        return errorResponse(422,
-                             "unknown dynamic kind");
+        return errorResponse(422, "unknown dynamic kind");
     }
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
-        return errorResponse(422,
-                             "beat not found in score");
+        return errorResponse(422, "beat not found in score");
     }
 
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
@@ -2663,20 +3033,36 @@ EditudeTestServer::Reply EditudeTestServer::actionSetDynamic(const QJsonObject& 
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "dynamic not found");
+    // Find dynamic by coordinate: part_index + beat + old_kind.
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
     }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
-    Dynamic* dyn = dynamic_cast<Dynamic*>(obj);
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    // Search for the dynamic at this tick in this part.
+    Dynamic* dyn = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || !el->isDynamic()) continue;
+                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) continue;
+                dyn = toDynamic(el);
+                break;
+            }
+            if (dyn) break;
+        }
+    }
     if (!dyn) {
-        return errorResponse(422,
-                             "element is not a Dynamic");
+        return errorResponse(404, "dynamic not found");
     }
 
     static const QHash<QString, DynamicType> s_dynMap = {
@@ -2696,14 +3082,13 @@ EditudeTestServer::Reply EditudeTestServer::actionSetDynamic(const QJsonObject& 
         { "fz",  DynamicType::FZ  },
     };
     const QString kind = body["kind"].toString();
-    const DynamicType dt = s_dynMap.value(kind, DynamicType::OTHER);
-    if (dt == DynamicType::OTHER) {
-        return errorResponse(422,
-                             "unknown dynamic kind");
+    const DynamicType newDt = s_dynMap.value(kind, DynamicType::OTHER);
+    if (newDt == DynamicType::OTHER) {
+        return errorResponse(422, "unknown dynamic kind");
     }
 
     score->startCmd(TranslatableString("test", "set dynamic"));
-    dyn->undoChangeProperty(Pid::DYNAMIC_TYPE, PropertyValue(dt));
+    dyn->undoChangeProperty(Pid::DYNAMIC_TYPE, PropertyValue(newDt));
     score->endCmd();
 
     return okResponse();
@@ -2713,20 +3098,34 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveDynamic(const QJsonObjec
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "dynamic not found");
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
     }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
-    Dynamic* dyn = dynamic_cast<Dynamic*>(obj);
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    Dynamic* dyn = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || !el->isDynamic()) continue;
+                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) continue;
+                dyn = toDynamic(el);
+                break;
+            }
+            if (dyn) break;
+        }
+    }
     if (!dyn) {
-        return errorResponse(422,
-                             "element is not a Dynamic");
+        return errorResponse(404, "dynamic not found");
     }
 
     score->startCmd(TranslatableString("test", "remove dynamic"));
@@ -2740,29 +3139,30 @@ EditudeTestServer::Reply EditudeTestServer::actionAddSlur(const QJsonObject& bod
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString startId = body["start_event_id"].toString();
-    const QString endId   = body["end_event_id"].toString();
-
-    EngravingObject* startObj = findByUuid(startId);
-    EngravingObject* endObj   = findByUuid(endId);
-    if (!startObj || !endObj) {
-        return errorResponse(404, "event not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    auto toCR = [](EngravingObject* o) -> ChordRest* {
-        if (o->isNote()) return toNote(static_cast<EngravingItem*>(o))->chord();
-        if (o->isChordRest()) return toChordRest(static_cast<EngravingItem*>(o));
-        return nullptr;
-    };
-    ChordRest* startCR = toCR(startObj);
-    ChordRest* endCR   = toCR(endObj);
+    // Start endpoint coordinates.
+    const QJsonObject sb = body["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const int startVoice = body.value("start_voice").toInt(body.value("voice").toInt(1));
+    const int startStaff = body.value("start_staff").toInt(body.value("staff").toInt(0));
+
+    // End endpoint coordinates.
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const int endVoice = body.value("end_voice").toInt(startVoice);
+    const int endStaff = body.value("end_staff").toInt(startStaff);
+
+    ChordRest* startCR = findChordRestAtCoord(score, part, startTick, startVoice, startStaff);
+    ChordRest* endCR   = findChordRestAtCoord(score, part, endTick, endVoice, endStaff);
     if (!startCR || !endCR) {
-        return errorResponse(422,
-                             "event is not a note or chordrest");
+        return errorResponse(422, "slur endpoint not found");
     }
 
     score->startCmd(TranslatableString("test", "add slur"));
@@ -2784,20 +3184,39 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveSlur(const QJsonObject& 
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "slur not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    Slur* slur = dynamic_cast<Slur*>(obj);
+    const QJsonObject sb = body["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const int startVoice = body.value("start_voice").toInt(body.value("voice").toInt(1));
+    const int startStaff = body.value("start_staff").toInt(body.value("staff").toInt(0));
+
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+
+    // Search spanners for a matching slur.
+    Slur* slur = nullptr;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isSlur()) continue;
+        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) continue;
+        if (sp->tick() == startTick && sp->tick2() == endTick) {
+            int spVoice = voiceFromTrack(part, sp->track());
+            int spStaff = staffFromTrack(part, sp->track());
+            if (spVoice == startVoice && spStaff == startStaff) {
+                slur = toSlur(sp);
+                break;
+            }
+        }
+    }
     if (!slur) {
-        return errorResponse(422,
-                             "element is not a Slur");
+        return errorResponse(404, "slur not found");
     }
 
     score->startCmd(TranslatableString("test", "remove slur"));
@@ -2811,14 +3230,12 @@ EditudeTestServer::Reply EditudeTestServer::actionAddHairpin(const QJsonObject& 
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(0);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
@@ -2841,20 +3258,31 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveHairpin(const QJsonObjec
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "hairpin not found");
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
     }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
-    Hairpin* hp = dynamic_cast<Hairpin*>(obj);
+    const QJsonObject sb = body["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+
+    // Find hairpin by start beat within part tracks.
+    Hairpin* hp = nullptr;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isHairpin()) continue;
+        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) continue;
+        if (sp->tick() == startTick) {
+            hp = toHairpin(sp);
+            break;
+        }
+    }
     if (!hp) {
-        return errorResponse(422,
-                             "element is not a Hairpin");
+        return errorResponse(404, "hairpin not found");
     }
 
     score->startCmd(TranslatableString("test", "remove hairpin"));
@@ -2865,21 +3293,19 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveHairpin(const QJsonObjec
 }
 
 // ---------------------------------------------------------------------------
-// Advanced spanners — octave lines
+// Advanced spanners -- octave lines (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddOctaveLine(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(0);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
@@ -2910,20 +3336,30 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveOctaveLine(const QJsonOb
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "octave line not found");
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
     }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
-    Ottava* ottava = dynamic_cast<Ottava*>(obj);
+    const QJsonObject sb = body["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+
+    Ottava* ottava = nullptr;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isOttava()) continue;
+        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) continue;
+        if (sp->tick() == startTick) {
+            ottava = toOttava(sp);
+            break;
+        }
+    }
     if (!ottava) {
-        return errorResponse(422,
-                             "element is not an Ottava");
+        return errorResponse(404, "octave line not found");
     }
 
     score->startCmd(TranslatableString("test", "remove octave line"));
@@ -2934,36 +3370,37 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveOctaveLine(const QJsonOb
 }
 
 // ---------------------------------------------------------------------------
-// Advanced spanners — glissandos
+// Advanced spanners -- glissandos (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddGlissando(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString startId = body["start_event_id"].toString();
-    const QString endId   = body["end_event_id"].toString();
-
-    EngravingObject* startObj = findByUuid(startId);
-    EngravingObject* endObj   = findByUuid(endId);
-    if (!startObj || !endObj) {
-        return errorResponse(404, "event not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    auto toCR = [](EngravingObject* o) -> ChordRest* {
-        if (o->isNote()) return toNote(static_cast<EngravingItem*>(o))->chord();
-        if (o->isChordRest()) return toChordRest(static_cast<EngravingItem*>(o));
-        return nullptr;
-    };
-    ChordRest* startCR = toCR(startObj);
-    ChordRest* endCR   = toCR(endObj);
+    // Start coordinate.
+    const QJsonObject sb = body["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const int startVoice = body.value("start_voice").toInt(body.value("voice").toInt(1));
+    const int startStaff = body.value("start_staff").toInt(body.value("staff").toInt(0));
+
+    // End coordinate.
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const int endVoice = body.value("end_voice").toInt(startVoice);
+    const int endStaff = body.value("end_staff").toInt(startStaff);
+
+    ChordRest* startCR = findChordRestAtCoord(score, part, startTick, startVoice, startStaff);
+    ChordRest* endCR   = findChordRestAtCoord(score, part, endTick, endVoice, endStaff);
     if (!startCR || !endCR) {
-        return errorResponse(422,
-                             "event is not a note or chordrest");
+        return errorResponse(422, "glissando endpoint not found");
     }
 
     // Glissandos anchor to Notes, not ChordRests.
@@ -2997,20 +3434,37 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveGlissando(const QJsonObj
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "glissando not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    Glissando* gliss = dynamic_cast<Glissando*>(obj);
+    const QJsonObject sb = body["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const int startVoice = body.value("start_voice").toInt(body.value("voice").toInt(1));
+    const int startStaff = body.value("start_staff").toInt(body.value("staff").toInt(0));
+
+    ChordRest* startCR = findChordRestAtCoord(score, part, startTick, startVoice, startStaff);
+    if (!startCR || !startCR->isChord()) {
+        return errorResponse(404, "chord not found at coordinate");
+    }
+
+    // Search for glissando starting from notes on this chord.
+    Glissando* gliss = nullptr;
+    for (Note* note : toChord(startCR)->notes()) {
+        for (Spanner* sp : note->spannerFor()) {
+            if (sp->isGlissando()) {
+                gliss = toGlissando(sp);
+                break;
+            }
+        }
+        if (gliss) break;
+    }
     if (!gliss) {
-        return errorResponse(422,
-                             "element is not a Glissando");
+        return errorResponse(404, "glissando not found");
     }
 
     score->startCmd(TranslatableString("test", "remove glissando"));
@@ -3021,21 +3475,19 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveGlissando(const QJsonObj
 }
 
 // ---------------------------------------------------------------------------
-// Advanced spanners — pedal lines
+// Advanced spanners -- pedal lines (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddPedalLine(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(0);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
@@ -3059,20 +3511,30 @@ EditudeTestServer::Reply EditudeTestServer::actionRemovePedalLine(const QJsonObj
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "pedal line not found");
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
     }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
-    Pedal* pedal = dynamic_cast<Pedal*>(obj);
+    const QJsonObject sb = body["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+
+    Pedal* pedal = nullptr;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isPedal()) continue;
+        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) continue;
+        if (sp->tick() == startTick) {
+            pedal = toPedal(sp);
+            break;
+        }
+    }
     if (!pedal) {
-        return errorResponse(422,
-                             "element is not a Pedal");
+        return errorResponse(404, "pedal line not found");
     }
 
     score->startCmd(TranslatableString("test", "remove pedal line"));
@@ -3083,21 +3545,19 @@ EditudeTestServer::Reply EditudeTestServer::actionRemovePedalLine(const QJsonObj
 }
 
 // ---------------------------------------------------------------------------
-// Advanced spanners — trill lines
+// Advanced spanners -- trill lines (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddTrillLine(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(0);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
@@ -3142,20 +3602,30 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTrillLine(const QJsonObj
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "trill line not found");
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
     }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
-    Trill* trill = dynamic_cast<Trill*>(obj);
+    const QJsonObject sb = body["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+
+    Trill* trill = nullptr;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isTrill()) continue;
+        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) continue;
+        if (sp->tick() == startTick) {
+            trill = toTrill(sp);
+            break;
+        }
+    }
     if (!trill) {
-        return errorResponse(422,
-                             "element is not a Trill");
+        return errorResponse(404, "trill line not found");
     }
 
     score->startCmd(TranslatableString("test", "remove trill line"));
@@ -3169,25 +3639,22 @@ EditudeTestServer::Reply EditudeTestServer::actionAddLyric(const QJsonObject& bo
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString eventId = body["event_id"].toString();
-    EngravingObject* obj = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(404, "event not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    ChordRest* cr = nullptr;
-    if (obj->isNote()) {
-        cr = toNote(static_cast<EngravingItem*>(obj))->chord();
-    } else if (obj->isChordRest()) {
-        cr = toChordRest(static_cast<EngravingItem*>(obj));
-    }
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
     if (!cr) {
-        return errorResponse(422,
-                             "event is not a note or chordrest");
+        return errorResponse(404, "chordrest not found at coordinate");
     }
 
     const int verse      = body.value("verse").toInt(0);
@@ -3219,20 +3686,35 @@ EditudeTestServer::Reply EditudeTestServer::actionSetLyric(const QJsonObject& bo
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "lyric not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    Lyrics* lyric = dynamic_cast<Lyrics*>(obj);
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+    const int verse = body.value("verse").toInt(0);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr) {
+        return errorResponse(404, "chordrest not found at coordinate");
+    }
+
+    // Find lyric by verse number on this ChordRest.
+    Lyrics* lyric = nullptr;
+    for (Lyrics* lyr : cr->lyrics()) {
+        if (lyr->verse() == verse) {
+            lyric = lyr;
+            break;
+        }
+    }
     if (!lyric) {
-        return errorResponse(422,
-                             "element is not Lyrics");
+        return errorResponse(404, "lyric not found");
     }
 
     const QString text = body["text"].toString();
@@ -3247,20 +3729,34 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveLyric(const QJsonObject&
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "lyric not found");
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
     }
 
-    Lyrics* lyric = dynamic_cast<Lyrics*>(obj);
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+    const int verse = body.value("verse").toInt(0);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr) {
+        return errorResponse(404, "chordrest not found at coordinate");
+    }
+
+    Lyrics* lyric = nullptr;
+    for (Lyrics* lyr : cr->lyrics()) {
+        if (lyr->verse() == verse) {
+            lyric = lyr;
+            break;
+        }
+    }
     if (!lyric) {
-        return errorResponse(422,
-                             "element is not Lyrics");
+        return errorResponse(404, "lyric not found");
     }
 
     score->startCmd(TranslatableString("test", "remove lyric"));
@@ -3271,7 +3767,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveLyric(const QJsonObject&
 }
 
 // ---------------------------------------------------------------------------
-// Staff text action handlers
+// Staff text action handlers -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddStaffText(const QJsonObject& body)
@@ -3318,15 +3814,32 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStaffText(const QJsonObject
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "staff text not found");
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
     }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
-    StaffText* st = dynamic_cast<StaffText*>(obj);
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    // Find staff text at this beat in this part.
+    StaffText* st = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::STAFF_TEXT) continue;
+                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) continue;
+                st = static_cast<StaffText*>(el);
+                break;
+            }
+            if (st) break;
+        }
+    }
     if (!st) {
-        return errorResponse(422, "element is not StaffText");
+        return errorResponse(404, "staff text not found");
     }
 
     const QString text = body["text"].toString();
@@ -3344,15 +3857,31 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveStaffText(const QJsonObj
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "staff text not found");
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
     }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
-    StaffText* st = dynamic_cast<StaffText*>(obj);
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+
+    StaffText* st = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::STAFF_TEXT) continue;
+                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) continue;
+                st = static_cast<StaffText*>(el);
+                break;
+            }
+            if (st) break;
+        }
+    }
     if (!st) {
-        return errorResponse(422, "element is not StaffText");
+        return errorResponse(404, "staff text not found");
     }
 
     score->startCmd(TranslatableString("test", "remove staff text"));
@@ -3363,7 +3892,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveStaffText(const QJsonObj
 }
 
 // ---------------------------------------------------------------------------
-// System text action handlers
+// System text action handlers -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddSystemText(const QJsonObject& body)
@@ -3404,15 +3933,25 @@ EditudeTestServer::Reply EditudeTestServer::actionSetSystemText(const QJsonObjec
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "system text not found");
-    }
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
 
-    SystemText* st = dynamic_cast<SystemText*>(obj);
+    // Find system text at this beat (track 0, annotations).
+    SystemText* st = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::SYSTEM_TEXT) continue;
+                st = static_cast<SystemText*>(el);
+                break;
+            }
+            if (st) break;
+        }
+    }
     if (!st) {
-        return errorResponse(422, "element is not SystemText");
+        return errorResponse(404, "system text not found");
     }
 
     const QString text = body["text"].toString();
@@ -3430,15 +3969,24 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveSystemText(const QJsonOb
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "system text not found");
-    }
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
 
-    SystemText* st = dynamic_cast<SystemText*>(obj);
+    SystemText* st = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::SYSTEM_TEXT) continue;
+                st = static_cast<SystemText*>(el);
+                break;
+            }
+            if (st) break;
+        }
+    }
     if (!st) {
-        return errorResponse(422, "element is not SystemText");
+        return errorResponse(404, "system text not found");
     }
 
     score->startCmd(TranslatableString("test", "remove system text"));
@@ -3449,7 +3997,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveSystemText(const QJsonOb
 }
 
 // ---------------------------------------------------------------------------
-// Rehearsal mark action handlers
+// Rehearsal mark action handlers -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddRehearsalMark(const QJsonObject& body)
@@ -3490,15 +4038,24 @@ EditudeTestServer::Reply EditudeTestServer::actionSetRehearsalMark(const QJsonOb
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "rehearsal mark not found");
-    }
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
 
-    RehearsalMark* rm = dynamic_cast<RehearsalMark*>(obj);
+    RehearsalMark* rm = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::REHEARSAL_MARK) continue;
+                rm = static_cast<RehearsalMark*>(el);
+                break;
+            }
+            if (rm) break;
+        }
+    }
     if (!rm) {
-        return errorResponse(422, "element is not RehearsalMark");
+        return errorResponse(404, "rehearsal mark not found");
     }
 
     const QString text = body["text"].toString();
@@ -3516,15 +4073,24 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveRehearsalMark(const QJso
         return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "rehearsal mark not found");
-    }
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
 
-    RehearsalMark* rm = dynamic_cast<RehearsalMark*>(obj);
+    RehearsalMark* rm = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::REHEARSAL_MARK) continue;
+                rm = static_cast<RehearsalMark*>(el);
+                break;
+            }
+            if (rm) break;
+        }
+    }
     if (!rm) {
-        return errorResponse(422, "element is not RehearsalMark");
+        return errorResponse(404, "rehearsal mark not found");
     }
 
     score->startCmd(TranslatableString("test", "remove rehearsal mark"));
@@ -3535,7 +4101,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveRehearsalMark(const QJso
 }
 
 // ---------------------------------------------------------------------------
-// Tier 4 action handlers
+// Tier 4 action handlers -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionSetStartRepeat(const QJsonObject& body)
@@ -3595,40 +4161,39 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertVolta(const QJsonObject&
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     QJsonObject op = body;
     op["type"] = "InsertVolta";
-    if (!op.contains("id")) {
-        op["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    }
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(500,
-                        "insert_volta failed");
+        : errorResponse(500, "insert_volta failed");
 }
 
 EditudeTestServer::Reply EditudeTestServer::actionRemoveVolta(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "volta not found");
-    }
+    const QJsonObject sb = body["start_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
 
-    Volta* volta = dynamic_cast<Volta*>(obj);
+    // Find volta by start beat.
+    Volta* volta = nullptr;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (!sp->isVolta()) continue;
+        if (sp->tick() == startTick) {
+            volta = toVolta(sp);
+            break;
+        }
+    }
     if (!volta) {
-        return errorResponse(422,
-                             "element is not a Volta");
+        return errorResponse(404, "volta not found");
     }
 
     score->startCmd(TranslatableString("test", "remove volta"));
@@ -3642,40 +4207,43 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertMarker(const QJsonObject
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     QJsonObject op = body;
     op["type"] = "InsertMarker";
-    if (!op.contains("id")) {
-        op["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    }
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(500,
-                        "insert_marker failed");
+        : errorResponse(500, "insert_marker failed");
 }
 
 EditudeTestServer::Reply EditudeTestServer::actionRemoveMarker(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "marker not found");
-    }
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const QString kind = body["kind"].toString();
 
-    Marker* marker = dynamic_cast<Marker*>(obj);
+    // Find marker by beat + kind.
+    Marker* marker = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (EngravingItem* el : measure->el()) {
+            if (!el || !el->isMarker()) continue;
+            Marker* m = toMarker(el);
+            if (m->tick() == tick && markerKindName(m->markerType()) == kind) {
+                marker = m;
+                break;
+            }
+        }
+    }
     if (!marker) {
-        return errorResponse(422,
-                             "element is not a Marker");
+        return errorResponse(404, "marker not found");
     }
 
     score->startCmd(TranslatableString("test", "remove marker"));
@@ -3689,40 +4257,42 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertJump(const QJsonObject& 
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     QJsonObject op = body;
     op["type"] = "InsertJump";
-    if (!op.contains("id")) {
-        op["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    }
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(500,
-                        "insert_jump failed");
+        : errorResponse(500, "insert_jump failed");
 }
 
 EditudeTestServer::Reply EditudeTestServer::actionRemoveJump(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404, "jump not found");
-    }
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
 
-    Jump* jump = dynamic_cast<Jump*>(obj);
+    // Find jump by beat.
+    Jump* jump = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (EngravingItem* el : measure->el()) {
+            if (!el || !el->isJump()) continue;
+            Jump* j = toJump(el);
+            if (j->tick() == tick) {
+                jump = j;
+                break;
+            }
+        }
+    }
     if (!jump) {
-        return errorResponse(422,
-                             "element is not a Jump");
+        return errorResponse(404, "jump not found");
     }
 
     score->startCmd(TranslatableString("test", "remove jump"));
@@ -3771,8 +4341,7 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertBeats(const QJsonObject&
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     QJsonObject op = body;
@@ -3780,16 +4349,14 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertBeats(const QJsonObject&
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(500,
-                        "insert_beats failed");
+        : errorResponse(500, "insert_beats failed");
 }
 
 EditudeTestServer::Reply EditudeTestServer::actionDeleteBeats(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     QJsonObject op = body;
@@ -3797,16 +4364,14 @@ EditudeTestServer::Reply EditudeTestServer::actionDeleteBeats(const QJsonObject&
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(500,
-                        "delete_beats failed");
+        : errorResponse(500, "delete_beats failed");
 }
 
 EditudeTestServer::Reply EditudeTestServer::actionSetScoreMetadata(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     QJsonObject op = body;
@@ -3814,8 +4379,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetScoreMetadata(const QJsonOb
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(500,
-                        "set_score_metadata failed");
+        : errorResponse(500, "set_score_metadata failed");
 }
 
 EditudeTestServer::Reply EditudeTestServer::actionSetConcertPitch(const QJsonObject& body)
@@ -3826,296 +4390,35 @@ EditudeTestServer::Reply EditudeTestServer::actionSetConcertPitch(const QJsonObj
     }
 
     const bool on = body.value("concert_pitch").toBool(true);
-    // Set the style directly — no undo command.  This changes the display
+    // Set the style directly -- no undo command.  This changes the display
     // mode without generating an OT op or affecting the undo stack.
     score->style().set(Sid::concertPitch, PropertyValue(on));
     return okResponse();
 }
 
 // ---------------------------------------------------------------------------
-// Tier 1 extended action handlers
-// ---------------------------------------------------------------------------
-
-EditudeTestServer::Reply EditudeTestServer::actionInsertChord(const QJsonObject& body)
-{
-    Score* score = m_svc->scoreForTest();
-    if (!score) {
-        return errorResponse(503,
-                             "score not ready");
-    }
-
-    const QJsonObject beatObj = body["beat"].toObject();
-    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
-    const QJsonArray pitches  = body["pitches"].toArray();
-    const QJsonObject durObj  = body["duration"].toObject();
-    const track_idx_t track   = static_cast<track_idx_t>(body.value("track").toInt(0));
-
-    if (pitches.isEmpty()) {
-        return errorResponse(422,
-                             "pitches array required");
-    }
-
-    const DurationType dt = ScoreApplicator::parseDurationType(durObj["type"].toString());
-    if (dt == DurationType::V_INVALID) {
-        return errorResponse(422,
-                             "invalid duration type");
-    }
-    const int dots = durObj["dots"].toInt(0);
-
-    QVector<int> midiPitches;
-    for (const QJsonValue& v : pitches) {
-        const QJsonObject p = v.toObject();
-        const int midi = ScoreApplicator::pitchToMidi(
-            p["step"].toString(), p["octave"].toInt(), p["accidental"].toString());
-        if (midi < 0 || midi > 127) {
-            return errorResponse(422,
-                                 "invalid pitch in pitches array");
-        }
-        midiPitches.append(midi);
-    }
-
-    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
-    if (!seg) {
-        return errorResponse(422,
-                             "beat not found in score");
-    }
-
-    TDuration dur(dt);
-    dur.setDots(dots);
-
-    score->startCmd(TranslatableString("test", "insert chord"));
-    score->setNoteRest(seg, track, NoteVal(midiPitches[0]), dur.ticks());
-
-    // Locate the chord just created and add remaining pitches.
-    Segment* seg2 = score->tick2segment(tick, false, SegmentType::ChordRest);
-    Chord* chord  = nullptr;
-    if (seg2) {
-        EngravingItem* el = seg2->element(track);
-        if (el && el->type() == ElementType::CHORD) {
-            chord = toChord(el);
-        }
-    }
-    if (chord) {
-        for (int i = 1; i < midiPitches.size(); ++i) {
-            score->addNote(chord, NoteVal(midiPitches[i]));
-        }
-    }
-    score->endCmd();
-    return okResponse();
-}
-
-EditudeTestServer::Reply EditudeTestServer::actionAddChordNote(const QJsonObject& body)
-{
-    Score* score = m_svc->scoreForTest();
-    if (!score) {
-        return errorResponse(503,
-                             "score not ready");
-    }
-
-    const QString eventId = body["event_id"].toString();
-    EngravingObject* obj  = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(404, "chord not found");
-    }
-
-    Chord* chord = nullptr;
-    if (obj->isChord()) {
-        chord = toChord(static_cast<EngravingItem*>(obj));
-    } else if (obj->isNote()) {
-        chord = toNote(static_cast<EngravingItem*>(obj))->chord();
-    }
-    if (!chord) {
-        return errorResponse(422,
-                             "event is not a chord");
-    }
-
-    const QJsonObject pitchObj = body["pitch"].toObject();
-    const int midi = ScoreApplicator::pitchToMidi(
-        pitchObj["step"].toString(), pitchObj["octave"].toInt(),
-        pitchObj["accidental"].toString());
-    if (midi < 0 || midi > 127) {
-        return errorResponse(422,
-                             "invalid pitch");
-    }
-
-    score->startCmd(TranslatableString("test", "add chord note"));
-    score->addNote(chord, NoteVal(midi));
-    score->endCmd();
-    return okResponse();
-}
-
-EditudeTestServer::Reply EditudeTestServer::actionRemoveChordNote(const QJsonObject& body)
-{
-    Score* score = m_svc->scoreForTest();
-    if (!score) {
-        return errorResponse(503,
-                             "score not ready");
-    }
-
-    const QString eventId = body["event_id"].toString();
-    EngravingObject* obj  = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(404, "chord not found");
-    }
-
-    Chord* chord = nullptr;
-    if (obj->isChord()) {
-        chord = toChord(static_cast<EngravingItem*>(obj));
-    } else if (obj->isNote()) {
-        chord = toNote(static_cast<EngravingItem*>(obj))->chord();
-    }
-    if (!chord) {
-        return errorResponse(422,
-                             "event is not a chord");
-    }
-
-    const QJsonObject pitchObj = body["pitch"].toObject();
-    const int midi = ScoreApplicator::pitchToMidi(
-        pitchObj["step"].toString(), pitchObj["octave"].toInt(),
-        pitchObj["accidental"].toString());
-    if (midi < 0 || midi > 127) {
-        return errorResponse(422,
-                             "invalid pitch");
-    }
-
-    Note* target = nullptr;
-    for (Note* n : chord->notes()) {
-        if (n->pitch() == midi) {
-            target = n;
-            break;
-        }
-    }
-    if (!target) {
-        return errorResponse(404,
-                             "pitch not found in chord");
-    }
-
-    score->startCmd(TranslatableString("test", "remove chord note"));
-    score->deleteItem(target);
-    score->endCmd();
-    return okResponse();
-}
-
-EditudeTestServer::Reply EditudeTestServer::actionSetTie(const QJsonObject& body)
-{
-    Score* score = m_svc->scoreForTest();
-    if (!score) {
-        return errorResponse(503,
-                             "score not ready");
-    }
-
-    const QString eventId = body["event_id"].toString();
-    EngravingObject* obj  = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(404, "event not found");
-    }
-
-    Note* note = dynamic_cast<Note*>(obj);
-    if (!note) {
-        return errorResponse(422,
-                             "element is not a Note");
-    }
-
-    const QJsonValue tieVal = body["tie"];
-    const bool wantTie = !tieVal.isNull() && !tieVal.isUndefined()
-                         && tieVal.toString() != QStringLiteral("stop");
-
-    score->startCmd(TranslatableString("test", "set tie"));
-    if (wantTie) {
-        if (!note->tieFor()) {
-            // Find the next chord/rest in the same track.
-            Note* endNote = nullptr;
-            for (Segment* s = note->chord()->segment()->next(SegmentType::ChordRest);
-                 s; s = s->next(SegmentType::ChordRest)) {
-                EngravingItem* el = s->element(note->track());
-                if (!el || !el->isChord()) {
-                    break;
-                }
-                Chord* nextChord = toChord(el);
-                for (Note* n : nextChord->notes()) {
-                    if (n->pitch() == note->pitch()) {
-                        endNote = n;
-                        break;
-                    }
-                }
-                if (endNote) break;
-            }
-            Tie* tie = Factory::createTie(note);
-            tie->setStartNote(note);
-            tie->setTrack(note->track());
-            tie->setTick(note->chord()->segment()->tick());
-            if (endNote) {
-                if (endNote->tieBack()) {
-                    score->undoRemoveElement(endNote->tieBack());
-                }
-                tie->setEndNote(endNote);
-                tie->setTicks(endNote->chord()->segment()->tick()
-                              - note->chord()->segment()->tick());
-            }
-            score->undoAddElement(tie);
-        }
-    } else {
-        if (note->tieFor()) {
-            score->undoRemoveElement(note->tieFor());
-        }
-    }
-    score->endCmd();
-    return okResponse();
-}
-
-EditudeTestServer::Reply EditudeTestServer::actionSetTrack(const QJsonObject& body)
-{
-    Score* score = m_svc->scoreForTest();
-    if (!score) {
-        return errorResponse(503,
-                             "score not ready");
-    }
-
-    const QString eventId = body["event_id"].toString();
-    EngravingObject* obj  = findByUuid(eventId);
-    if (!obj) {
-        return errorResponse(404, "event not found");
-    }
-
-    auto* item = dynamic_cast<EngravingItem*>(obj);
-    if (!item) {
-        return errorResponse(422,
-                             "element is not an EngravingItem");
-    }
-
-    const track_idx_t newTrack = static_cast<track_idx_t>(body["track"].toInt(0));
-    score->startCmd(TranslatableString("test", "set track"));
-    item->undoChangeProperty(Pid::TRACK, newTrack);
-    score->endCmd();
-    return okResponse();
-}
-
-// ---------------------------------------------------------------------------
-// Tier 2 — score directive action handlers
+// Tier 2 -- score directive action handlers
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionSetTimeSignature(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
     QJsonObject op = body;
     op["type"] = "SetTimeSignature";
     ScoreApplicator applicator;
     return applicator.apply(score, op)
         ? okResponse()
-        : errorResponse(500,
-                        "set_time_signature failed");
+        : errorResponse(500, "set_time_signature failed");
 }
 
 EditudeTestServer::Reply EditudeTestServer::actionSetTempo(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const QJsonObject beatObj = body["beat"].toObject();
@@ -4123,14 +4426,12 @@ EditudeTestServer::Reply EditudeTestServer::actionSetTempo(const QJsonObject& bo
     const QJsonObject tempoObj = body["tempo"].toObject();
     const double bpm = tempoObj["bpm"].toDouble(0.0);
     if (bpm <= 0.0) {
-        return errorResponse(422,
-                             "invalid bpm");
+        return errorResponse(422, "invalid bpm");
     }
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
-        return errorResponse(422,
-                             "beat not found in score");
+        return errorResponse(422, "beat not found in score");
     }
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
 
@@ -4149,14 +4450,12 @@ EditudeTestServer::Reply EditudeTestServer::actionSetKeySignature(const QJsonObj
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
@@ -4166,14 +4465,12 @@ EditudeTestServer::Reply EditudeTestServer::actionSetKeySignature(const QJsonObj
     const QJsonObject ksSigObj = body["key_signature"].toObject();
     const int sharps = ksSigObj["sharps"].toInt(0);
     if (sharps < -7 || sharps > 7) {
-        return errorResponse(422,
-                             "sharps out of range (-7..7)");
+        return errorResponse(422, "sharps out of range (-7..7)");
     }
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
-        return errorResponse(422,
-                             "beat not found in score");
+        return errorResponse(422, "beat not found in score");
     }
 
     const staff_idx_t firstStaff = part->startTrack() / VOICES;
@@ -4198,14 +4495,12 @@ EditudeTestServer::Reply EditudeTestServer::actionSetClef(const QJsonObject& bod
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const int partIndex = body.value("part_index").toInt(-1);
     if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
-        return errorResponse(422,
-                             "part_index out of range");
+        return errorResponse(422, "part_index out of range");
     }
     Part* part = score->parts().at(static_cast<size_t>(partIndex));
 
@@ -4237,19 +4532,16 @@ EditudeTestServer::Reply EditudeTestServer::actionSetClef(const QJsonObject& bod
     };
     const ClefType ct = s_clefMap.value(clefName, ClefType::INVALID);
     if (ct == ClefType::INVALID) {
-        return errorResponse(422,
-                             "unknown clef name");
+        return errorResponse(422, "unknown clef name");
     }
 
     if (staffIdx < 0 || staffIdx >= static_cast<int>(part->nstaves())) {
-        return errorResponse(422,
-                             "staff index out of range");
+        return errorResponse(422, "staff index out of range");
     }
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
-        return errorResponse(422,
-                             "beat not found in score");
+        return errorResponse(422, "beat not found in score");
     }
 
     const track_idx_t track = (part->startTrack() / VOICES + staffIdx) * VOICES;
@@ -4266,29 +4558,26 @@ EditudeTestServer::Reply EditudeTestServer::actionSetClef(const QJsonObject& bod
 }
 
 // ---------------------------------------------------------------------------
-// Tier 3 — chord symbol action handlers
+// Tier 3 -- chord symbol action handlers (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
 EditudeTestServer::Reply EditudeTestServer::actionAddChordSymbol(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
     const QJsonObject beatObj = body["beat"].toObject();
     const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
     const QString name = body["name"].toString();
     if (name.isEmpty()) {
-        return errorResponse(422,
-                             "name required");
+        return errorResponse(422, "name required");
     }
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
-        return errorResponse(422,
-                             "beat not found in score");
+        return errorResponse(422, "beat not found in score");
     }
 
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
@@ -4308,21 +4597,28 @@ EditudeTestServer::Reply EditudeTestServer::actionSetChordSymbol(const QJsonObje
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404,
-                             "chord symbol not found");
-    }
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
 
-    Harmony* harmony = dynamic_cast<Harmony*>(obj);
+    // Find chord symbol at this beat.
+    Harmony* harmony = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::HARMONY) continue;
+                harmony = static_cast<Harmony*>(el);
+                break;
+            }
+            if (harmony) break;
+        }
+    }
     if (!harmony) {
-        return errorResponse(422,
-                             "element is not a Harmony");
+        return errorResponse(404, "chord symbol not found");
     }
 
     const QString name = body["name"].toString();
@@ -4336,21 +4632,27 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveChordSymbol(const QJsonO
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
-        return errorResponse(503,
-                             "score not ready");
+        return errorResponse(503, "score not ready");
     }
 
-    const QString id = body["id"].toString();
-    EngravingObject* obj = findByUuid(id);
-    if (!obj) {
-        return errorResponse(404,
-                             "chord symbol not found");
-    }
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
 
-    Harmony* harmony = dynamic_cast<Harmony*>(obj);
+    Harmony* harmony = nullptr;
+    Measure* measure = score->tick2measure(tick);
+    if (measure) {
+        for (Segment* seg = measure->first(); seg; seg = seg->next()) {
+            if (seg->tick() != tick) continue;
+            for (EngravingItem* el : seg->annotations()) {
+                if (!el || el->type() != ElementType::HARMONY) continue;
+                harmony = static_cast<Harmony*>(el);
+                break;
+            }
+            if (harmony) break;
+        }
+    }
     if (!harmony) {
-        return errorResponse(422,
-                             "element is not a Harmony");
+        return errorResponse(404, "chord symbol not found");
     }
 
     score->startCmd(TranslatableString("test", "remove chord symbol"));
@@ -4497,6 +4799,7 @@ QJsonObject EditudeTestServer::serializeScoreChordSymbols()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int csIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(); seg; seg = seg->next()) {
             for (EngravingItem* el : seg->annotations()) {
@@ -4504,12 +4807,8 @@ QJsonObject EditudeTestServer::serializeScoreChordSymbols()
                     continue;
                 }
                 Harmony* harmony = static_cast<Harmony*>(el);
-                const QString uuid = uuidForElement(harmony);
-                if (uuid.isEmpty()) {
-                    continue;
-                }
-                result[uuid] = QJsonObject{
-                    { "id",   uuid },
+                const QString key = QString::number(csIndex++);
+                result[key] = QJsonObject{
                     { "beat", beatJson(seg->tick()) },
                     { "name", harmony->harmonyName().toQString() },
                 };
@@ -4523,6 +4822,7 @@ QJsonObject EditudeTestServer::serializePartStaffTexts(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int stIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(); seg; seg = seg->next()) {
             for (EngravingItem* el : seg->annotations()) {
@@ -4533,12 +4833,8 @@ QJsonObject EditudeTestServer::serializePartStaffTexts(Part* part)
                     continue;
                 }
                 StaffText* st = static_cast<StaffText*>(el);
-                const QString uuid = uuidForElement(st);
-                if (uuid.isEmpty()) {
-                    continue;
-                }
-                result[uuid] = QJsonObject{
-                    { "id",   uuid },
+                const QString key = QString::number(stIndex++);
+                result[key] = QJsonObject{
                     { "beat", beatJson(seg->tick()) },
                     { "text", st->plainText().toQString() },
                 };
@@ -4552,6 +4848,7 @@ QJsonObject EditudeTestServer::serializeScoreSystemTexts()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int stIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(); seg; seg = seg->next()) {
             for (EngravingItem* el : seg->annotations()) {
@@ -4559,12 +4856,8 @@ QJsonObject EditudeTestServer::serializeScoreSystemTexts()
                     continue;
                 }
                 SystemText* st = static_cast<SystemText*>(el);
-                const QString uuid = uuidForElement(st);
-                if (uuid.isEmpty()) {
-                    continue;
-                }
-                result[uuid] = QJsonObject{
-                    { "id",   uuid },
+                const QString key = QString::number(stIndex++);
+                result[key] = QJsonObject{
                     { "beat", beatJson(seg->tick()) },
                     { "text", st->plainText().toQString() },
                 };
@@ -4578,6 +4871,7 @@ QJsonObject EditudeTestServer::serializeScoreRehearsalMarks()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
+    int rmIndex = 0;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(); seg; seg = seg->next()) {
             for (EngravingItem* el : seg->annotations()) {
@@ -4585,12 +4879,8 @@ QJsonObject EditudeTestServer::serializeScoreRehearsalMarks()
                     continue;
                 }
                 RehearsalMark* rm = static_cast<RehearsalMark*>(el);
-                const QString uuid = uuidForElement(rm);
-                if (uuid.isEmpty()) {
-                    continue;
-                }
-                result[uuid] = QJsonObject{
-                    { "id",   uuid },
+                const QString key = QString::number(rmIndex++);
+                result[key] = QJsonObject{
                     { "beat", beatJson(seg->tick()) },
                     { "text", rm->plainText().toQString() },
                 };

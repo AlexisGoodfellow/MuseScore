@@ -58,9 +58,13 @@ void PresenceOverlay::updateCursor(const QString& contributorId, const QJsonObje
     cursor.endTick       = selection.value("end_tick").toInt(0);
     cursor.color         = colorFor(contributorId);
 
-    const QJsonArray ids = selection.value("element_ids").toArray();
-    for (const auto& v : ids) {
-        cursor.elementIds.append(v.toString());
+    const QJsonArray ticks = selection.value("element_ticks").toArray();
+    for (const auto& v : ticks) {
+        cursor.elementTicks.append(v.toInt());
+    }
+    const QJsonArray staves = selection.value("element_staves").toArray();
+    for (const auto& v : staves) {
+        cursor.elementStaves.append(v.toInt());
     }
 
     m_cursors.insert(contributorId, cursor);

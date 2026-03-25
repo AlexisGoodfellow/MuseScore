@@ -35,7 +35,10 @@ namespace mu::editude::internal {
 struct RemoteCursor {
     QString contributorId;
     QString state;            // "single" | "range" | "none"
-    QVector<QString> elementIds;
+    // For "single" state: ticks of each selected element (replaces old UUID list).
+    QVector<int> elementTicks;
+    // For "single" state: staff indices of each selected element.
+    QVector<int> elementStaves;
     int startStaff = 0;
     int endStaff   = 0;
     int startTick  = 0;

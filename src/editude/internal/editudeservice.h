@@ -70,18 +70,6 @@ public:
     mu::engraving::Score* scoreForTest() const { return m_score; }
     int serverRevisionForTest() const { return m_serverRevision; }
     mu::notation::INotationPtr currentNotationForTest() const { return m_currentNotation; }
-    const QHash<mu::engraving::EngravingObject*, QString>& applicatorElementToUuid() const
-    {
-        return m_applicator.elementToUuid();
-    }
-    const QHash<mu::engraving::EngravingObject*, QString>& translatorLocalElementToUuid() const
-    {
-        return m_translator.localElementToUuid();
-    }
-    const QHash<mu::engraving::EngravingObject*, QString>& applicatorTier3ElementToUuid() const
-    {
-        return m_applicator.tier3ElementToUuid();
-    }
     const QHash<mu::engraving::Part*, QString>& translatorKnownPartUuids() const
     {
         return m_translator.knownPartUuids();
