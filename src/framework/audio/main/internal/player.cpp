@@ -40,6 +40,11 @@ void Player::init()
 {
     ONLY_AUDIO_MAIN_THREAD;
 
+    //! NOTE Guard RPC response callbacks with weak_ptr so that a late
+    //! response arriving after Player destruction becomes a safe no-op
+    //! instead of a use-after-free.
+    auto weak = weak_from_this();
+
     //! NOTE Subscribe and request initial state
 
     {
@@ -48,17 +53,21 @@ void Player::init()
         });
 
         Msg msg = rpc::make_request(Method::GetPlaybackStatus, RpcPacker::pack(m_sequenceId));
-        channel()->send(msg, [this](const Msg& res) {
+        channel()->send(msg, [weak](const Msg& res) {
             ONLY_AUDIO_MAIN_THREAD;
+            auto self = weak.lock();
+            if (!self) {
+                return;
+            }
             PlaybackStatus status = PlaybackStatus::Stopped;
             StreamId streamId = 0;
             IF_ASSERT_FAILED(RpcPacker::unpack(res.data, status, streamId)) {
                 return;
             }
 
-            channel()->addReceiveStream(StreamName::PlaybackStatusStream, streamId, m_playbackStatusChanged);
+            self->channel()->addReceiveStream(StreamName::PlaybackStatusStream, streamId, self->m_playbackStatusChanged);
             //! NOTE Send initial state
-            m_playbackStatusChanged.send(status);
+            self->m_playbackStatusChanged.send(status);
         });
     }
 
@@ -68,17 +77,21 @@ void Player::init()
         });
 
         Msg msg = rpc::make_request(Method::GetPlaybackPosition, RpcPacker::pack(m_sequenceId));
-        channel()->send(msg, [this](const Msg& res) {
+        channel()->send(msg, [weak](const Msg& res) {
             ONLY_AUDIO_MAIN_THREAD;
+            auto self = weak.lock();
+            if (!self) {
+                return;
+            }
             secs_t pos = 0.0;
             StreamId streamId = 0;
             IF_ASSERT_FAILED(RpcPacker::unpack(res.data, pos, streamId)) {
                 return;
             }
 
-            channel()->addReceiveStream(StreamName::PlaybackPositionStream, streamId, m_playbackPositionChanged);
+            self->channel()->addReceiveStream(StreamName::PlaybackPositionStream, streamId, self->m_playbackPositionChanged);
             //! NOTE Send initial state
-            m_playbackPositionChanged.send(pos);
+            self->m_playbackPositionChanged.send(pos);
         });
     }
 }
@@ -92,10 +105,16 @@ TrackSequenceId Player::sequenceId() const
 async::Promise<Ret> Player::prepareToPlay()
 {
     ONLY_AUDIO_MAIN_THREAD;
-    return async::make_promise<Ret>([this](auto resolve, auto) {
+    auto weak = weak_from_this();
+    return async::make_promise<Ret>([weak](auto resolve, auto) {
         ONLY_AUDIO_MAIN_THREAD;
-        Msg msg = rpc::make_request(Method::PrepareToPlay, RpcPacker::pack(m_sequenceId));
-        channel()->send(msg, [resolve](const Msg& res) {
+        auto self = weak.lock();
+        if (!self) {
+            (void)resolve(make_ret(Ret::Code::UnknownError));
+            return Promise<Ret>::dummy_result();
+        }
+        Msg msg = rpc::make_request(Method::PrepareToPlay, RpcPacker::pack(self->m_sequenceId));
+        self->channel()->send(msg, [resolve](const Msg& res) {
             ONLY_AUDIO_MAIN_THREAD;
             Ret ret;
             IF_ASSERT_FAILED(RpcPacker::unpack(res.data, ret)) {
@@ -159,10 +178,16 @@ void Player::setDuration(const msecs_t durationMsec)
 async::Promise<bool> Player::setLoop(const msecs_t fromMsec, const msecs_t toMsec)
 {
     ONLY_AUDIO_MAIN_THREAD;
-    return async::make_promise<bool>([this, fromMsec, toMsec](auto resolve, auto reject) {
+    auto weak = weak_from_this();
+    return async::make_promise<bool>([weak, fromMsec, toMsec](auto resolve, auto reject) {
         ONLY_AUDIO_MAIN_THREAD;
-        Msg msg = rpc::make_request(Method::SetLoop, RpcPacker::pack(m_sequenceId, fromMsec, toMsec));
-        channel()->send(msg, [resolve, reject](const Msg& res) {
+        auto self = weak.lock();
+        if (!self) {
+            (void)reject(static_cast<int>(Ret::Code::UnknownError), std::string("Player no longer exists"));
+            return Promise<bool>::dummy_result();
+        }
+        Msg msg = rpc::make_request(Method::SetLoop, RpcPacker::pack(self->m_sequenceId, fromMsec, toMsec));
+        self->channel()->send(msg, [resolve, reject](const Msg& res) {
             ONLY_AUDIO_MAIN_THREAD;
             Ret ret;
             IF_ASSERT_FAILED(RpcPacker::unpack(res.data, ret)) {
