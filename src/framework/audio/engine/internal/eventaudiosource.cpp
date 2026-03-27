@@ -20,6 +20,13 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+// [editude] All IF_ASSERT_FAILED(m_synth) checks in this file have been replaced
+// with plain `if (!m_synth)` guards. When EDITUDE_SKIP_SOUNDFONTS is set, no
+// synthesiser can be resolved, leaving m_synth null.  The original assert aborts
+// in debug builds; the soft guard keeps the same control flow but allows e2e tests
+// (which don't need audio) to run without crashing.
+// [/editude]
+
 #include "eventaudiosource.h"
 
 #include "audio/common/audiosanitizer.h"
@@ -67,9 +74,12 @@ void EventAudioSource::setIsActive(const bool active)
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    // [editude] When EDITUDE_SKIP_SOUNDFONTS is set, m_synth may be null.
+    // Gracefully bail instead of aborting — e2e tests don't need audio.
+    if (!m_synth) {
         return;
     }
+    // [/editude]
 
     if (m_synth->isActive() == active) {
         return;
@@ -106,7 +116,7 @@ async::Channel<unsigned int> EventAudioSource::audioChannelsCountChanged() const
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return {};
     }
 
@@ -128,7 +138,7 @@ void EventAudioSource::seek(const msecs_t newPositionMsecs, const bool flushSoun
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return;
     }
 
@@ -147,7 +157,7 @@ void EventAudioSource::flush()
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return;
     }
 
@@ -179,10 +189,13 @@ void EventAudioSource::applyInputParams(const AudioInputParams& requiredParams)
 
     if (!m_synth) {
         m_synth = synthResolver()->resolveDefaultSynth(m_trackId, iocContext());
-        IF_ASSERT_FAILED(m_synth) {
-            LOGE() << "Default synth not found!";
+        // [editude] When EDITUDE_SKIP_SOUNDFONTS is set, no synth can be resolved.
+        // Gracefully bail instead of aborting — e2e tests validate score data, not audio.
+        if (!m_synth) {
+            LOGE() << "No synth available (soundfonts may be skipped)";
             return;
         }
+        // [/editude]
     }
 
     m_synth->paramsChanged().onReceive(this, [this](const AudioInputParams& params) {
@@ -210,7 +223,7 @@ void EventAudioSource::prepareToPlay()
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return;
     }
 
@@ -221,7 +234,7 @@ bool EventAudioSource::readyToPlay() const
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return false;
     }
 
@@ -232,7 +245,7 @@ async::Notification EventAudioSource::readyToPlayChanged() const
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return {};
     }
 
@@ -243,7 +256,7 @@ bool EventAudioSource::hasPendingChunks() const
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return false;
     }
 
@@ -254,7 +267,7 @@ void EventAudioSource::processInput()
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return;
     }
 
@@ -265,7 +278,7 @@ InputProcessingProgress EventAudioSource::inputProcessingProgress() const
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return {};
     }
 
@@ -276,7 +289,7 @@ void EventAudioSource::clearCache()
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return;
     }
 
@@ -302,7 +315,7 @@ void EventAudioSource::setupSource()
 {
     ONLY_AUDIO_ENGINE_THREAD;
 
-    IF_ASSERT_FAILED(m_synth) {
+    if (!m_synth) {
         return;
     }
 

@@ -353,9 +353,11 @@ Ret ProjectActionsController::doOpenProject(const muse::io::path_t& filePath)
     INotationProjectPtr project = rv.val;
 
     bool isNewlyCreated = projectAutoSaver()->isAutosaveOfNewlyCreatedProject(filePath);
-    if (!isNewlyCreated) {
+    // [editude] Skip recent-files update in e2e tests — the resulting native menu rebuild
+    // is extremely expensive under ASan (full QCocoaMenuItem::sync() for every menu item).
+    if (!isNewlyCreated && !qEnvironmentVariableIsSet("EDITUDE_TEST_PORT")) {
         recentFilesController()->prependRecentFile(makeRecentFile(project));
-    }
+    } // [/editude]
 
     globalContext()->setCurrentProject(project);
 
