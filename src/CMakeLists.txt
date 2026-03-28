@@ -109,9 +109,12 @@ endif()
 
 # App (main)
 add_subdirectory(app)
-if (MUE_CONFIGURATION_IS_APPWEB)
+# [editure] Skip web/appjs for editude builds — editude uses its own WS module
+# for real-time collaboration instead of the upstream JS bridge.
+if (MUE_CONFIGURATION_IS_APPWEB AND NOT MUE_BUILD_EDITUDE_MODULE)
     add_subdirectory(web/appjs)
 endif()
+# [/editure]
 
 if (MUE_BUILD_MACOS_INTEGRATION AND OS_IS_MAC)
     add_subdirectory(macos_integration)

@@ -174,7 +174,8 @@ void ApplicationUiActions::init()
         m_actionCheckedChanged.send({ TOGGLE_BRAILLE_ACTION_CODE });
     });
 
-    notationConfiguration()->useNewPercussionPanelChanged().onNotify(this, [this]() {
+    // [editude] percussion panel API moved to INotationSceneConfiguration
+    notationSceneConfiguration()->useNewPercussionPanelChanged().onNotify(this, [this]() {
         m_actionEnabledChanged.send({ TOGGLE_PERCUSSION_PANEL_ACTION_CODE });
     });
 }
@@ -210,7 +211,7 @@ const muse::ui::UiActionList& ApplicationUiActions::actionsList() const
 bool ApplicationUiActions::actionEnabled(const UiAction& act) const
 {
     if (act.code == TOGGLE_PERCUSSION_PANEL_ACTION_CODE) {
-        return notationConfiguration()->useNewPercussionPanel();
+        return notationSceneConfiguration()->useNewPercussionPanel(); // [editude]
     }
 
     return m_controller->canReceiveAction(act.code);

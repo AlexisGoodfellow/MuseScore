@@ -69,12 +69,13 @@ void NotationPageModel::init()
     updateDrumsetPanelVisibility();
     updatePercussionPanelVisibility();
 
-    notationConfiguration()->useNewPercussionPanelChanged().onNotify(this, [this]() {
+    // [editude] percussion panel APIs moved to INotationSceneConfiguration
+    notationSceneConfiguration()->useNewPercussionPanelChanged().onNotify(this, [this]() {
         updateDrumsetPanelVisibility();
         updatePercussionPanelVisibility();
     });
 
-    notationConfiguration()->percussionPanelAutoShowModeChanged().onNotify(this, [this]() {
+    notationSceneConfiguration()->percussionPanelAutoShowModeChanged().onNotify(this, [this]() {
         updatePercussionPanelVisibility();
     });
 }
@@ -212,7 +213,7 @@ void NotationPageModel::updateDrumsetPanelVisibility()
     };
 
     // This should never be open when the new percussion panel is in use...
-    if (notationConfiguration()->useNewPercussionPanel()) {
+    if (notationSceneConfiguration()->useNewPercussionPanel()) { // [editude]
         setDrumsetPanelOpen(false);
         return;
     }
@@ -252,19 +253,19 @@ void NotationPageModel::updatePercussionPanelVisibility()
     };
 
     // This should never be open when the old drumset panel is in use...
-    if (!notationConfiguration()->useNewPercussionPanel()) {
+    if (!notationSceneConfiguration()->useNewPercussionPanel()) { // [editude]
         setPercussionPanelOpen(false);
         return;
     }
 
-    const PercussionPanelAutoShowMode autoShowMode = notationConfiguration()->percussionPanelAutoShowMode();
+    const PercussionPanelAutoShowMode autoShowMode = notationSceneConfiguration()->percussionPanelAutoShowMode(); // [editude]
     const INotationPtr notation = globalContext()->currentNotation();
     if (!notation || !notation->elements() || autoShowMode == PercussionPanelAutoShowMode::NEVER) {
         return;
     }
 
     const INotationNoteInputPtr noteInput = notation->interaction()->noteInput();
-    const bool autoClose = notationConfiguration()->autoClosePercussionPanel();
+    const bool autoClose = notationSceneConfiguration()->autoClosePercussionPanel(); // [editude]
     if (noteInput && !noteInput->isNoteInputMode() && autoShowMode == PercussionPanelAutoShowMode::UNPITCHED_STAFF_NOTE_INPUT) {
         if (autoClose) {
             setPercussionPanelOpen(false);

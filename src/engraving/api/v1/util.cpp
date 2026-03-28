@@ -351,6 +351,8 @@ int FileIO::modifiedTime()
     return fileInfo.lastModified().toSecsSinceEpoch();
 }
 
+// [editude] QProcess not available in WASM — stub implementations are inline in the header
+#ifndef __EMSCRIPTEN__
 void MsProcess::start(const QString& command)
 {
     QT_WARNING_PUSH;
@@ -364,4 +366,6 @@ void MsProcess::startWithArgs(const QString& program, const QStringList& args)
 {
     QProcess::start(program, args, ReadWrite);
 }
+#endif
+// [/editude]
 }

@@ -31,6 +31,7 @@
 #include "context/iglobalcontext.h"
 #include "iappshellconfiguration.h"
 #include "notation/inotationconfiguration.h"
+#include "notationscene/inotationsceneconfiguration.h" // [editude] percussion panel APIs
 #include "braille/ibrailleconfiguration.h"
 #include "dockwindow/idockwindowprovider.h"
 
@@ -44,6 +45,7 @@ class NotationPageModel : public QObject, public muse::Contextable, public muse:
 
     muse::GlobalInject<IAppShellConfiguration> configuration;
     muse::GlobalInject<notation::INotationConfiguration> notationConfiguration;
+    muse::GlobalInject<notation::INotationSceneConfiguration> notationSceneConfiguration; // [editude]
     muse::GlobalInject<braille::IBrailleConfiguration> brailleConfiguration;
     muse::ContextInject<muse::actions::IActionsDispatcher> dispatcher = { this };
     muse::ContextInject<context::IGlobalContext> globalContext = { this };

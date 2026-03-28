@@ -29,15 +29,19 @@
 #include "audio/common/rpc/irpcchannel.h"
 
 namespace muse::audio {
-class WebSoundFontController : public ISoundFontController, public async::Asyncable
+// [editude] Added Contextable base and explicit constructor — ContextInject has
+// no default constructor after the upstream modularity refactor, so the class
+// must inherit Contextable and forward the IoC context.
+class WebSoundFontController : public ISoundFontController, public async::Asyncable, public muse::Contextable
 {
-    ContextInject<rpc::IRpcChannel> channel;
+    ContextInject<rpc::IRpcChannel> channel = { this };
 
 public:
-    WebSoundFontController() = default;
+    explicit WebSoundFontController(const muse::modularity::ContextPtr& iocCtx);
 
     void loadSoundFonts() override;
 
     void addSoundFont(const synth::SoundFontUri& uri) override;
 };
+// [/editude]
 }

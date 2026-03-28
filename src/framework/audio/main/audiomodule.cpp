@@ -41,7 +41,11 @@
 #include "internal/playback.h"
 #include "internal/audiodrivercontroller.h"
 
+// [editure] EngineGlobalSetup not compiled in WASM (WEBENGINE_FACADE_MODE)
+#ifndef Q_OS_WASM
 #include "audio/engine/enginesetup.h"
+#endif
+// [/editure]
 
 #include "diagnostics/idiagnosticspathsregister.h"
 
@@ -69,13 +73,19 @@ void AudioModule::registerExports()
     globalIoc()->registerExport<IAudioConfiguration>(mname, m_configuration);
     globalIoc()->registerExport<IAudioThreadSecurer>(mname, std::make_shared<AudioThreadSecurer>());
 
+    // [editure] EngineGlobalSetup not compiled in WASM (WEBENGINE_FACADE_MODE)
+#ifndef Q_OS_WASM
     m_engineGlobalSetup = std::make_shared<engine::EngineGlobalSetup>();
     m_engineGlobalSetup->registerExports();
+#endif
+    // [/editure]
 }
 
 void AudioModule::resolveImports()
 {
+#ifndef Q_OS_WASM
     m_engineGlobalSetup->resolveImports();
+#endif
 }
 
 void AudioModule::onInit(const IApplication::RunMode& mode)
@@ -98,7 +108,9 @@ void AudioModule::onInit(const IApplication::RunMode& mode)
 
 void AudioModule::onDeinit()
 {
+#ifndef Q_OS_WASM
     m_engineGlobalSetup->onDeinit();
+#endif
 }
 
 modularity::IContextSetup* AudioModule::newContext(const muse::modularity::ContextPtr& ctx) const
@@ -121,7 +133,7 @@ void AudioContext::registerExports()
 #endif
 
 #ifdef Q_OS_WASM
-    m_soundFontController = std::make_shared<WebSoundFontController>();
+    m_soundFontController = std::make_shared<WebSoundFontController>(iocContext()); // [editude] pass IoC context
 #else
     m_soundFontController = std::make_shared<GeneralSoundFontController>(iocContext());
 #endif

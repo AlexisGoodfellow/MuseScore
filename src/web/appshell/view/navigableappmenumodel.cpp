@@ -25,7 +25,10 @@
 #include <QWindow>
 #include <QKeyEvent>
 
+// [editure] QKeyMapper private API not available in WASM
+#ifndef __EMSCRIPTEN__
 #include <private/qkeymapper_p.h>
+#endif
 
 #include "log.h"
 
@@ -49,20 +52,32 @@ QSet<int> convertToSet(QList<QKeyCombination> keys)
 
 QSet<int> possibleKeys(QKeyEvent* keyEvent)
 {
+#ifdef __EMSCRIPTEN__
+    // [editude] QKeyMapper not available in WASM — return the key as-is
+    Q_UNUSED(keyEvent);
+    return {};
+#else
     QKeyEvent* correctedKeyEvent = keyEvent;
     //! NOTE: correct work only with alt modifier
     correctedKeyEvent->setModifiers(Qt::AltModifier);
 
     auto keys = QKeyMapper::possibleKeys(correctedKeyEvent);
     return convertToSet(keys);
+#endif
 }
 
 QSet<int> possibleKeys(const QChar& keySymbol)
 {
+#ifdef __EMSCRIPTEN__
+    // [editude] QKeyMapper not available in WASM
+    Q_UNUSED(keySymbol);
+    return {};
+#else
     QKeyEvent fakeKey(QKeyEvent::KeyRelease, Qt::Key_unknown, Qt::AltModifier, keySymbol);
     auto keys = QKeyMapper::possibleKeys(&fakeKey);
 
     return convertToSet(keys);
+#endif
 }
 
 NavigableAppMenuModel::NavigableAppMenuModel(QObject* parent)

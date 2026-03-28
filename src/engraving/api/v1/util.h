@@ -23,7 +23,9 @@
 #pragma once
 
 #include <QDir>
+#ifndef __EMSCRIPTEN__
 #include <QProcess>
+#endif
 
 #include "global/modularity/ioc.h"
 #include "global/iglobalconfiguration.h"
@@ -162,6 +164,24 @@ private:
 ///   plugin to be platform dependant. \since MuseScore 3.2
 //---------------------------------------------------------
 
+// [editude] QProcess is not available in WASM builds — provide a no-op stub
+#ifdef __EMSCRIPTEN__
+class MsProcess : public QObject
+{
+    Q_OBJECT
+
+public:
+    MsProcess(QObject* parent = 0)
+        : QObject(parent) {}
+
+public slots:
+    Q_INVOKABLE void start(const QString&) {}
+    Q_INVOKABLE void startWithArgs(const QString&, const QStringList&) {}
+    Q_INVOKABLE bool waitForFinished(int = 30000) { return false; }
+    Q_INVOKABLE QByteArray readAllStandardOutput() { return {}; }
+};
+#else
+// [/editude]
 class MsProcess : public QProcess
 {
     Q_OBJECT
@@ -185,4 +205,5 @@ public slots:
     /// --
     Q_INVOKABLE QByteArray readAllStandardOutput() { return QProcess::readAllStandardOutput(); }
 };
+#endif
 }

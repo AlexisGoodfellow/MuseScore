@@ -192,9 +192,11 @@ if (OS_IS_WIN)
     )
 endif()
 
-if (MUE_CONFIGURATION_IS_APPWEB)
+# [editure] Skip appjs for editude builds — uses its own WS module
+if (MUE_CONFIGURATION_IS_APPWEB AND NOT MUE_BUILD_EDITUDE_MODULE)
     list(APPEND LINK_LIB appjs)
 endif()
+# [/editure]
 
 ###########################################
 # Resources
@@ -226,9 +228,11 @@ if (MUE_ENABLE_CONSOLEAPP)
     )
 endif()
 
-if (CC_IS_EMCC)
+# [editure] Skip webapi_export for editude builds — uses its own WS module
+if (CC_IS_EMCC AND NOT MUE_BUILD_EDITUDE_MODULE)
     set(APP_SRC ${APP_SRC} webapi_export.cpp)
 endif()
+# [/editure]
 
 qt_add_executable(MuseScoreStudio
     WIN32 MACOSX_BUNDLE

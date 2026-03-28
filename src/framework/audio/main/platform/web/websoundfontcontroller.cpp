@@ -30,6 +30,13 @@
 using namespace muse::audio;
 using namespace muse::audio::rpc;
 
+// [editude] Constructor forwarding IoC context to Contextable base
+WebSoundFontController::WebSoundFontController(const muse::modularity::ContextPtr& iocCtx)
+    : Contextable(iocCtx)
+{
+}
+// [/editude]
+
 void WebSoundFontController::loadSoundFonts()
 {
     // noop

@@ -319,6 +319,23 @@ RetVal<bool> WebInteractive::isCurrentUriDialog() const
     return m_origin->isCurrentUriDialog();
 }
 
+// [editude] Added to match upstream IInteractive pure virtuals
+async::Notification WebInteractive::currentUriAboutToBeChanged() const
+{
+    return m_origin->currentUriAboutToBeChanged();
+}
+
+QWindow* WebInteractive::topWindow() const
+{
+    return m_origin->topWindow();
+}
+
+bool WebInteractive::topWindowIsWidget() const
+{
+    return m_origin->topWindowIsWidget();
+}
+// [/editude]
+
 std::vector<Uri> WebInteractive::stack() const
 {
     return m_origin->stack();

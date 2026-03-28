@@ -27,6 +27,10 @@ namespace muse::audio {
 //! NOTE Used in the main thread to control the driver.
 //! The callback from the Spec is not used and is not called.
 //! WebAudioChannel is used to transfer audio data
+// [editude] Synced with slimmed-down IAudioDriver interface (upstream removed
+// device-selection, buffer/sample-rate setters, resume/suspend, and changed
+// buffer/sample-rate vector element types from unsigned int to samples_t /
+// sample_rate_t).
 class WebAudioDriver : public IAudioDriver
 {
 public:
@@ -35,6 +39,7 @@ public:
     void init() override;
 
     std::string name() const override;
+    AudioDeviceID defaultDevice() const override;
     bool open(const Spec& spec, Spec* activeSpec) override;
     void close() override;
     bool isOpened() const override;
@@ -42,23 +47,10 @@ public:
     const Spec& activeSpec() const override;
     async::Channel<Spec> activeSpecChanged() const override;
 
-    bool setOutputDeviceBufferSize(unsigned int bufferSize) override;
-    async::Notification outputDeviceBufferSizeChanged() const override;
-    bool setOutputDeviceSampleRate(unsigned int sampleRate) override;
-    async::Notification outputDeviceSampleRateChanged() const override;
-    std::vector<unsigned int> availableOutputDeviceBufferSizes() const override;
-    std::vector<unsigned int> availableOutputDeviceSampleRates() const override;
-
-    AudioDeviceID outputDevice() const override;
-    bool selectOutputDevice(const AudioDeviceID& id) override;
-    bool resetToDefaultOutputDevice() override;
-    async::Notification outputDeviceChanged() const override;
-
+    std::vector<samples_t> availableOutputDeviceBufferSizes() const override;
+    std::vector<sample_rate_t> availableOutputDeviceSampleRates() const override;
     AudioDeviceList availableOutputDevices() const override;
     async::Notification availableOutputDevicesChanged() const override;
-
-    void resume() override;
-    void suspend() override;
 
 private:
 
@@ -66,4 +58,5 @@ private:
     Spec m_activeSpec;
     async::Channel<Spec> m_activeSpecChanged;
 };
+// [/editude]
 }

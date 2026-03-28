@@ -30,6 +30,7 @@
 #include "ui/imainwindow.h"
 #include "braille/ibrailleconfiguration.h"
 #include "notation/inotationconfiguration.h"
+#include "notationscene/inotationsceneconfiguration.h" // [editude] percussion panel APIs moved here
 #include "dockwindow/idockwindowprovider.h"
 #include "../iappshellconfiguration.h"
 
@@ -42,6 +43,7 @@ class ApplicationUiActions : public muse::ui::IUiActionsModule, public muse::Con
     muse::GlobalInject<IAppShellConfiguration> configuration;
     muse::GlobalInject<braille::IBrailleConfiguration> brailleConfiguration;
     muse::GlobalInject<mu::notation::INotationConfiguration> notationConfiguration;
+    muse::GlobalInject<notation::INotationSceneConfiguration> notationSceneConfiguration; // [editude]
     muse::ContextInject<muse::ui::IMainWindow> mainWindow = { this };
     muse::ContextInject<muse::dock::IDockWindowProvider> dockWindowProvider = { this };
 

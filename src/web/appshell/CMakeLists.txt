@@ -18,12 +18,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-declare_module(appshell)
+# [editude] Ported from legacy declare_module/setup_module to muse_create_module
+# to match the desktop appshell and the post-DeclareModule build system.
+muse_create_module(appshell)
 
-set(MODULE_QRC appshell.qrc)
-set(MODULE_QML_IMPORT ${CMAKE_CURRENT_LIST_DIR}/qml)
+qt_add_resources(appshell appshell
+    PREFIX /
+    FILES appshell.qrc
+)
 
-set(MODULE_SRC
+target_sources(appshell PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/appshellmodule.cpp
     ${CMAKE_CURRENT_LIST_DIR}/appshellmodule.h
     ${CMAKE_CURRENT_LIST_DIR}/iappshellconfiguration.h
@@ -45,15 +49,12 @@ set(MODULE_SRC
     ${CMAKE_CURRENT_LIST_DIR}/view/notationstatusbarmodel.h
     ${CMAKE_CURRENT_LIST_DIR}/view/navigableappmenumodel.cpp
     ${CMAKE_CURRENT_LIST_DIR}/view/navigableappmenumodel.h
-    )
+)
 
-set(MODULE_LINK
+target_include_directories(appshell PRIVATE ${Qt6Gui_PRIVATE_INCLUDE_DIRS})
+
+target_link_libraries(appshell PRIVATE
     muse::ui
     muse::uicomponents
     Qt::Quick
-    )
-
-# we use QKeyMapper to fix https://github.com/musescore/MuseScore/issues/10181
-set(MODULE_INCLUDE_PRIVATE ${Qt6Gui_PRIVATE_INCLUDE_DIRS} )
-
-setup_module()
+)

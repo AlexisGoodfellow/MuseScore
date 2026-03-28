@@ -266,9 +266,11 @@
 #include "stubs/project/projectstubmodule.h"
 #endif
 
-#ifdef MUE_CONFIGURATION_IS_APPWEB
+// [editure] Skip appjs in editude builds — editude uses its own WS module
+#if defined(MUE_CONFIGURATION_IS_APPWEB) && !defined(MUE_BUILD_EDITUDE_MODULE)
 #include "web/appjs/appjsmodule.h"
 #endif
+// [/editure]
 
 using namespace muse;
 using namespace mu::app;
@@ -424,9 +426,11 @@ std::shared_ptr<muse::IApplication> AppFactory::newGuiApp(const CmdOptions& opti
     app->addModule(new muse::update::UpdateModule());
     app->addModule(new muse::workspace::WorkspaceModule());
 
-#ifdef MUE_CONFIGURATION_IS_APPWEB
+// [editure] Skip appjs in editude builds
+#if defined(MUE_CONFIGURATION_IS_APPWEB) && !defined(MUE_BUILD_EDITUDE_MODULE)
     app->addModule(new mu::appjs::AppJsModule());
 #endif
+// [/editure]
 
     return app;
 }

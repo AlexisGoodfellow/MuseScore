@@ -34,7 +34,7 @@ namespace mu::appshell {
 class AppShellConfiguration : public IAppShellConfiguration, public muse::Contextable, public muse::async::Asyncable
 {
     muse::GlobalInject<muse::ui::IUiConfiguration> uiConfiguration;
-    muse::ContextInject<muse::IApplication> application = { this };
+    muse::GlobalInject<muse::IApplication> application; // [editude] IApplication is global, not contextual
 
 public:
     AppShellConfiguration(const muse::modularity::ContextPtr& iocCtx)
