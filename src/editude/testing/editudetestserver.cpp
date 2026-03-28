@@ -2583,37 +2583,6 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTuplet(const QJsonObject
 
     score->startCmd(TranslatableString("test", "remove tuplet"));
     score->cmdDeleteTuplet(tup, /*replaceWithRest=*/true);
-
-    // Consolidate: if voice is all rests, replace with a V_MEASURE rest
-    // for parity with the undo stack's state restoration.
-    {
-        bool allRests = true;
-        QVector<EngravingItem*> toRemove;
-        for (Segment* s = measure->first(SegmentType::ChordRest); s;
-             s = s->next(SegmentType::ChordRest)) {
-            EngravingItem* e = s->element(track);
-            if (e && !e->isRest()) {
-                allRests = false;
-                break;
-            }
-            if (e) {
-                toRemove.append(e);
-            }
-        }
-        if (allRests && !toRemove.isEmpty()) {
-            for (EngravingItem* e : toRemove) {
-                score->undoRemoveElement(e);
-            }
-            Segment* seg0 = measure->getSegmentR(
-                SegmentType::ChordRest, Fraction(0, 1));
-            Rest* fmr = Factory::createRest(
-                seg0, TDuration(DurationType::V_MEASURE));
-            fmr->setTrack(track);
-            fmr->setTicks(measure->ticks());
-            score->undoAddElement(fmr);
-        }
-    }
-
     score->endCmd();
 
     return okResponse();

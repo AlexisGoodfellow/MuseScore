@@ -306,6 +306,13 @@ public:
     void mergeCommands(size_t startIdx);
     void cleanRedoStack() { remove(m_currentIndex); }
 
+    // [editude] Clear all undo/redo entries, properly freeing elements owned
+    // by RemoveElement commands.  Used after applying remote ops whose undo
+    // history is managed by the OT server, not the local undo stack.
+    // See adr/2026-02-28-undo-redo-model.md §Client-side undo stack management.
+    void clearAll() { remove(0); }
+    // [/editude]
+
 private:
     void remove(size_t idx);
 

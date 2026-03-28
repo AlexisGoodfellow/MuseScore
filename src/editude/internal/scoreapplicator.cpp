@@ -67,6 +67,7 @@
 #include "engraving/dom/tremolosinglechord.h"
 #include "engraving/dom/tremolotwochord.h"
 #include "engraving/dom/trill.h"
+#include "engraving/editing/undo.h"
 #include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
@@ -351,8 +352,19 @@ bool ScoreApplicator::applyDeleteRest(Score* score, const QJsonObject& op)
         return false;
     }
 
+    // Restore the voice to its "empty" state by replacing the entire voice
+    // content with a full-measure rest.  InsertRest creates a rest plus fill
+    // rests (e.g. quarter@0 + quarter@1/4 + half@1/2 in 4/4), so merely
+    // calling deleteItem() on one rest leaves the fills behind.  setNoteRest
+    // with the full measure duration replaces everything in the voice,
+    // matching the editor's undo behaviour and the Python model (where
+    // removing a RestEvent implicitly restores the whole-measure fill).
+    Measure* measure = rest->measure();
+    const track_idx_t track = trackFromCoord(part, voice, stf);
+
     score->startCmd(TranslatableString("undoableAction", "Delete rest"));
-    score->deleteItem(rest);
+    Segment* seg0 = measure->getSegmentR(SegmentType::ChordRest, measure->tick());
+    score->setNoteRest(seg0, track, NoteVal(), measure->ticks());
     score->endCmd();
     return true;
 }
@@ -1194,7 +1206,13 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
 {
     const QString type = payload["type"].toString();
 
-    // op_batch — apply each sub-op in sequence.
+    // op_batch — apply each sub-op in sequence, clearing undo entries after
+    // each one.  Multi-step operations (e.g. RemoveTuplet) create
+    // RemoveElement entries that reference shared elements like Tuplets.
+    // If two sub-ops within the same batch both produce RemoveElement entries
+    // for the same element, deferring clearAll() to the end of the batch
+    // causes remove(0) to cleanup(true) the same element twice (double-free).
+    // Clearing after each sub-op prevents cross-macro element conflicts.
     if (type == QLatin1String("op_batch")) {
         const QJsonArray ops = payload["ops"].toArray();
         if (ops.isEmpty()) {
@@ -1205,6 +1223,7 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
             if (!apply(score, v.toObject())) {
                 ok = false;
             }
+            score->undoStack()->clearAll();
         }
         return ok;
     }
@@ -1924,12 +1943,13 @@ bool ScoreApplicator::applyRemoveTuplet(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Remove tuplet"));
     score->cmdDeleteTuplet(tuplet, /*replaceWithRest=*/true);
 
-    // After removing the tuplet, if the voice is now all rests, replace
-    // them with a single V_MEASURE rest.  This matches the state produced
-    // by the editor's undo stack (which restores the original full-measure
-    // rest).  We can't use setNoteRest() here because cmdDeleteTuplet may
-    // leave the measure in a state where the remaining rest doesn't cover
-    // the full measure, causing setNoteRest to silently do nothing.
+    // Replace the rests left by cmdDeleteTuplet with a single V_MEASURE
+    // rest.  This ensures the peer shows events=[] (the score reader skips
+    // V_MEASURE rests), matching the editor's state after an undo.
+    // When the translator also emits an explicit InsertRest op (the
+    // remove_tuplet path), that op overwrites the V_MEASURE rest with the
+    // correct specific-duration rest.  Without this cleanup the peer would
+    // retain cmdDeleteTuplet's divergent rest pattern.
     {
         bool allRests = true;
         QVector<EngravingItem*> toRemove;

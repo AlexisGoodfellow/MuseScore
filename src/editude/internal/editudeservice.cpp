@@ -287,6 +287,7 @@ void EditudeService::bootstrapAndConnect()
         m_applyingRemote = true;
         m_applicator.bootstrapPartMap(m_score);
         applyPendingOps();
+        m_score->undoStack()->clearAll();
         m_applyingRemote = false;
         m_pendingOps = QJsonArray();
 
@@ -412,6 +413,7 @@ void EditudeService::onServerMessage(const QString& text)
             for (const QJsonValue& v : syncOps) {
                 m_applicator.apply(m_score, v.toObject().value("payload").toObject());
             }
+            m_score->undoStack()->clearAll();
             m_applyingRemote = false;
             markScoreSaved();
             LOGD() << "[editude] applied" << syncOps.size() << "sync ops from peers";
@@ -551,6 +553,7 @@ void EditudeService::onServerMessage(const QString& text)
             if (!m_score) return;
             m_applyingRemote = true;
             m_applicator.apply(m_score, payload);
+            m_score->undoStack()->clearAll();
             m_applyingRemote = false;
             markScoreSaved();
             // Sync any new part registrations from applicator to translator
@@ -577,14 +580,17 @@ void EditudeService::onServerMessage(const QString& text)
             LOGW() << "[editude] received remote op_batch but score not ready";
             return;
         }
-        // Pass the full op_batch message to apply(); ScoreApplicator handles
-        // startCmd/endCmd wrapping so the whole batch is one undo entry.
-        // Defer the score mutation to the next event-loop iteration (see "op"
-        // handler comment above for rationale).
+        // Pass the full op_batch message to apply().  Defer the score mutation
+        // to the next event-loop iteration (see "op" handler comment above).
+        // The applicator calls clearAll() after each individual sub-op within
+        // the batch to prevent cross-macro double-frees (see comment in
+        // ScoreApplicator::apply).  The trailing clearAll() here is a no-op
+        // safety net.
         QTimer::singleShot(0, this, [this, msg]() {
             if (!m_score) return;
             m_applyingRemote = true;
             m_applicator.apply(m_score, msg);
+            m_score->undoStack()->clearAll();
             m_applyingRemote = false;
             markScoreSaved();
             // Sync part registrations (see "op" handler comment above).

@@ -293,7 +293,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!chord) {
             continue;
         }
-        // Skip grace chords — they are handled by Pass 26c (AddGraceNote).
+        // Skip grace chords — they are handled by Pass 34 (AddGraceNote).
         if (chord->isGrace()) {
             continue;
         }
@@ -356,9 +356,9 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     // does NOT get a RemoveElement entry — it's implicitly orphaned.
     // Detect full removal by finding removed ChordRests whose tuplet()
     // pointer references a now-empty Tuplet.  This feeds:
-    //   - Pass 3: suppress the replacement rest (created by setRest()),
-    //   - Pass 6: skip individual DeleteNote ops for members,
-    //   - Pass 18: emit a single RemoveTuplet op.
+    //   - Pass 3: emit RemoveTuplet op,
+    //   - Pass 4: suppress the replacement rest (created by setRest()),
+    //   - Pass 8: skip individual DeleteNote ops for members.
     QSet<Tuplet*> fullyRemovedTuplets;
     QHash<Tuplet*, QVector<EngravingObject*>> removedTupletMembers;
     {
@@ -389,9 +389,9 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     // ── Pre-scan: identify newly-created tuplets ──────────────────────
     // cmdCreateTuplet adds the Tuplet object via undoAddElement, producing
     // an AddElement entry with ElementType::TUPLET.  We need this before
-    // Pass 3 so the fill rest created when the original ChordRest is split
+    // Pass 4 so the fill rest created when the original ChordRest is split
     // can be suppressed — applyAddTuplet on the peer recreates it via its
-    // own cmdCreateTuplet call.  Also used by Pass 18 (Path A) for reliable
+    // own cmdCreateTuplet call.  Also used by Pass 22 (Path A) for reliable
     // tuplet detection (the member-pointer heuristic can fail after reflow).
     QSet<Tuplet*> newlyCreatedTuplets;
     for (const auto& [obj, cmds] : changedObjects) {
@@ -432,7 +432,30 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 3: InsertRest (with fill-rest suppression) ──────────────────
+    // ── Pass 3: RemoveTuplet ───────────────────────────────────────────
+    // RemoveTuplet MUST precede InsertRest (Pass 4) in the op_batch so the
+    // peer applies them in the right order: first delete the tuplet, then
+    // overwrite the resulting V_MEASURE rest with the correct replacement
+    // rest.  Without this, InsertRest fires while the tuplet still exists
+    // on the peer and silently fails.
+    for (Tuplet* tup : fullyRemovedTuplets) {
+        Part* tupPart = static_cast<EngravingItem*>(tup)->part();
+        if (!tupPart) {
+            tupPart = resolvePartFromTrack(
+                tup->track(), m_knownPartUuids);
+        }
+        if (!tupPart) continue;
+        const QString tupPartUuid =
+            resolvePartUuid(tupPart, lazyAddPartOps);
+        if (tupPartUuid.isEmpty()) continue;
+
+        const int voice = voiceFromTrack(tupPart, tup->track());
+        const int staff = staffFromTrack(tupPart, tup->track());
+        ops.append(buildRemoveTuplet(tupPartUuid, tup->tick(),
+                                     voice, staff));
+    }
+
+    // ── Pass 4: InsertRest (with fill-rest suppression) ──────────────────
     //
     // setNoteRest() creates the target element AND "fill rests" to pad the
     // remaining measure duration.  On the peer, applying the primary op
@@ -445,24 +468,49 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     //       suppress all rests.
     //   (c) Pure InsertRest: emit only the single rest at the earliest tick;
     //       the remainder are fills from setNoteRest.
+    bool isUndoOfInsertRest = false;
     {
         const bool hasNewChords = !newChordNotes.isEmpty();
 
-        // Pre-scan: does this batch remove any Notes?
+        // Pre-scan: does this batch remove any Notes or Rests?
         bool hasNoteRemovals = false;
+        int removedRestCount = 0;
+        int addedRestCount   = 0;
         if (!hasNewChords) {
             for (const auto& [obj, cmds] : changedObjects) {
-                if (!obj || !cmds.count(CommandType::RemoveElement)) {
+                if (!obj) {
                     continue;
                 }
-                if (obj->type() == ElementType::NOTE) {
+                if (obj->type() == ElementType::NOTE
+                    && cmds.count(CommandType::RemoveElement)) {
                     hasNoteRemovals = true;
-                    break;
+                }
+                if (obj->type() == ElementType::REST) {
+                    if (cmds.count(CommandType::RemoveElement)) {
+                        ++removedRestCount;
+                    }
+                    if (cmds.count(CommandType::AddElement)) {
+                        ++addedRestCount;
+                    }
                 }
             }
         }
 
-        if (!hasNewChords && !hasNoteRemovals) {
+        // Undo-of-InsertRest heuristic: when more rests are removed than
+        // added (with no note involvement), the user is undoing an
+        // InsertRest.  setNoteRest() always creates fewer elements than it
+        // replaces, so the undo reversal produces more removals than
+        // additions.  Suppress InsertRest here; Pass 8 will emit
+        // DeleteRest instead.
+        // Don't treat tuplet removal as undo-of-InsertRest: cmdDeleteTuplet
+        // removes N member rests and adds 1 replacement, which matches the
+        // removedRestCount > addedRestCount pattern but is not an undo.
+        isUndoOfInsertRest = !hasNewChords && !hasNoteRemovals
+            && removedRestCount > 0 && addedRestCount > 0
+            && removedRestCount > addedRestCount
+            && fullyRemovedTuplets.isEmpty();
+
+        if (!hasNewChords && !hasNoteRemovals && !isUndoOfInsertRest) {
             // Collect valid InsertRest candidates.
             struct RestCandidate {
                 Rest* rest;
@@ -483,36 +531,14 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                     == QLatin1String("unknown")) {
                     continue;
                 }
-                // Skip rests inside tuplets — Pass 18 handles them.
+                // Skip rests inside tuplets — Pass 22 handles them.
                 if (rest->tuplet()) {
                     continue;
                 }
-                // Skip replacement rests created by cmdDeleteTuplet —
-                // RemoveTuplet (Pass 18) recreates the replacement
-                // atomically on the peer.
-                {
-                    bool isTupletReplacement = false;
-                    for (auto it = removedTupletMembers.cbegin();
-                         it != removedTupletMembers.cend(); ++it) {
-                        if (!fullyRemovedTuplets.contains(it.key())) {
-                            continue;
-                        }
-                        for (EngravingObject* member : it.value()) {
-                            auto* memberCr = static_cast<ChordRest*>(member);
-                            if (rest->tick() == memberCr->tick()
-                                && rest->track() == memberCr->track()) {
-                                isTupletReplacement = true;
-                                break;
-                            }
-                        }
-                        if (isTupletReplacement) {
-                            break;
-                        }
-                    }
-                    if (isTupletReplacement) {
-                        continue;
-                    }
-                }
+                // Emit replacement rests created by cmdDeleteTuplet as
+                // explicit InsertRest ops.  The peer's applyRemoveTuplet
+                // creates a V_MEASURE rest (via cleanup); this InsertRest
+                // overwrites it with the correct specific-duration rest.
                 // Skip fill rests that are side effects of tuplet creation.
                 // cmdCreateTuplet splits the target ChordRest; the portion
                 // not consumed by the tuplet becomes a new rest.  The peer's
@@ -554,16 +580,16 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         // created as side effects; skip the entire pass.
     }
 
-    // ── Pass 4: ELIMINATED ──────────────────────────────────────────────
+    // ── Pass 5: ELIMINATED ──────────────────────────────────────────────
     // Notes added to existing chords are now emitted as InsertNote in Pass 2.
 
-    // ── Pass 5a: AddPart / RemovePart ───────────────────────────────────
-    // Must run BEFORE the emittedTimeSig early return (Pass 5b) because
+    // ── Pass 6: AddPart / RemovePart ────────────────────────────────────
+    // Must run BEFORE the emittedTimeSig early return (Pass 7) because
     // adding a part creates staves whose TimeSig/KeySig/Clef elements
     // appear in the same batch.  Without this, the TimeSig early return
     // would suppress the AddPart op entirely.
     //
-    // Track newly-added Parts: Pass 10b must skip SetStaffCount for these
+    // Track newly-added Parts: Pass 14 must skip SetStaffCount for these
     // because AddPart already carries the staff_count field.
     QSet<Part*> newlyAddedParts;
     for (const auto& [obj, cmds] : changedObjects) {
@@ -587,7 +613,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 5b: SetTimeSignature & SetTempo ─────────────────────────────
+    // ── Pass 7: SetTimeSignature & SetTempo ──────────────────────────────
     // A TimeSig may appear with AddElement (new time sig added) OR
     // ChangeProperty (existing time sig modified by cmdAddTimeSig).
     //
@@ -651,7 +677,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         return ops;
     }
 
-    // ── Pass 6: DeleteNote ──────────────────────────────────────────────
+    // ── Pass 8: DeleteNote ──────────────────────────────────────────────
     // Identify which chords/rests are being fully removed in this transaction.
     QSet<EngravingObject*> removedChordsAndRests;
     for (const auto& [obj, cmds] : changedObjects) {
@@ -659,7 +685,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             continue;
         }
         if (obj->type() == ElementType::CHORD) {
-            // Skip grace chords — they are handled by Pass 26c (RemoveGraceNote).
+            // Skip grace chords — they are handled by Pass 34 (RemoveGraceNote).
             if (static_cast<Chord*>(obj)->isGrace()) {
                 continue;
             }
@@ -679,14 +705,14 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             Note* note   = static_cast<Note*>(obj);
             Chord* chord = note->chord();
 
-            // Skip notes belonging to grace chords — handled by Pass 26c.
+            // Skip notes belonging to grace chords — handled by Pass 34.
             if (chord && chord->isGrace()) {
                 continue;
             }
 
             if (chord && removedChordsAndRests.contains(chord)) {
                 // Skip chords that are members of a fully-removed tuplet —
-                // RemoveTuplet (Pass 18) handles them atomically.
+                // RemoveTuplet (Pass 3) handles them atomically.
                 if (chord->tuplet()
                     && fullyRemovedTuplets.contains(chord->tuplet())) {
                     continue;
@@ -733,12 +759,42 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             }
         }
 
-        // Skip rests — they are implicit fill rests. Do not emit DeleteRest.
-        // TODO: emit DeleteRest for undo of InsertRest (needs careful
-        // heuristic to distinguish explicit rests from fill-rest side effects).
     }
 
-    // ── Pass 7: ChangePitch → SetPitch ────────────────────────────────────
+    // Rests: normally skip (they are implicit fill rests).  But when
+    // Pass 4 detected an undo-of-InsertRest, emit a single DeleteRest for
+    // the removed rest at the earliest tick (the primary rest that was
+    // originally inserted).  This block runs OUTSIDE the per-element loop
+    // so it only emits once.
+    if (isUndoOfInsertRest) {
+        Rest* earliest = nullptr;
+        Fraction earliestTick = Fraction(INT_MAX, 1);
+        for (EngravingObject* removedObj : removedChordsAndRests) {
+            if (removedObj->type() != ElementType::REST) {
+                continue;
+            }
+            Rest* r = static_cast<Rest*>(removedObj);
+            if (r->tick() < earliestTick) {
+                earliestTick = r->tick();
+                earliest = r;
+            }
+        }
+        if (earliest) {
+            Part* restPart = earliest->staff()
+                             ? earliest->staff()->part() : nullptr;
+            if (!restPart) {
+                restPart = resolvePartFromTrack(
+                    earliest->track(), m_knownPartUuids);
+            }
+            const QString partUuid =
+                resolvePartUuid(restPart, lazyAddPartOps);
+            if (!partUuid.isEmpty()) {
+                ops.append(buildDeleteRest(earliest, partUuid));
+            }
+        }
+    }
+
+    // ── Pass 9: ChangePitch → SetPitch ─────────────────────────────────────
     // Accept both CommandType::ChangePitch (interactive pitch change via
     // Score::changePitch) and CommandType::ChangeProperty with Pid::PITCH
     // (programmatic pitch change via undoChangeProperty).
@@ -777,7 +833,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         ops.append(buildSetPitch(note, partUuid, oldPitch));
     }
 
-    // ── Pass 7b: ChangeProperty + Pid::FRET/STRING → SetTabNote ──────────
+    // ── Pass 10: ChangeProperty + Pid::FRET/STRING → SetTabNote ─────────
     if (changedPropertyIdSet.count(Pid::FRET)
         || changedPropertyIdSet.count(Pid::STRING)) {
         for (const auto& [obj, cmds] : changedObjects) {
@@ -805,7 +861,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 7c: ChangeProperty + Pid::HEAD_GROUP → SetNoteHead ─────────
+    // ── Pass 11: ChangeProperty + Pid::HEAD_GROUP → SetNoteHead ─────────
     if (changedPropertyIdSet.count(Pid::HEAD_GROUP)) {
         for (const auto& [obj, cmds] : changedObjects) {
             if (!obj || obj->type() != ElementType::NOTE) {
@@ -832,7 +888,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 8: ChangeProperty + Pid::VOICE → SetVoice ──────────────────
+    // ── Pass 12: ChangeProperty + Pid::VOICE → SetVoice ─────────────────
     if (changedPropertyIdSet.count(Pid::VOICE)) {
         for (const auto& [obj, cmds] : changedObjects) {
             if (!obj || !cmds.count(CommandType::ChangeProperty)) {
@@ -865,7 +921,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 10: SetPartName / SetPartInstrument ────────────────────────
+    // ── Pass 13: SetPartName / SetPartInstrument ────────────────────────
     if (changedPropertyIdSet.count(Pid::STAFF_LONG_NAME)) {
         for (const auto& [obj, cmds] : changedObjects) {
             if (!obj || obj->type() != ElementType::PART) {
@@ -884,7 +940,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 10b: SetStaffCount (InsertStaff / RemoveStaff) ──────────────
+    // ── Pass 14: SetStaffCount (InsertStaff / RemoveStaff) ────────────────
     {
         QSet<Part*> staffChangedParts;
         for (const auto& [obj, cmds] : changedObjects) {
@@ -909,7 +965,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 11: SetTie ───────────────────────────────────────────────────
+    // ── Pass 15: SetTie ───────────────────────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::TIE) {
             continue;
@@ -935,7 +991,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 12: ChordSymbol ──────────────────────────────────────────────
+    // ── Pass 16: ChordSymbol ──────────────────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::HARMONY) {
             continue;
@@ -956,7 +1012,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 13: SetKeySignature & SetClef ───────────────────────────────
+    // ── Pass 17: SetKeySignature & SetClef ───────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj) {
             continue;
@@ -1011,7 +1067,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 14: Articulations ───────────────────────────────────────────
+    // ── Pass 18: Articulations ───────────────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::ARTICULATION) {
             continue;
@@ -1062,7 +1118,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 15: Dynamics ────────────────────────────────────────────────
+    // ── Pass 19: Dynamics ────────────────────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::DYNAMIC) {
             continue;
@@ -1087,7 +1143,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 16: Slurs ───────────────────────────────────────────────────
+    // ── Pass 20: Slurs ───────────────────────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::SLUR) {
             continue;
@@ -1118,7 +1174,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 17: Hairpins ────────────────────────────────────────────────
+    // ── Pass 21: Hairpins ────────────────────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::HAIRPIN) {
             continue;
@@ -1145,7 +1201,8 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 18: Tuplets ─────────────────────────────────────────────────
+    // ── Pass 22: AddTuplet ────────────────────────────────────────────────
+    // RemoveTuplet is emitted earlier (Pass 3) so it precedes InsertRest.
     {
         QSet<Tuplet*> handledTuplets;
 
@@ -1201,7 +1258,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 auto memberIt = changedObjects.find(elem);
                 if (memberIt == changedObjects.end()) {
                     allMembersTracked = false;
-                    LOGD() << "[editude] Pass18B: member" << totalMembers
+                    LOGD() << "[editude] Pass22B: member" << totalMembers
                            << "not in changedObjects, ptr="
                            << static_cast<void*>(elem)
                            << "type=" << static_cast<int>(elem->type());
@@ -1211,7 +1268,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                     membersWithAdd++;
                 }
             }
-            LOGD() << "[editude] Pass18B: tup at"
+            LOGD() << "[editude] Pass22B: tup at"
                    << tup->tick().toString()
                    << "totalMembers=" << totalMembers
                    << "withAdd=" << membersWithAdd
@@ -1231,31 +1288,9 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                                       tup->ratio().numerator(),
                                       tup->ratio().denominator()));
         }
-
-        // Detect removed tuplets using the pre-scan's fullyRemovedTuplets.
-        for (Tuplet* tup : fullyRemovedTuplets) {
-            if (handledTuplets.contains(tup)) {
-                continue;
-            }
-            Part* tupPart = static_cast<EngravingItem*>(tup)->part();
-            if (!tupPart) {
-                tupPart = resolvePartFromTrack(
-                    tup->track(), m_knownPartUuids);
-            }
-            if (!tupPart) continue;
-            const QString tupPartUuid =
-                resolvePartUuid(tupPart, lazyAddPartOps);
-            if (tupPartUuid.isEmpty()) continue;
-            handledTuplets.insert(tup);
-
-            const int voice = voiceFromTrack(tupPart, tup->track());
-            const int staff = staffFromTrack(tupPart, tup->track());
-            ops.append(buildRemoveTuplet(tupPartUuid, tup->tick(),
-                                         voice, staff));
-        }
     }
 
-    // ── Pass 19: Lyrics ──────────────────────────────────────────────────
+    // ── Pass 23: Lyrics ──────────────────────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::LYRICS) {
             continue;
@@ -1316,7 +1351,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 20: Staff Text (part-scoped) ──────────────────────────────
+    // ── Pass 24: Staff Text (part-scoped) ──────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::STAFF_TEXT) {
             continue;
@@ -1344,7 +1379,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 21: System Text (score-global) ─────────────────────────────
+    // ── Pass 25: System Text (score-global) ─────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::SYSTEM_TEXT) {
             continue;
@@ -1362,7 +1397,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 22: Rehearsal Mark (score-global) ──────────────────────────
+    // ── Pass 26: Rehearsal Mark (score-global) ──────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::REHEARSAL_MARK) {
             continue;
@@ -1380,7 +1415,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 23: Octave Lines (part-scoped, beat-range) ────────────────
+    // ── Pass 27: Octave Lines (part-scoped, beat-range) ────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::OTTAVA) {
             continue;
@@ -1415,7 +1450,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 24: Glissandos (dual-coordinate) ───────────────────────────
+    // ── Pass 28: Glissandos (dual-coordinate) ───────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::GLISSANDO) {
             continue;
@@ -1446,7 +1481,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 25: Pedal Lines (part-scoped, beat-range) ──────────────────
+    // ── Pass 29: Pedal Lines (part-scoped, beat-range) ──────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::PEDAL) {
             continue;
@@ -1470,7 +1505,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 26: Trill Lines (part-scoped, beat-range) ──────────────────
+    // ── Pass 30: Trill Lines (part-scoped, beat-range) ──────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::TRILL) {
             continue;
@@ -1494,7 +1529,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 26b: Arpeggios (coordinate-addressed) ─────────────────────
+    // ── Pass 31: Arpeggios (coordinate-addressed) ───────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::ARPEGGIO) {
             continue;
@@ -1532,7 +1567,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 26d: Single-note tremolos (coordinate-addressed) ──────────
+    // ── Pass 32: Single-note tremolos (coordinate-addressed) ────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::TREMOLO_SINGLECHORD) {
             continue;
@@ -1570,7 +1605,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 26e: Two-note tremolos (dual-anchor) ───────────────────────
+    // ── Pass 33: Two-note tremolos (dual-anchor) ─────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::TREMOLO_TWOCHORD) {
             continue;
@@ -1608,7 +1643,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 26c: Grace notes (coordinate-addressed) ───────────────────
+    // ── Pass 34: Grace notes (coordinate-addressed) ─────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::CHORD) {
             continue;
@@ -1648,7 +1683,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 26d: Breath marks / caesuras (beat-anchored) ────────────────
+    // ── Pass 35: Breath marks / caesuras (beat-anchored) ──────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::BREATH) {
             continue;
@@ -1684,7 +1719,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 27: InsertBeats / DeleteBeats ───────────────────────────────
+    // ── Pass 36: InsertBeats / DeleteBeats ───────────────────────────────
     {
         QVector<Measure*> insertedMeasures;
         QVector<Measure*> removedMeasures;
@@ -1735,7 +1770,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 28: InsertVolta / RemoveVolta ───────────────────────────────
+    // ── Pass 37: InsertVolta / RemoveVolta ───────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::VOLTA) {
             continue;
@@ -1753,7 +1788,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 29: InsertMarker / RemoveMarker ─────────────────────────────
+    // ── Pass 38: InsertMarker / RemoveMarker ─────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::MARKER) {
             continue;
@@ -1769,7 +1804,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 30: InsertJump / RemoveJump ─────────────────────────────────
+    // ── Pass 39: InsertJump / RemoveJump ─────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::JUMP) {
             continue;
@@ -1782,7 +1817,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 31: SetStartRepeat / SetEndRepeat ─────────────────────────────
+    // ── Pass 40: SetStartRepeat / SetEndRepeat ─────────────────────────────
     if (changedPropertyIdSet.count(Pid::REPEAT_START)
         || changedPropertyIdSet.count(Pid::REPEAT_END)
         || changedPropertyIdSet.count(Pid::REPEAT_COUNT)) {
@@ -1805,7 +1840,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 32: SetScoreMetadata ─────────────────────────────────────────
+    // ── Pass 41: SetScoreMetadata ─────────────────────────────────────────
     if (!changedMetaTags.isEmpty()) {
         static const QHash<QString, QString> s_reverseFieldMap = {
             { "workTitle",       "title"           },
@@ -1830,7 +1865,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 33: SetMeasureLen (pickup / anacrusis measures) ────────────
+    // ── Pass 42: SetMeasureLen (pickup / anacrusis measures) ────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::MEASURE) {
             continue;
