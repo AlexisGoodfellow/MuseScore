@@ -237,6 +237,7 @@ FocusScope {
                         anchors.fill: parent
                         enabled: false
                     }
+                    EditudeTouchToolbar { anchors.bottom: parent.bottom }
                     /** [/editude] */
                 }
 

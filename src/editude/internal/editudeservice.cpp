@@ -20,6 +20,10 @@
  */
 #include "editudeservice.h"
 
+#ifdef Q_OS_WASM
+#include <emscripten/val.h>
+#endif
+
 #include <algorithm>
 #include <QDateTime>
 #include <QJsonArray>
@@ -62,6 +66,19 @@ EditudeService::EditudeService(const muse::modularity::ContextPtr& iocCtx, QObje
 void EditudeService::setPresenceModel(EditudePresenceModel* model)
 {
     m_presenceModel = model;
+
+    if (model) {
+        // Wire touch toolbar action dispatch to MuseScore's actions dispatcher.
+        connect(model, &EditudePresenceModel::actionDispatched, this,
+            [this](const QString& actionCode) {
+                m_dispatcher()->dispatch(actionCode.toStdString());
+            });
+
+#ifdef Q_OS_WASM
+        // Auto-show the touch toolbar on WASM builds.
+        model->setTouchToolbarVisible(true);
+#endif
+    }
 }
 
 void EditudeService::setAnnotationModel(EditudeAnnotationModel* model)
@@ -147,6 +164,59 @@ void EditudeService::setSnapshotPath(const QString& path)
 
 void EditudeService::start()
 {
+#ifdef Q_OS_WASM
+    // [editude] WASM path: read session credentials from window.editudeSession,
+    // injected by the native iOS shell via WKUserScript before the page loads.
+    // This replaces the EDITUDE_SESSION_URL → HTTP fetch flow used on desktop.
+    emscripten::val session = emscripten::val::global("editudeSession");
+    if (session.isUndefined() || session.isNull()) {
+        LOGD() << "[editude] window.editudeSession not set; collaboration disabled";
+        return;
+    }
+
+    m_token = QString::fromStdString(session["token"].as<std::string>());
+    m_websocketUrl = QString::fromStdString(session["wsUrl"].as<std::string>());
+    m_projectId = QString::fromStdString(session["projectId"].as<std::string>());
+
+    if (m_token.isEmpty() || m_websocketUrl.isEmpty() || m_projectId.isEmpty()) {
+        LOGW() << "[editude] window.editudeSession missing required fields";
+        return;
+    }
+
+    // No snapshot data in the injected session — we'll bootstrap via HTTP.
+    m_snapshotRevision = 0;
+    m_serverRevision   = 0;
+    m_pendingOps       = QJsonArray();
+    m_serverParts      = QJsonArray();
+    m_bootstrapReady   = false;
+
+    // Derive server base URL from the WebSocket URL for REST calls.
+    QString serverUrl = QString::fromStdString(session["serverUrl"].as<std::string>());
+    if (!serverUrl.isEmpty()) {
+        m_sessionUrl = serverUrl;
+    }
+
+    // Listen for the startup scenario opening a page (typically HOME).
+    // Same handler as desktop path — see comment below.
+    m_interactive()->opened().onReceive(this, [this](const muse::Uri&) {
+        if (m_fileNewPending) {
+            m_fileNewPending = false;
+            m_dispatcher()->dispatch("file-new");
+            return;
+        }
+        if (m_reclaimNotation) {
+            m_reclaimNotation = false;
+            m_interactive()->open(muse::Uri("musescore://notation"));
+            requestNotationFocus();
+        }
+    });
+
+    // Defer to next event-loop iteration (consistent with desktop path).
+    QTimer::singleShot(0, this, [this]() {
+        bootstrapAndConnect();
+    });
+
+#else
     m_sessionUrl = QString::fromUtf8(qgetenv("EDITUDE_SESSION_URL"));
 
     if (m_sessionUrl.isEmpty()) {
@@ -207,6 +277,7 @@ void EditudeService::start()
             }
         });
     });
+#endif // Q_OS_WASM
 
     if (m_playbackController()) {
         m_playbackController()->isPlayingChanged().onNotify(

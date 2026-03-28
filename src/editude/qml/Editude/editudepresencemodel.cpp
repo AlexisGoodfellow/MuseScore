@@ -86,6 +86,39 @@ void EditudePresenceModel::notifyScoreReady()
     emit scoreReady();
 }
 
+void EditudePresenceModel::setTouchToolbarVisible(bool visible)
+{
+    if (m_touchToolbarVisible == visible) {
+        return;
+    }
+    m_touchToolbarVisible = visible;
+    emit touchToolbarVisibleChanged();
+}
+
+void EditudePresenceModel::setNoteInputActive(bool active)
+{
+    if (m_noteInputActive == active) {
+        return;
+    }
+    m_noteInputActive = active;
+    emit noteInputActiveChanged();
+}
+
+void EditudePresenceModel::dispatchAction(const QString& actionCode)
+{
+    // Forward the action to EditudeService via the singleton.
+    // EditudeService subscribes to a custom signal, or we use the
+    // MuseScore actions dispatcher directly through the singleton pattern.
+    // For now, emit a signal that EditudeService connects to.
+    Q_UNUSED(actionCode);
+    // TODO: Wire to IActionsDispatcher.  This requires access to the IOC
+    // context, which the model doesn't have.  Two options:
+    // (a) EditudeService sets a std::function callback on the model.
+    // (b) Use a signal that EditudeService connects to.
+    // Using option (b):
+    emit actionDispatched(actionCode);
+}
+
 void EditudePresenceModel::setNotationViewMatrix(const QVariant& matrix)
 {
     m_matrix = matrix.value<QTransform>();

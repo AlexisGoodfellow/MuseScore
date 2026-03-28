@@ -53,6 +53,8 @@ class EditudePresenceModel : public QAbstractListModel
     Q_OBJECT
 
     Q_PROPERTY(QString toastText READ toastText NOTIFY toastTextChanged)
+    Q_PROPERTY(bool touchToolbarVisible READ touchToolbarVisible NOTIFY touchToolbarVisibleChanged)
+    Q_PROPERTY(bool noteInputActive READ noteInputActive NOTIFY noteInputActiveChanged)
 
 public:
     enum Roles {
@@ -78,9 +80,17 @@ public:
     void notifyScoreReady();
 
     QString toastText() const { return m_toastText; }
+    bool touchToolbarVisible() const { return m_touchToolbarVisible; }
+    bool noteInputActive() const { return m_noteInputActive; }
+
+    void setTouchToolbarVisible(bool visible);
+    void setNoteInputActive(bool active);
 
     // Called by QML when notationView.matrix changes.
     Q_INVOKABLE void setNotationViewMatrix(const QVariant& matrix);
+
+    // Called by QML touch toolbar to dispatch MuseScore actions.
+    Q_INVOKABLE void dispatchAction(const QString& actionCode);
 
     // QAbstractListModel interface
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
@@ -89,7 +99,10 @@ public:
 
 Q_SIGNALS:
     void toastTextChanged();
+    void touchToolbarVisibleChanged();
+    void noteInputActiveChanged();
     void scoreReady();
+    void actionDispatched(const QString& actionCode);
 
 private:
     void remapRows();
@@ -105,6 +118,8 @@ private:
 
     QString m_toastText;
     QTimer* m_toastTimer = nullptr;
+    bool m_touchToolbarVisible = false;
+    bool m_noteInputActive = false;
 
     static EditudePresenceModel* s_instance;
 };
