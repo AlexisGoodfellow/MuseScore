@@ -245,6 +245,12 @@ qt_add_executable(MuseScoreStudio
 # Setting target properties
 ###########################################
 
+# [editure] In the web build, src/web/appshell/ headers must shadow src/appshell/ headers
+# to avoid ODR violations (different class layouts between web and native appshell).
+if (MUE_CONFIGURATION_IS_APPWEB)
+    target_include_directories(MuseScoreStudio BEFORE PRIVATE ${PROJECT_SOURCE_DIR}/src/web)
+endif()
+
 set_target_properties(MuseScoreStudio PROPERTIES OUTPUT_NAME ${EXECUTABLE_NAME})
 
 if (MUSE_ENABLE_UNIT_TESTS_CODE_COVERAGE)

@@ -23,6 +23,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
+import Muse.Interactive
 import Muse.Ui 1.0
 import Muse.UiComponents
 

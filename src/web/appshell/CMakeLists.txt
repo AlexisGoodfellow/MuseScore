@@ -24,7 +24,13 @@ muse_create_module(appshell)
 
 qt_add_resources(appshell appshell
     PREFIX /
-    FILES appshell.qrc
+    FILES
+        qml/AppWindow.qml
+        qml/Main.qml
+        qml/AppButtonBackground.qml
+        qml/AppMenuBar.qml
+        qml/NotationFrame.qml
+        qml/DevFrame.qml
 )
 
 target_sources(appshell PRIVATE

@@ -21,6 +21,7 @@
 #include "editudeservice.h"
 
 #ifdef Q_OS_WASM
+#include <emscripten.h>
 #include <emscripten/val.h>
 #endif
 
@@ -33,6 +34,7 @@
 #include <QMap>
 #include <QApplication>
 #include <QDir>
+#include <QFile>
 #include <QHttpMultiPart>
 #include <QWindow>
 #include <QNetworkReply>
@@ -183,17 +185,55 @@ void EditudeService::start()
         return;
     }
 
-    // No snapshot data in the injected session — we'll bootstrap via HTTP.
-    m_snapshotRevision = 0;
-    m_serverRevision   = 0;
-    m_pendingOps       = QJsonArray();
-    m_serverParts      = QJsonArray();
-    m_bootstrapReady   = false;
-
-    // Derive server base URL from the WebSocket URL for REST calls.
+    // Derive server base URL for REST calls (annotations, snapshots, etc.).
     QString serverUrl = QString::fromStdString(session["serverUrl"].as<std::string>());
     if (!serverUrl.isEmpty()) {
         m_sessionUrl = serverUrl;
+    }
+
+    // Parse bootstrap data injected by the iOS shell.
+    // The shell fetches GET /projects/{pid}/session-bootstrap and injects
+    // the response as window.editudeSession.bootstrap before the page loads.
+    emscripten::val bootstrap = session["bootstrap"];
+    if (!bootstrap.isUndefined() && !bootstrap.isNull()) {
+        QString bootstrapJson = QString::fromStdString(
+            emscripten::val::global("JSON").call<std::string>("stringify", bootstrap));
+        QJsonObject bootstrapObj = QJsonDocument::fromJson(bootstrapJson.toUtf8()).object();
+
+        // Extract snapshot MSCZ (base64-encoded) and write to Emscripten VFS.
+        QJsonValue snapVal = bootstrapObj.value("snapshot");
+        if (snapVal.isObject()) {
+            QJsonObject snapshot = snapVal.toObject();
+            m_snapshotRevision = snapshot.value("revision").toInt(0);
+            QString contentB64 = snapshot.value("content_b64").toString();
+            QByteArray msczData = QByteArray::fromBase64(contentB64.toUtf8());
+
+            QString tmpPath = QStringLiteral("/tmp/editude_bootstrap.mscz");
+            QFile tmpFile(tmpPath);
+            if (tmpFile.open(QIODevice::WriteOnly)) {
+                tmpFile.write(msczData);
+                tmpFile.close();
+                m_snapshotPath = tmpPath;
+                LOGI() << "[editude] WASM snapshot written to" << tmpPath
+                       << "(" << msczData.size() << "bytes)";
+            } else {
+                LOGW() << "[editude] failed to write snapshot to Emscripten VFS";
+            }
+        } else {
+            m_snapshotRevision = 0;
+        }
+
+        m_serverRevision = bootstrapObj.value("server_revision").toInt(0);
+        m_pendingOps = bootstrapObj.value("ops").toArray();
+        m_serverParts = bootstrapObj.value("parts").toArray();
+        m_bootstrapReady = true;
+    } else {
+        LOGW() << "[editude] window.editudeSession.bootstrap not set";
+        m_snapshotRevision = 0;
+        m_serverRevision   = 0;
+        m_pendingOps       = QJsonArray();
+        m_serverParts      = QJsonArray();
+        m_bootstrapReady   = false;
     }
 
     // Listen for the startup scenario opening a page (typically HOME).
@@ -211,9 +251,12 @@ void EditudeService::start()
         }
     });
 
-    // Defer to next event-loop iteration (consistent with desktop path).
+    // Defer to next event-loop iteration so QML page navigation (triggered by
+    // openProject) runs outside the module init stack.
     QTimer::singleShot(0, this, [this]() {
-        bootstrapAndConnect();
+        if (m_bootstrapReady) {
+            openScoreForSession();
+        }
     });
 
 #else
@@ -429,6 +472,19 @@ void EditudeService::bootstrapAndConnect()
     // Mark score as saved after bootstrap — editude projects are persisted
     // via OT ops to the server, not local files.
     markScoreSaved();
+
+#ifdef Q_OS_WASM
+    // Signal the iOS shell that the score is ready, dismissing the spinner.
+    if (!m_wasmReadySent) {
+        m_wasmReadySent = true;
+        EM_ASM(
+            if (window.webkit && window.webkit.messageHandlers &&
+                window.webkit.messageHandlers.wasmReady) {
+                window.webkit.messageHandlers.wasmReady.postMessage("ready");
+            }
+        );
+    }
+#endif
 }
 
 void EditudeService::applyPendingOps()
@@ -1103,6 +1159,15 @@ void EditudeService::onDisconnected()
 
 void EditudeService::onReconnectTimer()
 {
+#ifdef Q_OS_WASM
+    // WASM path: no local session server to re-fetch the token from.
+    // The token is already in m_token (refreshed in-band via the token
+    // refresh timer or by the iOS shell).  Just reopen the WebSocket.
+    if (m_websocketUrl.isEmpty()) {
+        return;
+    }
+    _openWebSocket();
+#else
     if (m_sessionUrl.isEmpty()) {
         return;
     }
@@ -1121,6 +1186,7 @@ void EditudeService::onReconnectTimer()
         scheduleTokenRefresh();
         _openWebSocket();
     });
+#endif
 }
 
 void EditudeService::onPlaybackStateChanged()

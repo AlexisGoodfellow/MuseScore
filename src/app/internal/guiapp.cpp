@@ -88,8 +88,8 @@ void GuiApp::setup()
     modularity::ContextPtr ctx = std::make_shared<modularity::Context>();
     ctx->id = 0;
     std::vector<muse::modularity::IContextSetup*>& csetups = context(ctx).setups;
-    for (modularity::IContextSetup* s : csetups) {
-        s->registerExports();
+    for (modularity::IContextSetup* cs : csetups) {
+        cs->registerExports();
     }
 #endif
 
@@ -102,8 +102,8 @@ void GuiApp::setup()
     }
 
 #ifndef MUSE_MULTICONTEXT_WIP
-    for (modularity::IContextSetup* s : csetups) {
-        s->resolveImports();
+    for (modularity::IContextSetup* cs : csetups) {
+        cs->resolveImports();
     }
 #endif
 
@@ -121,8 +121,8 @@ void GuiApp::setup()
     }
 
 #ifndef MUSE_MULTICONTEXT_WIP
-    for (modularity::IContextSetup* s : csetups) {
-        s->onPreInit(runMode);
+    for (modularity::IContextSetup* cs : csetups) {
+        cs->onPreInit(runMode);
     }
 #endif
 
@@ -163,8 +163,8 @@ void GuiApp::setup()
     }
 
 #ifndef MUSE_MULTICONTEXT_WIP
-    for (modularity::IContextSetup* s : csetups) {
-        s->onInit(runMode);
+    for (modularity::IContextSetup* cs : csetups) {
+        cs->onInit(runMode);
     }
 #endif
 
@@ -177,8 +177,8 @@ void GuiApp::setup()
     }
 
 #ifndef MUSE_MULTICONTEXT_WIP
-    for (modularity::IContextSetup* s : csetups) {
-        s->onAllInited(runMode);
+    for (modularity::IContextSetup* cs : csetups) {
+        cs->onAllInited(runMode);
     }
 #endif
 
@@ -354,14 +354,6 @@ muse::modularity::ContextPtr GuiApp::setupNewContext(const StringList& args)
 #endif
 
     // Load main window
-#if defined(Q_OS_MAC)
-    QString platform = "mac";
-#elif defined(Q_OS_WIN)
-    QString platform = "win";
-#else
-    QString platform = "linux";
-#endif
-
     QQmlApplicationEngine* engine = muse::modularity::ioc(ctxId)->resolve<muse::ui::IUiEngine>("app")->qmlAppEngine();
 
     QObject::connect(engine, &QQmlApplicationEngine::objectCreated, qApp, [](QObject* obj, const QUrl&) {
@@ -374,7 +366,16 @@ muse::modularity::ContextPtr GuiApp::setupNewContext(const StringList& args)
         });
     }, Qt::DirectConnection);
 
-    QString path = QString(":/qt/qml/MuseScore/AppShell/platform/%1/Main.qml").arg(platform);
+    // [editure] Web appshell registers Main.qml in its own QRC, not under the platform/ hierarchy
+#ifdef Q_OS_WASM
+    QString path = QStringLiteral(":/qml/Main.qml");
+#elif defined(Q_OS_MAC)
+    QString path = QStringLiteral(":/qt/qml/MuseScore/AppShell/platform/mac/Main.qml");
+#elif defined(Q_OS_WIN)
+    QString path = QStringLiteral(":/qt/qml/MuseScore/AppShell/platform/win/Main.qml");
+#else
+    QString path = QStringLiteral(":/qt/qml/MuseScore/AppShell/platform/linux/Main.qml");
+#endif
     QQmlComponent component = QQmlComponent(engine, path);
     if (!component.isReady()) {
         LOGE() << "Failed to load main qml file, err: " << component.errorString();
@@ -453,7 +454,11 @@ muse::modularity::ContextPtr GuiApp::setupNewContext(const StringList& args)
         // Transparency will be removed after the page loads.
         Context& ctx = context(ctxId);
         ctx.window = dynamic_cast<QQuickWindow*>(obj);
+#ifndef Q_OS_WASM
+        // Native: start nearly transparent to hide the empty window frame during page load.
+        // The dock window system restores opacity after the page is ready.
         ctx.window->setOpacity(0.01);
+#endif
         ctx.window->setVisible(true);
 
         startupScenario->runAfterSplashScreen();
@@ -550,6 +555,7 @@ void GuiApp::finish()
 
 void GuiApp::applyCommandLineOptions(const CmdOptions& options)
 {
+#ifndef Q_OS_WASM
     if (options.app.revertToFactorySettings) {
         appshellConfiguration()->revertToFactorySettings(options.app.revertToFactorySettings.value());
     }
@@ -575,6 +581,7 @@ void GuiApp::applyCommandLineOptions(const CmdOptions& options)
 
         // startupScenario()->setStartupScoreFile(file);
     }
+#endif
 
     if (options.app.loggerLevel) {
         m_globalModule->setLoggerLevel(options.app.loggerLevel.value());

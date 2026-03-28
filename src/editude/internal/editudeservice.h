@@ -162,6 +162,7 @@ private:
     bool m_fileNewPending = false;
     bool m_fileOpenPending = false;
     bool m_reclaimNotation = false;
+    bool m_wasmReadySent = false;
     QString m_bootstrapBatchId;
     OperationTranslator m_translator;
     ScoreApplicator m_applicator;
