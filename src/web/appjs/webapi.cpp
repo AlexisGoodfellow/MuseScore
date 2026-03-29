@@ -128,6 +128,31 @@ void WebApi::startAudioProcessing()
     }
 }
 
+// [editude] Zoom controls — dispatch existing registered actions.
+void WebApi::zoomIn()
+{
+    auto disp = contextResolve<muse::actions::IActionsDispatcher>();
+    if (disp) {
+        disp->dispatch("zoomin");
+    }
+}
+
+void WebApi::zoomOut()
+{
+    auto disp = contextResolve<muse::actions::IActionsDispatcher>();
+    if (disp) {
+        disp->dispatch("zoomout");
+    }
+}
+
+void WebApi::setZoom(int zoomPercent)
+{
+    auto disp = contextResolve<muse::actions::IActionsDispatcher>();
+    if (disp) {
+        disp->dispatch("zoom-x-percent", muse::actions::ActionData::make_arg1<int>(zoomPercent));
+    }
+}
+
 void WebApi::onProjectSaved(const muse::io::path_t& path, mu::project::SaveMode)
 {
     IF_ASSERT_FAILED(io::File::exists(path)) {

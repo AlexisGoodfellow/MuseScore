@@ -251,6 +251,26 @@ void EditudeService::start()
         m_bootstrapReady   = false;
     }
 
+    // Apply theme preferences from iOS shell (light/dark + accent color).
+    emscripten::val themeVal = session["theme"];
+    if (!themeVal.isUndefined() && !themeVal.isNull()) {
+        std::string themeStr = themeVal.as<std::string>();
+        if (!themeStr.empty()) {
+            m_uiConfiguration()->setCurrentTheme(themeStr);
+            LOGI() << "[editude] applied theme from iOS shell:" << themeStr;
+        }
+    }
+    emscripten::val accentVal = session["accentColor"];
+    if (!accentVal.isUndefined() && !accentVal.isNull()) {
+        QString colorStr = QString::fromStdString(accentVal.as<std::string>());
+        QColor color(colorStr);
+        if (color.isValid()) {
+            m_uiConfiguration()->setCurrentThemeStyleValue(
+                muse::ui::ThemeStyleKey::ACCENT_COLOR, muse::Val(color));
+            LOGI() << "[editude] applied accent color from iOS shell:" << colorStr;
+        }
+    }
+
     // Handle page opens from the startup scenario or from openProject().
     m_interactive()->opened().onReceive(this, [this](const muse::Uri& uri) {
         LOGI() << "[editude WASM] page opened:" << uri.toString();

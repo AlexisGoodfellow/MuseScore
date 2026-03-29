@@ -38,4 +38,14 @@ void addSoundFont(const char* uri)
 
 EMSCRIPTEN_KEEPALIVE
 void startAudioProcessing() { WebApi::instance()->startAudioProcessing(); }
+
+// [editude] Zoom controls for JS/iOS pinch-to-zoom bridge.
+EMSCRIPTEN_KEEPALIVE
+void webZoomIn() { WebApi::instance()->zoomIn(); }
+
+EMSCRIPTEN_KEEPALIVE
+void webZoomOut() { WebApi::instance()->zoomOut(); }
+
+EMSCRIPTEN_KEEPALIVE
+void webSetZoom(int zoomPercent) { WebApi::instance()->setZoom(zoomPercent); }
 }

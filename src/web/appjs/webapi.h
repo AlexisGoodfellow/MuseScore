@@ -53,6 +53,11 @@ public:
     void addSoundFont(const std::string& uri);
     void startAudioProcessing();
 
+    // [editude] Zoom controls for JS/iOS pinch-to-zoom bridge.
+    void zoomIn();
+    void zoomOut();
+    void setZoom(int zoomPercent);
+
 private:
 
     WebApi() = default;

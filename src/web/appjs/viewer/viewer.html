@@ -16,31 +16,15 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
 
     <title>MuseScoreStudio</title>
     <style>
-      html, body { padding: 0; margin: 0; overflow: hidden; height: 100% }
+      html, body { padding: 0; margin: 0; overflow: hidden; height: 100%; background: #2D2D30; }
       #spinner {
         display: flex;
-        justify-content: center; /* горизонтальное выравнивание */
-        align-items: center;     /* вертикальное выравнивание */
-        height: 100vh;           /* на всю высоту viewport */
-      }
-      #panel { 
-        width: 100%; 
-        height: 40px; 
-        background-color: #f0f0f0; 
-        display: flex; 
+        justify-content: center;
         align-items: center;
-        padding: 2px 5px;
-        box-sizing: border-box;
+        height: 100vh;
+        color: #EBEBEB;
       }
-      #panel button {
-        margin-right: 5px;
-        height: 16px;
-        font-size: 10px;
-        line-height: 10px;
-        padding: 0 4px;
-        cursor: pointer;
-      }
-      #screen { width: 100%; height: calc(100% - 40px); }
+      #screen { width: 100%; height: 100%; }
     </style>
   </head>
   <body>
@@ -114,6 +98,50 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
 
         console.log("[viewer] createMuApi resolved — WASM loaded");
         document.addEventListener('click', window.muapi.startAudioProcessing, { once: true });
+
+        // [editude] Pinch-to-zoom for touch devices.
+        // Uses capture phase on #screen so we intercept 2-finger touches before
+        // Qt's canvas event handlers. Works in both browser and iOS WKWebView.
+        (function() {
+          let baseZoom = 100;
+          let initialDist = 0;
+          let lastZoom = 100;
+
+          function dist(a, b) {
+            const dx = a.clientX - b.clientX;
+            const dy = a.clientY - b.clientY;
+            return Math.sqrt(dx * dx + dy * dy);
+          }
+
+          screen.addEventListener('touchstart', function(e) {
+            if (e.touches.length === 2) {
+              initialDist = dist(e.touches[0], e.touches[1]);
+              baseZoom = lastZoom;
+              e.preventDefault();
+              e.stopPropagation();
+            }
+          }, { capture: true, passive: false });
+
+          screen.addEventListener('touchmove', function(e) {
+            if (e.touches.length === 2 && initialDist > 0) {
+              const d = dist(e.touches[0], e.touches[1]);
+              const scale = d / initialDist;
+              const z = Math.max(25, Math.min(400, Math.round(baseZoom * scale)));
+              if (z !== lastZoom && window.muapi && window.muapi._webSetZoom) {
+                window.muapi._webSetZoom(z);
+                lastZoom = z;
+              }
+              e.preventDefault();
+              e.stopPropagation();
+            }
+          }, { capture: true, passive: false });
+
+          screen.addEventListener('touchend', function(e) {
+            if (e.touches.length < 2) initialDist = 0;
+          }, { capture: true });
+
+          console.log("[viewer] pinch-to-zoom JS handler installed (capture phase on #screen)");
+        })();
     } catch (e) {
         console.error("[viewer] FATAL:", e);
         console.error(e.stack);
