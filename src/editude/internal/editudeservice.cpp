@@ -550,11 +550,36 @@ void EditudeService::bootstrapAndConnect()
 
 void EditudeService::applyPendingOps()
 {
+    LOGW() << "[editude] bootstrap: replaying" << m_pendingOps.size()
+           << "ops (server_revision" << m_serverRevision << ")";
+    int idx = 0;
     for (const QJsonValue& v : m_pendingOps) {
-        m_applicator.apply(m_score, v.toObject().value("payload").toObject());
+        QJsonObject opObj = v.toObject();
+        QJsonObject payload = opObj.value("payload").toObject();
+        int rev = opObj.value("revision").toInt(-1);
+        QString type = payload.value("type").toString();
+        bool ok = m_applicator.apply(m_score, payload);
+        if (!ok || type == QLatin1String("DeleteNote") || type == QLatin1String("InsertNote")) {
+            LOGW() << "[editude] bootstrap op" << idx << "rev=" << rev
+                   << "type=" << type << "ok=" << ok;
+            if (type == QLatin1String("DeleteNote") || type == QLatin1String("InsertNote")) {
+                QJsonObject pitch = payload.value("pitch").toObject();
+                QJsonObject beat = payload.value("beat").toObject();
+                LOGW() << "  pitch=" << pitch.value("step").toString()
+                       << pitch.value("octave").toInt()
+                       << "acc=" << pitch.value("accidental").toString()
+                       << "beat=" << beat.value("numerator").toInt()
+                       << "/" << beat.value("denominator").toInt();
+            }
+        }
+        // Clear undo stack between ops — matches the live op_batch path which
+        // calls clearAll() after each sub-op.  Without this, accumulated undo
+        // entries from InsertNote can interfere with subsequent DeleteNote
+        // when they share elements (e.g. Tuplet members).
+        m_score->undoStack()->clearAll();
+        ++idx;
     }
-    LOGD() << "[editude] applied" << m_pendingOps.size()
-           << "bootstrap ops; at server_revision" << m_serverRevision;
+    LOGW() << "[editude] bootstrap: finished" << m_pendingOps.size() << "ops";
 }
 
 void EditudeService::onConnected()
@@ -700,7 +725,7 @@ void EditudeService::onServerMessage(const QString& text)
         if (revision > m_serverRevision) {
             m_serverRevision = revision;
         }
-        LOGD() << "[editude] op_batch_ack batch_id=" << msg.value("batch_id").toString()
+        LOGW() << "[editude] op_batch_ack batch_id=" << msg.value("batch_id").toString()
                << "revision=" << revision;
 
         // Deferred initial snapshot upload: the bootstrap AddPart batch has
@@ -814,7 +839,8 @@ void EditudeService::onServerMessage(const QString& text)
 
     } else if (type == "op_error") {
         const QString code = msg.value("code").toString();
-        LOGD() << "[editude] op_error code=" << code;
+        LOGW() << "[editude] op_error code=" << code
+               << "reason=" << msg.value("reason").toString();
         if ((code == "op_superseded" || code == "batch_superseded") && m_presenceModel) {
             m_presenceModel->showToast(
                 "Your edit conflicted with a concurrent change and was not applied.");
@@ -905,7 +931,7 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
         return;
     }
 
-    LOGD() << "[editude] onScoreChanges: changedObjects=" << changes.changedObjects.size()
+    LOGW() << "[editude] onScoreChanges: changedObjects=" << changes.changedObjects.size()
            << "state=" << static_cast<int>(m_state)
            << "socket=" << (m_socket != nullptr);
 
@@ -937,7 +963,7 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
     QVector<QJsonObject> allOps = ops;
 
     if (allOps.isEmpty()) {
-        LOGD() << "[editude] onScoreChanges: translateAll produced 0 ops, dropping";
+        LOGW() << "[editude] onScoreChanges: translateAll produced 0 ops, dropping";
         return;
     }
 
@@ -978,9 +1004,11 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
     msg["ops"]           = opsArray;
 
     for (const QJsonObject& op : allOps) {
-        LOGD() << "[editude] onScoreChanges: sending op type=" << op.value("type").toString()
-               << "base_rev=" << baseRevision;
+        LOGW() << "[editude] onScoreChanges: sending op"
+               << QJsonDocument(op).toJson(QJsonDocument::Compact);
     }
+    LOGW() << "[editude] onScoreChanges: SENT op_batch with " << allOps.size()
+           << " ops, client_seq=" << m_clientSeq << " base_rev=" << baseRevision;
     m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
 
     refreshAnnotationOverlay();

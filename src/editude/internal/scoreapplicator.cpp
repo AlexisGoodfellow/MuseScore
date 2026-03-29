@@ -319,8 +319,8 @@ bool ScoreApplicator::applyDeleteNote(Score* score, const QJsonObject& op)
 
         if (onlyNonRest) {
             // Replace the whole voice with a full-measure rest.
-            Segment* seg0 = measure->getSegmentR(SegmentType::ChordRest,
-                                                  measure->tick());
+            Segment* seg0 = measure->getSegment(SegmentType::ChordRest,
+                                                 measure->tick());
             score->setNoteRest(seg0, track, NoteVal(), measure->ticks());
         } else {
             score->deleteItem(chord);
@@ -363,7 +363,7 @@ bool ScoreApplicator::applyDeleteRest(Score* score, const QJsonObject& op)
     const track_idx_t track = trackFromCoord(part, voice, stf);
 
     score->startCmd(TranslatableString("undoableAction", "Delete rest"));
-    Segment* seg0 = measure->getSegmentR(SegmentType::ChordRest, measure->tick());
+    Segment* seg0 = measure->getSegment(SegmentType::ChordRest, measure->tick());
     score->setNoteRest(seg0, track, NoteVal(), measure->ticks());
     score->endCmd();
     return true;

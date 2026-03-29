@@ -679,6 +679,19 @@ QVector<QJsonObject> OperationTranslator::translateAll(
 
     // ── Pass 8: DeleteNote ──────────────────────────────────────────────
     // Identify which chords/rests are being fully removed in this transaction.
+
+    // [editude] Diagnostic: dump all changedObjects for delete debugging.
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj) continue;
+        QStringList cmdNames;
+        for (auto c : cmds) {
+            cmdNames.append(QString::number(static_cast<int>(c)));
+        }
+        LOGW() << "[editude] Pass8 changedObj: type="
+               << static_cast<int>(obj->type())
+               << " cmds=[" << cmdNames.join(",") << "]";
+    }
+
     QSet<EngravingObject*> removedChordsAndRests;
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || !cmds.count(CommandType::RemoveElement)) {
@@ -694,6 +707,8 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             removedChordsAndRests.insert(obj);
         }
     }
+
+    LOGW() << "[editude] Pass8: removedChordsAndRests=" << removedChordsAndRests.size();
 
     QSet<EngravingObject*> emittedRemovals; // guard against double-emitting
     for (const auto& [obj, cmds] : changedObjects) {
@@ -755,6 +770,47 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                     resolvePartUuid(notePart, lazyAddPartOps);
                 if (!partUuid.isEmpty()) {
                     ops.append(buildDeleteNote(note, partUuid));
+                }
+            }
+        }
+
+        // Handle chords that have RemoveElement but whose individual notes
+        // do NOT have their own RemoveElement entries in changedObjects.
+        // This happens when cmdDeleteSelection() calls removeChordRest()
+        // on a single-note chord — only the chord gets the undo command.
+        if (obj->type() == ElementType::CHORD
+            && removedChordsAndRests.contains(obj)
+            && !emittedRemovals.contains(obj)) {
+            Chord* chord = static_cast<Chord*>(obj);
+            LOGW() << "[editude] Pass8 CHORD handler: chord=" << (void*)chord
+                   << " notes=" << chord->notes().size()
+                   << " isGrace=" << chord->isGrace();
+            if (chord->isGrace()) {
+                continue;
+            }
+            if (chord->tuplet()
+                && fullyRemovedTuplets.contains(chord->tuplet())) {
+                LOGW() << "[editude] Pass8 CHORD handler: skipped (in removed tuplet)";
+                continue;
+            }
+            emittedRemovals.insert(obj);
+            Part* notePart = chord->staff()
+                             ? chord->staff()->part() : nullptr;
+            if (!notePart) {
+                notePart = resolvePartFromTrack(
+                    chord->track(), m_knownPartUuids);
+            }
+            if (!notePart) {
+                LOGW() << "[editude] Pass8 CHORD handler: no part found";
+                continue;
+            }
+            const QString partUuid =
+                resolvePartUuid(notePart, lazyAddPartOps);
+            LOGW() << "[editude] Pass8 CHORD handler: partUuid="
+                   << partUuid << " emitting " << chord->notes().size() << " DeleteNote ops";
+            if (!partUuid.isEmpty()) {
+                for (Note* n : chord->notes()) {
+                    ops.append(buildDeleteNote(n, partUuid));
                 }
             }
         }
@@ -1906,6 +1962,13 @@ QJsonObject OperationTranslator::buildInsertNote(Note* note, const QString& part
     const DurationType dt   = note->chord()->durationType().type();
     const int          dots = note->chord()->dots();
 
+    LOGW() << "[editude] buildInsertNote: note=" << (void*)note
+           << " pitch=" << note->pitch()
+           << " tpc1=" << note->tpc1()
+           << " tpc2=" << note->tpc2()
+           << " tick=" << tick.toString()
+           << " track=" << note->track();
+
     QJsonObject duration;
     duration["type"] = durationTypeName(dt);
     duration["dots"] = dots;
@@ -1963,6 +2026,16 @@ QJsonObject OperationTranslator::buildInsertRest(Rest* rest, const QString& part
 QJsonObject OperationTranslator::buildDeleteNote(Note* note, const QString& partId)
 {
     Part* part = note->staff() ? note->staff()->part() : nullptr;
+    Chord* chord = note->chord();
+    LOGW() << "[editude] buildDeleteNote: note=" << (void*)note
+           << " chord=" << (void*)chord
+           << " segment=" << (void*)chord->segment()
+           << " tick=" << chord->tick().toString()
+           << " pitch=" << note->pitch()
+           << " tpc1=" << note->tpc1()
+           << " tpc2=" << note->tpc2()
+           << " track=" << note->track()
+           << " partId=" << partId;
     QJsonObject payload;
     payload["type"]    = QStringLiteral("DeleteNote");
     payload["part_id"] = partId;
@@ -1970,6 +2043,11 @@ QJsonObject OperationTranslator::buildDeleteNote(Note* note, const QString& part
     payload["pitch"]   = pitchJsonFromNote(note);
     payload["voice"]   = part ? voiceFromTrack(part, note->track()) : 1;
     payload["staff"]   = part ? staffFromTrack(part, note->track()) : 0;
+    LOGW() << "[editude] buildDeleteNote result:"
+           << " beat=" << QJsonDocument(payload["beat"].toObject()).toJson(QJsonDocument::Compact)
+           << " pitch=" << QJsonDocument(payload["pitch"].toObject()).toJson(QJsonDocument::Compact)
+           << " voice=" << payload["voice"].toInt()
+           << " staff=" << payload["staff"].toInt();
     return payload;
 }
 
