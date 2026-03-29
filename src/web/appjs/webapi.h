@@ -24,6 +24,7 @@
 #include "global/async/asyncable.h"
 
 #include "global/modularity/ioc.h"
+#include "global/iapplication.h"
 #include "interactive/iinteractive.h"
 #include "actions/iactionsdispatcher.h"
 #include "context/iglobalcontext.h"
@@ -31,13 +32,15 @@
 #include "audio/main/isoundfontcontroller.h"
 
 namespace mu::appjs {
+
+// [editude] Upstream WebApi used GlobalInject for interfaces that are now
+// context-scoped (IInteractive, IActionsDispatcher, IGlobalContext,
+// IStartAudioController, ISoundFontController).  Refactored to resolve
+// from the first active context at call time — correct for the single-window
+// WASM environment.
 class WebApi : public muse::async::Asyncable
 {
-    inline static muse::GlobalInject<muse::IInteractive> interactive;
-    inline static muse::GlobalInject<muse::actions::IActionsDispatcher> dispatcher;
-    inline static muse::GlobalInject<mu::context::IGlobalContext> globalContext;
-    inline static muse::GlobalInject<muse::audio::IStartAudioController> startAudioController;
-    inline static muse::GlobalInject<muse::audio::ISoundFontController> soundFontController;
+    inline static muse::GlobalInject<muse::IApplication> s_application;
 
 public:
 
@@ -53,6 +56,21 @@ public:
 private:
 
     WebApi() = default;
+
+    // Resolve a context-scoped service from the first (only) active context.
+    template<typename T>
+    std::shared_ptr<T> contextResolve() const
+    {
+        auto app = s_application();
+        if (!app) {
+            return nullptr;
+        }
+        auto ctxs = app->contexts();
+        if (ctxs.empty()) {
+            return nullptr;
+        }
+        return muse::modularity::ioc(ctxs.front())->template resolve<T>("appjs");
+    }
 
     void onProjectSaved(const muse::io::path_t& path, mu::project::SaveMode mode);
 

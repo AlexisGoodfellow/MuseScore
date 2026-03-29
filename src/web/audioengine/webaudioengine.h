@@ -23,9 +23,7 @@
 
 #include <memory>
 
-namespace muse {
-class GlobalModule;
-}
+#include "global/modularity/ioc.h"
 
 namespace muse::audio::rpc {
 class IRpcChannel;
@@ -33,6 +31,9 @@ class IRpcChannel;
 
 namespace muse::audio::engine {
 class EngineController;
+class EngineGlobalSetup;
+class EngineContextSetup;
+
 class WebAudioEngine
 {
 public:
@@ -45,7 +46,10 @@ public:
 private:
     WebAudioEngine() = default;
 
+    modularity::ContextPtr m_ctx;
     std::shared_ptr<rpc::IRpcChannel> m_rpcChannel;
-    std::shared_ptr<engine::EngineController> m_controller;
+    std::shared_ptr<EngineGlobalSetup> m_globalSetup;
+    std::shared_ptr<EngineContextSetup> m_contextSetup;
+    std::shared_ptr<EngineController> m_controller;
 };
 }

@@ -48,6 +48,13 @@ let AudioDriver = (function () {
                 console.error(error)
             }
 
+            // [editude] Guard: if AudioWorklet failed to load (e.g. MuseAudio.js
+            // missing), processor is null. Audio won't work but app continues.
+            if (!processor) {
+                console.warn("[audiodriver] AudioWorklet init failed — audio disabled");
+                return;
+            }
+
             // driver (processor) -> main
             processor.port.onmessage = function(event) {
                 console.log("[processor]", event.data)
@@ -65,7 +72,7 @@ let AudioDriver = (function () {
                 config: config,
                 rpcPort: rpcPort,
                 options: {}
-            }, [rpcPort]); 
+            }, [rpcPort]);
         },
 
         outputSpec: function() {

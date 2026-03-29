@@ -50,6 +50,7 @@
 #include "engraving/engravingproject.h"
 #include "engraving/infrastructure/mscwriter.h"
 #include "global/io/buffer.h"
+#include "global/io/file.h"
 #include "notation/internal/igetscore.h"
 #include "log.h"
 #include "annotationoverlay.h"
@@ -206,18 +207,25 @@ void EditudeService::start()
             QJsonObject snapshot = snapVal.toObject();
             m_snapshotRevision = snapshot.value("revision").toInt(0);
             QString contentB64 = snapshot.value("content_b64").toString();
+            LOGI() << "[editude] content_b64 length=" << contentB64.size();
             QByteArray msczData = QByteArray::fromBase64(contentB64.toUtf8());
+            LOGI() << "[editude] decoded MSCZ size=" << msczData.size();
 
-            QString tmpPath = QStringLiteral("/tmp/editude_bootstrap.mscz");
-            QFile tmpFile(tmpPath);
-            if (tmpFile.open(QIODevice::WriteOnly)) {
-                tmpFile.write(msczData);
-                tmpFile.close();
-                m_snapshotPath = tmpPath;
+            // Write MSCZ bytes using MuseScore's own io::File abstraction,
+            // which is the same path the WebApi::load() uses on WASM.
+            // Qt's QFile and raw Emscripten FS.writeFile() both fail to
+            // produce files visible to openProject()'s MscReader.
+            muse::io::path_t tmpPath("/mu/temp/editude_bootstrap.mscz");
+            muse::io::File::remove(tmpPath);
+            muse::ByteArray museData(msczData.constData(), msczData.size());
+            muse::Ret writeRet = muse::io::File::writeFile(tmpPath, museData);
+            if (writeRet) {
+                m_snapshotPath = tmpPath.toQString();
                 LOGI() << "[editude] WASM snapshot written to" << tmpPath
                        << "(" << msczData.size() << "bytes)";
             } else {
-                LOGW() << "[editude] failed to write snapshot to Emscripten VFS";
+                LOGW() << "[editude] failed to write snapshot:"
+                       << writeRet.toString();
             }
         } else {
             m_snapshotRevision = 0;
@@ -227,6 +235,13 @@ void EditudeService::start()
         m_pendingOps = bootstrapObj.value("ops").toArray();
         m_serverParts = bootstrapObj.value("parts").toArray();
         m_bootstrapReady = true;
+
+        LOGI() << "[editude] WASM bootstrap parsed:"
+               << " snapshotRev=" << m_snapshotRevision
+               << " serverRev=" << m_serverRevision
+               << " pendingOps=" << m_pendingOps.size()
+               << " parts=" << m_serverParts.size()
+               << " snapshotPath=" << m_snapshotPath;
     } else {
         LOGW() << "[editude] window.editudeSession.bootstrap not set";
         m_snapshotRevision = 0;
@@ -236,9 +251,10 @@ void EditudeService::start()
         m_bootstrapReady   = false;
     }
 
-    // Listen for the startup scenario opening a page (typically HOME).
-    // Same handler as desktop path — see comment below.
-    m_interactive()->opened().onReceive(this, [this](const muse::Uri&) {
+    // Handle page opens from the startup scenario or from openProject().
+    m_interactive()->opened().onReceive(this, [this](const muse::Uri& uri) {
+        LOGI() << "[editude WASM] page opened:" << uri.toString();
+
         if (m_fileNewPending) {
             m_fileNewPending = false;
             m_dispatcher()->dispatch("file-new");
@@ -251,11 +267,29 @@ void EditudeService::start()
         }
     });
 
-    // Defer to next event-loop iteration so QML page navigation (triggered by
-    // openProject) runs outside the module init stack.
-    QTimer::singleShot(0, this, [this]() {
+    // Delay project opening until the startup scenario has finished
+    // initialising the framework.  A 0ms timer races with the startup
+    // scenario on WASM (Qt defers page opens via QueuedConnection).
+    // 500ms is conservative but safe — the user sees the wasmReady
+    // spinner dismiss first, then the score loads.
+    QTimer::singleShot(500, this, [this]() {
+        LOGI() << "[editude WASM] deferred timer fired, bootstrapReady="
+               << m_bootstrapReady;
         if (m_bootstrapReady) {
             openScoreForSession();
+        }
+    });
+
+    // Signal wasmReady immediately to dismiss the iOS spinner.
+    QTimer::singleShot(0, this, [this]() {
+        if (!m_wasmReadySent) {
+            m_wasmReadySent = true;
+            EM_ASM(
+                if (window.webkit && window.webkit.messageHandlers &&
+                    window.webkit.messageHandlers.wasmReady) {
+                    window.webkit.messageHandlers.wasmReady.postMessage("ready");
+                }
+            );
         }
     });
 
@@ -354,6 +388,10 @@ bool EditudeService::eventFilter(QObject* watched, QEvent* event)
 
 void EditudeService::openScoreForSession()
 {
+    LOGI() << "[editude] openScoreForSession snapshotPath=" << m_snapshotPath
+           << " snapshotRev=" << m_snapshotRevision
+           << " score=" << (m_score ? "set" : "null");
+
     if (!m_snapshotPath.isEmpty()) {
         if (!m_score) {
             // Score not loaded yet.  Open the snapshot file via MuseScore's
@@ -366,8 +404,10 @@ void EditudeService::openScoreForSession()
             // If the startup scenario already loaded the file (via
             // setStartupScoreFile in registerExports), m_score is set and we
             // skip this — no double-open.
+            LOGI() << "[editude] calling openProject(" << m_snapshotPath << ")";
             m_projectFiles()->openProject(
                 mu::project::ProjectFile(muse::io::path_t(m_snapshotPath)));
+            LOGI() << "[editude] openProject returned, score=" << (m_score ? "set" : "null");
         }
         bootstrapAndConnect();
         // The startup scenario will open HOME after our NOTATION page,
@@ -397,6 +437,27 @@ void EditudeService::bootstrapAndConnect()
         return;
     }
 
+    // Register parts from the server's part UUID map BEFORE applying ops.
+    // When a snapshot compacts away AddPart ops, the MSCZ has parts baked
+    // in but no ops register their UUIDs.  The server returns the part map
+    // so the client can match score parts to their editude UUIDs.  Pending
+    // ops reference these UUIDs, so registration must happen first.
+    if (!m_serverParts.isEmpty()) {
+        const auto& scoreParts = m_score->parts();
+        for (int i = 0; i < m_serverParts.size(); ++i) {
+            const QJsonObject p = m_serverParts[i].toObject();
+            const QString uuid = p.value("part_id").toString();
+            if (uuid.isEmpty() || i >= static_cast<int>(scoreParts.size())) {
+                continue;
+            }
+            mu::engraving::Part* part = scoreParts[static_cast<size_t>(i)];
+            if (!m_applicator.partUuidToPart().contains(uuid)) {
+                m_applicator.registerPart(part, uuid);
+            }
+            m_translator.registerKnownPart(part, uuid);
+        }
+    }
+
     if (!m_pendingOps.isEmpty()) {
         m_applyingRemote = true;
         m_applicator.bootstrapPartMap(m_score);
@@ -413,26 +474,6 @@ void EditudeService::bootstrapAndConnect()
         for (auto it = m_applicator.partUuidToPart().cbegin();
              it != m_applicator.partUuidToPart().cend(); ++it) {
             m_translator.registerKnownPart(it.value(), it.key());
-        }
-    }
-
-    // Register parts from the server's part UUID map.  When a snapshot
-    // compacts away AddPart ops, the MSCZ has parts baked in but no ops
-    // register their UUIDs.  The server returns the part map so the client
-    // can match score parts to their editude UUIDs.
-    if (!m_serverParts.isEmpty()) {
-        const auto& scoreParts = m_score->parts();
-        for (int i = 0; i < m_serverParts.size(); ++i) {
-            const QJsonObject p = m_serverParts[i].toObject();
-            const QString uuid = p.value("part_id").toString();
-            if (uuid.isEmpty() || i >= static_cast<int>(scoreParts.size())) {
-                continue;
-            }
-            mu::engraving::Part* part = scoreParts[static_cast<size_t>(i)];
-            if (!m_applicator.partUuidToPart().contains(uuid)) {
-                m_applicator.registerPart(part, uuid);
-            }
-            m_translator.registerKnownPart(part, uuid);
         }
     }
 
@@ -991,14 +1032,31 @@ void EditudeService::uploadInitialSnapshot()
         }
     }
 
-    LOGD() << "[editude] uploadInitialSnapshot: serialized"
+    LOGI() << "[editude] uploadInitialSnapshot: serialized"
            << msczData.size() << "bytes at revision" << m_serverRevision;
 
-    // Build the upload URL from the WebSocket URL.
+#ifdef Q_OS_WASM
+    // On WASM, HTTP POST via QNetworkAccessManager fails (cross-origin from
+    // editude-wasm:// scheme).  Send via the already-open WebSocket instead —
+    // the server's _handle_snapshot handler accepts the same format.
+    if (m_socket && m_socket->state() == QAbstractSocket::ConnectedState) {
+        QJsonObject msg;
+        msg["type"] = QStringLiteral("snapshot");
+        msg["revision"] = m_serverRevision;
+        msg["content_b64"] = QString::fromLatin1(
+            QByteArray(reinterpret_cast<const char*>(msczData.constData()),
+                       static_cast<qsizetype>(msczData.size()))
+                .toBase64());
+        m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
+        LOGI() << "[editude] initial snapshot sent via WebSocket";
+    } else {
+        LOGW() << "[editude] initial snapshot upload skipped — WebSocket not connected";
+    }
+#else
+    // Desktop: HTTP POST multipart form to /projects/{pid}/snapshots.
     QUrl uploadUrl = deriveServerBaseUrl();
     uploadUrl.setPath(QString("/projects/%1/snapshots").arg(m_projectId));
 
-    // Multipart form: revision (int) + file (binary).
     QHttpMultiPart* multiPart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
 
     QHttpPart revisionPart;
@@ -1031,6 +1089,7 @@ void EditudeService::uploadInitialSnapshot()
             LOGD() << "[editude] initial snapshot uploaded successfully";
         }
     });
+#endif
 }
 
 void EditudeService::requestNotationFocus()

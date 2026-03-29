@@ -163,6 +163,7 @@ private:
     bool m_fileOpenPending = false;
     bool m_reclaimNotation = false;
     bool m_wasmReadySent = false;
+    bool m_wasmBootstrapOpened = false;
     QString m_bootstrapBatchId;
     OperationTranslator m_translator;
     ScoreApplicator m_applicator;

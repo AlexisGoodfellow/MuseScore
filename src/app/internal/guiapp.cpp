@@ -366,7 +366,7 @@ muse::modularity::ContextPtr GuiApp::setupNewContext(const StringList& args)
         });
     }, Qt::DirectConnection);
 
-    // [editure] Web appshell registers Main.qml in its own QRC, not under the platform/ hierarchy
+    // [editude] Web appshell registers Main.qml in its own QRC, not under the platform/ hierarchy
 #ifdef Q_OS_WASM
     QString path = QStringLiteral(":/qml/Main.qml");
 #elif defined(Q_OS_MAC)

@@ -46,6 +46,7 @@ set(CMAKE_MODULE_PATH
     )
 
 
+include(GetPlatformInfo)
 include(MuseCreateModule)
 include(SetupCompileWarnings)
 include(GetBuildType)
@@ -61,12 +62,37 @@ else()
     set(EMCC_LINKER_FLAGS -Os)
 endif()
 
+# [editude] Defines and Qt stubs must come BEFORE add_subdirectory so
+# audio/common, audio/engine, and global compile without real Qt headers.
+add_definitions(-DNO_QT_SUPPORT)
+# Note: Q_OS_WASM intentionally NOT defined for the standalone MuseAudio build.
+# The only Q_OS_WASM code in the engine subtree is network-based soundfont
+# loading in soundfontrepository.cpp, which requires Asyncable inheritance
+# that doesn't exist in the standalone build.  MuseAudio receives soundfonts
+# via RPC from the main thread instead.
+set(GLOBAL_NO_INTERNAL ON)
+
+# Minimal Qt type stubs (QString, QSettings) — satisfies framework headers
+# that reference Qt types outside NO_QT_SUPPORT guards. The audio engine
+# never calls these types at runtime. Force-included because the framework
+# files use these types without #include (they're transitively available
+# from Qt in normal builds).
+#
+# Applied per-target (not add_compile_options) because FluidSynth C++ files
+# must not see the QString stub — it includes muse::String which requires
+# framework include paths that FluidSynth doesn't have.
+set(_QT_STUBS
+    "SHELL:-include ${CMAKE_CURRENT_LIST_DIR}/qt_stubs/QString"
+    "SHELL:-include ${CMAKE_CURRENT_LIST_DIR}/qt_stubs/QSettings"
+)
+
 set(AUDIO_ROOT ${MU_ROOT}/src/framework/audio)
 add_subdirectory(${AUDIO_ROOT}/common common)
+target_compile_options(muse_audio_common PRIVATE ${_QT_STUBS})
+
 set(WEBWORKER_FACADE_MODE OFF)
 add_subdirectory(${AUDIO_ROOT}/engine engine)
-
-target_link_libraries(MuseAudio PRIVATE muse_audio_common muse_audio_engine)
+target_compile_options(muse_audio_engine PRIVATE ${_QT_STUBS})
 
 add_executable(MuseAudio
     ${CMAKE_CURRENT_LIST_DIR}/engine_export.cpp
@@ -96,15 +122,20 @@ target_include_directories(MuseAudio PRIVATE
     # end compat
 )
 
-add_definitions(-DNO_QT_SUPPORT)
-add_definitions(-DQ_OS_WASM)
-set(GLOBAL_NO_INTERNAL ON)
-
+# MUSE_MODULE_AUDIO_WORKMODE must be set before configure_file — the template
+# substitutes it with #define (not #cmakedefine), so an empty value produces
+# invalid C.  Mode 1 = MUSE_MODULE_AUDIO_WORKER_MODE (standalone worker).
+set(MUSE_MODULE_AUDIO_WORKMODE 1)
 configure_file(${MU_ROOT}/src/framework/cmake/muse_framework_config.h.in muse_framework_config.h )
 
 add_subdirectory(${MU_ROOT}/src/framework/global global)
+target_compile_options(muse_global PRIVATE ${_QT_STUBS})
+
+target_compile_options(MuseAudio PRIVATE ${_QT_STUBS})
 
 target_link_libraries(MuseAudio PRIVATE
+    muse_audio_common
+    muse_audio_engine
     embind
     muse::global
 )

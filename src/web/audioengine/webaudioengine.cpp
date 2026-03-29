@@ -22,17 +22,15 @@
 #include "webaudioengine.h"
 
 #include "global/modularity/ioc.h"
-
 #include "global/runtime.h"
 
 #include "audio/common/rpc/platform/web/webrpcchannel.h"
-
 #include "audio/engine/internal/enginecontroller.h"
+#include "audio/engine/enginesetup.h"
 
 #include "log.h"
 
 using namespace muse;
-using namespace muse::io;
 using namespace muse::audio;
 using namespace muse::audio::engine;
 using namespace muse::audio::rpc;
@@ -41,16 +39,6 @@ WebAudioEngine* WebAudioEngine::instance()
 {
     static WebAudioEngine w;
     return &w;
-}
-
-static std::string moduleName()
-{
-    return "audio_engine";
-}
-
-static modularity::ModulesIoC* ioc()
-{
-    return modularity::globalIoc();
 }
 
 void WebAudioEngine::init()
@@ -76,13 +64,26 @@ void WebAudioEngine::init()
         logger->addDest(new ConsoleLogDest(ll));
     }
 
+    // Create a context for the audio engine
+    m_ctx = std::make_shared<modularity::Context>(1);
+
+    // Register global services (synth resolver, fx resolver, soundfont repo, config)
+    m_globalSetup = std::make_shared<EngineGlobalSetup>();
+    m_globalSetup->registerExports();
+    m_globalSetup->resolveImports();
+
+    // Register context services (audio engine, playback)
+    m_contextSetup = std::make_shared<EngineContextSetup>(m_ctx);
+    m_contextSetup->registerExports();
+
+    // Set up the RPC channel and register it globally
     rpc::set_last_stream_id(100000);
     m_rpcChannel = std::make_shared<WebRpcChannel>();
     m_rpcChannel->setupOnEngine();
-    ioc()->registerExport<IRpcChannel>(moduleName(), m_rpcChannel);
+    modularity::globalIoc()->registerExport<IRpcChannel>("audio_engine", m_rpcChannel);
 
-    m_controller = std::make_shared<EngineController>(m_rpcChannel);
-    m_controller->registerExports();
+    // Create and start the engine controller
+    m_controller = std::make_shared<EngineController>(m_rpcChannel, m_ctx);
     m_controller->onStartRunning();
 
     LOGI() << "Web audio engine running";

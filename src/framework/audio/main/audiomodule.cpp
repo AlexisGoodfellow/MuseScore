@@ -41,11 +41,11 @@
 #include "internal/playback.h"
 #include "internal/audiodrivercontroller.h"
 
-// [editure] EngineGlobalSetup not compiled in WASM (WEBENGINE_FACADE_MODE)
+// [editude] EngineGlobalSetup not compiled in WASM (WEBENGINE_FACADE_MODE)
 #ifndef Q_OS_WASM
 #include "audio/engine/enginesetup.h"
 #endif
-// [/editure]
+// [/editude]
 
 #include "diagnostics/idiagnosticspathsregister.h"
 
@@ -73,12 +73,12 @@ void AudioModule::registerExports()
     globalIoc()->registerExport<IAudioConfiguration>(mname, m_configuration);
     globalIoc()->registerExport<IAudioThreadSecurer>(mname, std::make_shared<AudioThreadSecurer>());
 
-    // [editure] EngineGlobalSetup not compiled in WASM (WEBENGINE_FACADE_MODE)
+    // [editude] EngineGlobalSetup not compiled in WASM (WEBENGINE_FACADE_MODE)
 #ifndef Q_OS_WASM
     m_engineGlobalSetup = std::make_shared<engine::EngineGlobalSetup>();
     m_engineGlobalSetup->registerExports();
 #endif
-    // [/editure]
+    // [/editude]
 }
 
 void AudioModule::resolveImports()

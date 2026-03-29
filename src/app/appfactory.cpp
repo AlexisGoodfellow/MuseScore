@@ -266,11 +266,11 @@
 #include "stubs/project/projectstubmodule.h"
 #endif
 
-// [editure] Skip appjs in editude builds — editude uses its own WS module
-#if defined(MUE_CONFIGURATION_IS_APPWEB) && !defined(MUE_BUILD_EDITUDE_MODULE)
+// [editude] AppJsModule provides the JS bridge for audio init (onStartApp → setupDriver)
+#if defined(MUE_CONFIGURATION_IS_APPWEB)
 #include "web/appjs/appjsmodule.h"
 #endif
-// [/editure]
+// [/editude]
 
 using namespace muse;
 using namespace mu::app;
@@ -426,11 +426,13 @@ std::shared_ptr<muse::IApplication> AppFactory::newGuiApp(const CmdOptions& opti
     app->addModule(new muse::update::UpdateModule());
     app->addModule(new muse::workspace::WorkspaceModule());
 
-// [editure] Skip appjs in editude builds
-#if defined(MUE_CONFIGURATION_IS_APPWEB) && !defined(MUE_BUILD_EDITUDE_MODULE)
+// [editude] AppJsModule provides the C++ → JS bridge for onStartApp (triggers
+// audio driver init) and the WebApi export functions (_startAudioProcessing,
+// _addSoundFont). Needed in editude WASM builds for audio playback.
+#if defined(MUE_CONFIGURATION_IS_APPWEB)
     app->addModule(new mu::appjs::AppJsModule());
 #endif
-// [/editure]
+// [/editude]
 
     return app;
 }

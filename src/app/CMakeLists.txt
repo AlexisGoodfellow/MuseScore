@@ -192,11 +192,12 @@ if (OS_IS_WIN)
     )
 endif()
 
-# [editure] Skip appjs for editude builds — uses its own WS module
-if (MUE_CONFIGURATION_IS_APPWEB AND NOT MUE_BUILD_EDITUDE_MODULE)
+# [editude] AppJsModule + WebApi provides the JS bridge for audio init
+# (onStartApp → setupDriver → _startAudioProcessing). Needed in all WASM builds.
+if (MUE_CONFIGURATION_IS_APPWEB)
     list(APPEND LINK_LIB appjs)
 endif()
-# [/editure]
+# [/editude]
 
 ###########################################
 # Resources
@@ -228,11 +229,12 @@ if (MUE_ENABLE_CONSOLEAPP)
     )
 endif()
 
-# [editure] Skip webapi_export for editude builds — uses its own WS module
-if (CC_IS_EMCC AND NOT MUE_BUILD_EDITUDE_MODULE)
+# [editude] webapi_export.cpp provides EMSCRIPTEN_KEEPALIVE wrappers for
+# _startAudioProcessing, _addSoundFont, _load — called from JS audio init chain.
+if (CC_IS_EMCC)
     set(APP_SRC ${APP_SRC} webapi_export.cpp)
 endif()
-# [/editure]
+# [/editude]
 
 qt_add_executable(MuseScoreStudio
     WIN32 MACOSX_BUNDLE
@@ -245,7 +247,7 @@ qt_add_executable(MuseScoreStudio
 # Setting target properties
 ###########################################
 
-# [editure] In the web build, src/web/appshell/ headers must shadow src/appshell/ headers
+# [editude] In the web build, src/web/appshell/ headers must shadow src/appshell/ headers
 # to avoid ODR violations (different class layouts between web and native appshell).
 if (MUE_CONFIGURATION_IS_APPWEB)
     target_include_directories(MuseScoreStudio BEFORE PRIVATE ${PROJECT_SOURCE_DIR}/src/web)

@@ -61,12 +61,19 @@ WebApi* WebApi::instance()
 
 void WebApi::init()
 {
-    auto onProjectChanged = [this]() {
+    // [editude] Resolve context-scoped globalContext at call time.
+    auto gc = contextResolve<mu::context::IGlobalContext>();
+    if (!gc) {
+        LOGW() << "WebApi::init() — IGlobalContext not available yet, skipping save hook";
+        return;
+    }
+
+    auto onProjectChanged = [this, gc]() {
         if (m_currentProject) {
-            m_currentProject->saveComplited().resetOnReceive(this);
+            m_currentProject->saveComplited().disconnect(this);
         }
 
-        m_currentProject = globalContext()->currentProject();
+        m_currentProject = gc->currentProject();
 
         if (m_currentProject) {
             m_currentProject->saveComplited().onReceive(this, [this](const muse::io::path_t& path, project::SaveMode mode) {
@@ -75,7 +82,7 @@ void WebApi::init()
         }
     };
 
-    globalContext()->currentProjectChanged().onNotify(this, onProjectChanged);
+    gc->currentProjectChanged().onNotify(this, onProjectChanged);
 
     onProjectChanged();
 }
@@ -83,7 +90,7 @@ void WebApi::init()
 void WebApi::deinit()
 {
     if (m_currentProject) {
-        m_currentProject->saveComplited().resetOnReceive(this);
+        m_currentProject->saveComplited().disconnect(this);
     }
 }
 
@@ -99,17 +106,26 @@ void WebApi::load(const void* source, unsigned int len)
     //! NOTE Write new project
     io::File::writeFile(tempFilePath, data);
 
-    dispatcher()->dispatch("file-open", actions::ActionData::make_arg1(QUrl::fromLocalFile(tempFilePath.toQString())));
+    auto disp = contextResolve<muse::actions::IActionsDispatcher>();
+    if (disp) {
+        disp->dispatch("file-open", actions::ActionData::make_arg1(QUrl::fromLocalFile(tempFilePath.toQString())));
+    }
 }
 
 void WebApi::addSoundFont(const std::string& uri)
 {
-    soundFontController()->addSoundFont(Uri(uri));
+    auto sfc = contextResolve<muse::audio::ISoundFontController>();
+    if (sfc) {
+        sfc->addSoundFont(Uri(uri));
+    }
 }
 
 void WebApi::startAudioProcessing()
 {
-    startAudioController()->startAudioProcessing(IApplication::RunMode::GuiApp);
+    auto ctrl = contextResolve<muse::audio::IStartAudioController>();
+    if (ctrl) {
+        ctrl->startAudioProcessing(IApplication::RunMode::GuiApp);
+    }
 }
 
 void WebApi::onProjectSaved(const muse::io::path_t& path, mu::project::SaveMode)

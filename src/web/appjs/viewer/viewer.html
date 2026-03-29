@@ -77,9 +77,11 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
       }
 
       try {
-      
+
         showUi(spinner);
         status.innerHTML = 'Loading...';
+        console.log("[viewer] module script running, MuseScoreStudio_entry:", typeof window.MuseScoreStudio_entry);
+        console.log("[viewer] editudeSession:", window.editudeSession ? "present" : "absent");
 
         window.muapi = await createMuApi({
 
@@ -87,7 +89,16 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
           screen: screen,
 
           // runtime
-          onLoaded: () => showUi(screen),
+          onLoaded: () => {
+            showUi(screen);
+            // [editude] Notify iOS shell that the WASM app is painting.
+            // Dismisses the "Synchronizing..." spinner independently of
+            // C++ EditudeService bootstrap (which may still be loading the score).
+            if (window.webkit && window.webkit.messageHandlers &&
+                window.webkit.messageHandlers.wasmReady) {
+              window.webkit.messageHandlers.wasmReady.postMessage("ready");
+            }
+          },
           onExit: function(exitData) {
             status.innerHTML = 'Application exit';
             status.innerHTML += exitData.code !== undefined ? ` with code ${exitData.code}` : '';
@@ -101,9 +112,10 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
           }   
         })
 
+        console.log("[viewer] createMuApi resolved — WASM loaded");
         document.addEventListener('click', window.muapi.startAudioProcessing, { once: true });
     } catch (e) {
-        console.error(e);
+        console.error("[viewer] FATAL:", e);
         console.error(e.stack);
     }
     </script>

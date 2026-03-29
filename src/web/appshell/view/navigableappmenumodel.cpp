@@ -25,7 +25,7 @@
 #include <QWindow>
 #include <QKeyEvent>
 
-// [editure] QKeyMapper private API not available in WASM
+// [editude] QKeyMapper private API not available in WASM
 #ifndef __EMSCRIPTEN__
 #include <private/qkeymapper_p.h>
 #endif
