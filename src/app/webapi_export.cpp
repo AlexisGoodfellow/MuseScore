@@ -48,4 +48,31 @@ void webZoomOut() { WebApi::instance()->zoomOut(); }
 
 EMSCRIPTEN_KEEPALIVE
 void webSetZoom(int zoomPercent) { WebApi::instance()->setZoom(zoomPercent); }
+
+// [editude] Clipboard/delete/paste for touch action bar.
+EMSCRIPTEN_KEEPALIVE
+void webCut() { WebApi::instance()->clipboardCut(); }
+
+EMSCRIPTEN_KEEPALIVE
+void webCopy() { WebApi::instance()->clipboardCopy(); }
+
+EMSCRIPTEN_KEEPALIVE
+void webPaste() { WebApi::instance()->clipboardPaste(); }
+
+EMSCRIPTEN_KEEPALIVE
+void webDelete() { WebApi::instance()->deleteSelection(); }
+
+// [editude] Selection state queries for touch gesture routing.
+EMSCRIPTEN_KEEPALIVE
+int webIsRangeSelected() { return WebApi::instance()->isRangeSelected() ? 1 : 0; }
+
+EMSCRIPTEN_KEEPALIVE
+int webIsSingleSelected() { return WebApi::instance()->isSingleSelected() ? 1 : 0; }
+
+// [editude] Two-tap range selection for touch devices.
+EMSCRIPTEN_KEEPALIVE
+void webEnterRangeSelectMode() { WebApi::instance()->enterRangeSelectMode(); }
+
+EMSCRIPTEN_KEEPALIVE
+void webCompleteRangeSelect() { WebApi::instance()->completeRangeSelect(); }
 }

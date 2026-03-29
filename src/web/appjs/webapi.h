@@ -30,6 +30,7 @@
 #include "context/iglobalcontext.h"
 #include "audio/main/istartaudiocontroller.h"
 #include "audio/main/isoundfontcontroller.h"
+#include "engraving/dom/engravingitem.h"
 
 namespace mu::appjs {
 
@@ -58,6 +59,20 @@ public:
     void zoomOut();
     void setZoom(int zoomPercent);
 
+    // [editude] Clipboard/delete/paste for touch action bar.
+    void clipboardCut();
+    void clipboardCopy();
+    void clipboardPaste();
+    void deleteSelection();
+
+    // [editude] Selection state query for touch gesture routing.
+    bool isRangeSelected();
+    bool isSingleSelected();
+
+    // [editude] Two-tap range selection for touch devices.
+    void enterRangeSelectMode();
+    void completeRangeSelect();
+
 private:
 
     WebApi() = default;
@@ -80,5 +95,10 @@ private:
     void onProjectSaved(const muse::io::path_t& path, mu::project::SaveMode mode);
 
     project::INotationProjectPtr m_currentProject;
+
+    // [editude] Two-tap range selection state.
+    bool m_rangeSelectPending = false;
+    mu::engraving::EngravingItem* m_savedElement = nullptr;
+    mu::engraving::staff_idx_t m_savedStaffIdx = 0;
 };
 }

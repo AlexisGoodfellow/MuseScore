@@ -19,23 +19,69 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
       html, body { padding: 0; margin: 0; overflow: hidden; height: 100%; background: #2D2D30; }
       #spinner {
         display: flex;
+        flex-direction: column;
         justify-content: center;
         align-items: center;
         height: 100vh;
+        width: 100vw;
         color: #EBEBEB;
+        background: #00081C;
       }
       #screen { width: 100%; height: 100%; }
+
+      /* [editude] Floating action bar for range selection */
+      #action-bar {
+        display: none;
+        position: fixed;
+        z-index: 9999;
+        transform: translateX(-50%);
+        background: rgba(30, 30, 30, 0.92);
+        -webkit-backdrop-filter: blur(20px);
+        backdrop-filter: blur(20px);
+        border-radius: 12px;
+        padding: 4px;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+        white-space: nowrap;
+      }
+      #action-bar button {
+        background: none;
+        border: none;
+        color: #EBEBEB;
+        font-size: 14px;
+        padding: 8px 14px;
+        border-radius: 8px;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #action-bar button:active {
+        background: rgba(255,255,255,0.15);
+      }
+      #action-bar .separator {
+        display: inline-block;
+        width: 1px;
+        height: 20px;
+        background: rgba(255,255,255,0.2);
+        vertical-align: middle;
+        margin: 0 2px;
+      }
+      #ab-single, #ab-pending, #ab-range { display: none; }
     </style>
   </head>
   <body>
 
-    <figure id="spinner">
-      <center style="margin-top:1.5em; line-height:150%">
-        <strong>MuseScoreStudio</strong>
-        <div id="status"></div>
-        <noscript>JavaScript is disabled. Please enable JavaScript to use this application.</noscript>
-      </center>
+    <figure id="spinner" style="margin:0;">
+      <img id="splash" src="LoadingScreen.svg" alt="MuseScore Studio"
+           style="max-width:100vw; max-height:60vh;" />
+      <div id="status" style="font-family:-apple-system,BlinkMacSystemFont,sans-serif; font-size:14px;"></div>
+      <noscript>JavaScript is disabled. Please enable JavaScript to use this application.</noscript>
     </figure>
+
+    <!-- [editude] Floating action bar — three states: single, pending, range -->
+    <div id="action-bar">
+      <div id="ab-single"><button data-action="delete">Delete</button><span class="separator"></span><button data-action="range-select">Range Select</button></div>
+      <div id="ab-pending"><span style="color:#8EC9FF;font-size:13px;padding:8px 14px;">Tap to set range end</span><span class="separator"></span><button data-action="cancel-range">Cancel</button></div>
+      <div id="ab-range"><button data-action="cut">Cut</button><span class="separator"></span><button data-action="copy">Copy</button><span class="separator"></span><button data-action="paste">Paste</button><span class="separator"></span><button data-action="delete">Delete</button><span class="separator"></span><button data-action="annotate">Annotate</button></div>
+    </div>
 
     <div id="screen"></div>
 
@@ -57,7 +103,7 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
           [spinner, screen].forEach(element => element.style.display = 'none');
           if (screen === ui)
               screen.style.position = 'default';
-          ui.style.display = 'block';
+          ui.style.display = (ui === spinner) ? 'flex' : 'block';
       }
 
       try {
@@ -127,8 +173,8 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
               const d = dist(e.touches[0], e.touches[1]);
               const scale = d / initialDist;
               const z = Math.max(25, Math.min(400, Math.round(baseZoom * scale)));
-              if (z !== lastZoom && window.muapi && window.muapi._webSetZoom) {
-                window.muapi._webSetZoom(z);
+              if (z !== lastZoom && window.muapi && window.muapi.Module._webSetZoom) {
+                window.muapi.Module._webSetZoom(z);
                 lastZoom = z;
               }
               e.preventDefault();
@@ -141,6 +187,165 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
           }, { capture: true });
 
           console.log("[viewer] pinch-to-zoom JS handler installed (capture phase on #screen)");
+        })();
+
+        // [editude] Two-tap range selection + floating action bar.
+        //
+        // Action bar has three states:
+        //   single  — element selected → shows "Range Select"
+        //   pending — waiting for second tap → shows "Tap to set range end" + Cancel
+        //   range   — range selected → shows Cut / Copy / Delete / Annotate
+        //
+        // All touches pass through to Qt unmodified. We only observe touchend
+        // to decide which action bar state to show.
+        (function() {
+          const actionBar = document.getElementById('action-bar');
+          const abSingle  = document.getElementById('ab-single');
+          const abPending = document.getElementById('ab-pending');
+          const abRange   = document.getElementById('ab-range');
+          let lastX = 0, lastY = 0;
+          let rangeSelectPending = false;
+
+          function checkRange() {
+            return window.muapi && window.muapi.Module._webIsRangeSelected
+                   && window.muapi.Module._webIsRangeSelected() > 0;
+          }
+
+          function checkSingle() {
+            return window.muapi && window.muapi.Module._webIsSingleSelected
+                   && window.muapi.Module._webIsSingleSelected() > 0;
+          }
+
+          function showActionBar(state, x, y) {
+            abSingle.style.display  = (state === 'single')  ? 'block' : 'none';
+            abPending.style.display = (state === 'pending') ? 'flex'  : 'none';
+            abRange.style.display   = (state === 'range')   ? 'block' : 'none';
+            actionBar.style.left = x + 'px';
+            actionBar.style.top = Math.max(8, y - 60) + 'px';
+            actionBar.style.display = 'block';
+          }
+
+          function hideActionBar() {
+            actionBar.style.display = 'none';
+            abSingle.style.display = 'none';
+            abPending.style.display = 'none';
+            abRange.style.display = 'none';
+          }
+
+          // --- Touch listener: long-press to show action bar ---
+
+          const LONG_PRESS_MS = 500;
+          const MOVE_CANCEL = 15;
+          let pressTimer = null;
+          let touchMoved = false;
+
+          function cancelLongPress() {
+            if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+          }
+
+          screen.addEventListener('touchstart', function(e) {
+            if (e.touches.length !== 1) return;
+            const t = e.touches[0];
+            lastX = t.clientX;
+            lastY = t.clientY;
+            touchMoved = false;
+
+            // In pending mode, any tap is the second element — no long-press needed.
+            if (rangeSelectPending) return;
+
+            hideActionBar();
+            cancelLongPress();
+            pressTimer = setTimeout(function() {
+              pressTimer = null;
+              if (touchMoved) return;
+              // Long press fired — show action bar based on selection state.
+              var mod = window.muapi && window.muapi.Module;
+              if (!mod) return;
+              if (checkRange()) {
+                showActionBar('range', lastX, lastY);
+              } else if (checkSingle()) {
+                showActionBar('single', lastX, lastY);
+              }
+            }, LONG_PRESS_MS);
+          }, { capture: true, passive: true });
+
+          screen.addEventListener('touchmove', function(e) {
+            if (e.touches.length !== 1) return;
+            const t = e.touches[0];
+            const dx = Math.abs(t.clientX - lastX);
+            const dy = Math.abs(t.clientY - lastY);
+            if (dx > MOVE_CANCEL || dy > MOVE_CANCEL) {
+              touchMoved = true;
+              cancelLongPress();
+            }
+          }, { capture: true, passive: true });
+
+          screen.addEventListener('touchend', function(e) {
+            if (e.touches.length !== 0) return;
+            cancelLongPress();
+
+            // In pending mode, the tap is the second element for range select.
+            if (rangeSelectPending) {
+              setTimeout(function() {
+                var mod = window.muapi && window.muapi.Module;
+                if (!mod) return;
+                if (mod._webCompleteRangeSelect) {
+                  mod._webCompleteRangeSelect();
+                }
+                rangeSelectPending = false;
+                setTimeout(function() {
+                  if (checkRange()) {
+                    showActionBar('range', lastX, lastY);
+                  } else {
+                    hideActionBar();
+                  }
+                }, 100);
+              }, 200);
+            }
+          }, { capture: true, passive: true });
+
+          // --- Action bar button handlers ---
+
+          actionBar.addEventListener('click', function(e) {
+            var btn = e.target.closest('button');
+            if (!btn) return;
+            e.stopPropagation();
+
+            var action = btn.dataset.action;
+            var mod = window.muapi && window.muapi.Module;
+            if (!mod) return;
+
+            switch (action) {
+              case 'range-select':
+                if (mod._webEnterRangeSelectMode) {
+                  mod._webEnterRangeSelectMode();
+                  rangeSelectPending = true;
+                  showActionBar('pending', lastX, lastY);
+                }
+                break;
+              case 'cancel-range':
+                rangeSelectPending = false;
+                hideActionBar();
+                break;
+              case 'cut':    if (mod._webCut) mod._webCut(); hideActionBar(); break;
+              case 'copy':   if (mod._webCopy) mod._webCopy(); hideActionBar(); break;
+              case 'paste':  if (mod._webPaste) mod._webPaste(); hideActionBar(); break;
+              case 'delete': if (mod._webDelete) mod._webDelete(); hideActionBar(); break;
+              case 'annotate':
+                console.log("[action-bar] annotate — not yet wired");
+                hideActionBar();
+                break;
+            }
+          });
+
+          // Dismiss action bar on taps outside it (but not during pending mode).
+          document.addEventListener('pointerdown', function(e) {
+            if (!actionBar.contains(e.target) && !rangeSelectPending) {
+              hideActionBar();
+            }
+          });
+
+          console.log("[viewer] two-tap range select + action bar installed");
         })();
     } catch (e) {
         console.error("[viewer] FATAL:", e);

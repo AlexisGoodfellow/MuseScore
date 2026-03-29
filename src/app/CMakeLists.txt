@@ -441,13 +441,33 @@ elseif(OS_IS_MAC)
 ###########################################
 elseif(OS_IS_WASM)
 
+    # [editude] Track JS/HTML source files so Ninja re-runs install.js on
+    # incremental builds even when no C++ changed (e.g. viewer.html edits).
+    set(_JS_API_SOURCES
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/install.js
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/viewer/viewer.html
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/viewer/index.html
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/viewer/run_server.sh
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/distr/config.js.in
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/distr/muapi.js
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/distr/muimpl.js
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/distr/qtloader.js
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/distr/audioworker.js
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/distr/audiodriver.js
+        ${PROJECT_SOURCE_DIR}/src/web/appjs/distr/audio_worklet_processor.js
+    )
+
     add_custom_command(
-        TARGET MuseScoreStudio
-        POST_BUILD
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/jsapi.stamp
         COMMAND node ${PROJECT_SOURCE_DIR}/src/web/appjs/install.js ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+        COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_CURRENT_BINARY_DIR}/jsapi.stamp
+        DEPENDS ${_JS_API_SOURCES}
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Install js api..."
     )
+
+    add_custom_target(install_js_api ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/jsapi.stamp)
+    add_dependencies(install_js_api MuseScoreStudio)
 
 else()
     message(FATAL_ERROR "Unsupported Platform: ${CMAKE_HOST_SYSTEM_NAME}")
