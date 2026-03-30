@@ -19,7 +19,7 @@ function setupInternalCallbacks(Module) {
                 console.log("[js] openFileDialog fileName: ", fileName, ", contents: ", uint8View.length, ", [0]=", uint8View[0])
                 callback(fileName, uint8View);
             };
-            reader.readAsArrayBuffer(file); 
+            reader.readAsArrayBuffer(file);
         };
         input.click();
     }
@@ -27,7 +27,7 @@ function setupInternalCallbacks(Module) {
 
 function setupRpc(Module)
 {
-    // Main <=> Worker 
+    // Main <=> Worker
     // port1 - main
     // port2 - worker
     Module.main_worker_rpcChannel = new MessageChannel();
@@ -48,18 +48,27 @@ function setupRpc(Module)
     Module.driver_worker_rpcChannel = new MessageChannel();
 }
 
-async function setupDriver(Module) 
+async function setupDriver(Module)
 {
     Module.driver = AudioDriver;
 
     AudioDriver.onInited = function() {
-        console.log("driver on inited add sound font")
-
-        if (Module.isNeedStartAudio) {
-            Module._startAudioProcessing()
-        }
+        console.log("[muimpl] driver inited — loading soundfont")
 
         Module.ccall('addSoundFont', '', ['string'], [Module.soundFont]);
+
+        // [editude] Start the C++ audio engine after a short delay.
+        // The score loads during app startup and sends addSequence to the
+        // AudioWorklet. We delay _startAudioProcessing so EngineInit arrives
+        // AFTER addSequence has been processed, avoiding a race that would
+        // reset the sequence. The AudioContext resume is handled separately.
+        setTimeout(function() {
+            console.log("[muimpl] delayed _startAudioProcessing firing");
+            if (AudioDriver.audioContext && AudioDriver.audioContext.state !== 'running') {
+                AudioDriver.audioContext.resume();
+            }
+            Module._startAudioProcessing();
+        }, 1500);
     }
 
     if (config.MUSE_MODULE_AUDIO_WORKER == "ON") {
@@ -145,7 +154,7 @@ const MuImpl = {
         }
 
         const buffer = await file.arrayBuffer();
-        this.loadScoreData(new Uint8Array(buffer)) 
+        this.loadScoreData(new Uint8Array(buffer))
     },
 
     loadScoreData: function(data) {
@@ -155,12 +164,13 @@ const MuImpl = {
         this.Module._free(ptr);
     },
 
-    startAudioProcessing: async function() {
-        if (this.Module.driver.inited) {
-            this.Module._startAudioProcessing()
-        } else {
-            console.log("driver not inited, start audio will be later")
-            this.Module.isNeedStartAudio = true;
+    startAudioProcessing: function() {
+        // [editude] Audio engine is now auto-started via delayed setTimeout
+        // in onInited. This is kept for API compatibility. Just resume the
+        // AudioContext in case it needs a user gesture.
+        if (AudioDriver.audioContext && AudioDriver.audioContext.state !== 'running') {
+            console.log("[muimpl] resuming AudioContext from gesture, state:", AudioDriver.audioContext.state);
+            AudioDriver.audioContext.resume();
         }
     }
 }

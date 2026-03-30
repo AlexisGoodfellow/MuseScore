@@ -79,9 +79,15 @@ class MuseDriverProcessor extends AudioWorkletProcessor {
                 MuseAudio.main_worker_rpcListen(event.data)
             }
 
-            // Init wasm
+            // Init wasm — MuseAudio_entry may return a Promise if async
+            // compilation is enabled. Handle both sync and async cases.
             try {
-                MuseAudio_entry(MuseAudio);
+                var result = MuseAudio_entry(MuseAudio);
+                if (result && typeof result.catch === 'function') {
+                    result.catch(function(error) {
+                        debugLog("MuseAudio_entry async ERROR: " + error);
+                    });
+                }
             } catch (error) {
                 this.debugLog("MuseAudio_entry ERROR:" + error)
             }
@@ -148,32 +154,61 @@ class MuseDriverProcessor extends AudioWorkletProcessor {
                 return true;
             }
 
-            const output = outputs[0];
-            const chCount = output.length;
-            const samplesPerCh = output[0].length;
-            const totalSamples = chCount * samplesPerCh;
+            try {
+                const output = outputs[0];
+                const chCount = output.length;
+                const samplesPerCh = output[0].length;
+                const totalSamples = chCount * samplesPerCh;
 
-            const bufferSize = totalSamples * 4 /*float*/
-            if (this.wasmBuffer.size < bufferSize) {
-                MuseAudio._free(this.wasmBuffer.ptr);
-                this.wasmBuffer.ptr = MuseAudio._malloc(bufferSize);
-                this.wasmBuffer.size = bufferSize;
-            }
+                const bufferSize = totalSamples * 4 /*float*/
+                if (this.wasmBuffer.size < bufferSize) {
+                    this.debugLog("allocating audio buffer: " + bufferSize + " bytes");
+                    MuseAudio._free(this.wasmBuffer.ptr);
+                    this.wasmBuffer.ptr = MuseAudio._malloc(bufferSize);
+                    this.wasmBuffer.size = bufferSize;
+                    this.debugLog("buffer ptr=" + this.wasmBuffer.ptr);
+                }
 
-            MuseAudio._process(this.wasmBuffer.ptr, samplesPerCh);
+                MuseAudio._process(this.wasmBuffer.ptr, samplesPerCh);
 
-            const view = new Float32Array(MuseAudio.HEAPU8.buffer, this.wasmBuffer.ptr, totalSamples);
+                // [editude] HEAPU8 is only available if listed in
+                // EXPORTED_RUNTIME_METHODS. Fall back to wasmMemory or
+                // asm.memory for accessing the WASM linear memory buffer.
+                var memBuf = (MuseAudio.HEAPU8 && MuseAudio.HEAPU8.buffer)
+                          || (MuseAudio.wasmMemory && MuseAudio.wasmMemory.buffer)
+                          || (MuseAudio.asm && MuseAudio.asm.memory && MuseAudio.asm.memory.buffer);
+                const view = new Float32Array(memBuf, this.wasmBuffer.ptr, totalSamples);
 
-            for (let ci = 0; ci < output.length; ++ci) {
-                let channel = output[ci];
-                for (let i = 0; i < channel.length; i++) {
-                    let index = i * 2 + ci;
-                    if (index < view.length) {
-                        channel[i] = view[i * 2 + ci];
-                    } else {
-                        channel[i] = 0;
+                // [editude] One-time diagnostic: detect first non-zero audio
+                if (!this._audioOutputLogged) {
+                    var maxSample = 0;
+                    for (var si = 0; si < totalSamples; si++) {
+                        var abs = view[si] < 0 ? -view[si] : view[si];
+                        if (abs > maxSample) maxSample = abs;
+                    }
+                    if (maxSample > 0) {
+                        this._audioOutputLogged = true;
+                        this.debugLog("non-zero audio detected, max=" + maxSample.toFixed(6));
                     }
                 }
+
+                for (let ci = 0; ci < output.length; ++ci) {
+                    let channel = output[ci];
+                    for (let i = 0; i < channel.length; i++) {
+                        let index = i * 2 + ci;
+                        if (index < view.length) {
+                            channel[i] = view[i * 2 + ci];
+                        } else {
+                            channel[i] = 0;
+                        }
+                    }
+                }
+            } catch (err) {
+                if (!this._errorLogged) {
+                    this._errorLogged = true;
+                    this.debugLog("CRASH in process(): " + err);
+                }
+                return true;  // keep worklet alive
             }
         } 
         // use worker

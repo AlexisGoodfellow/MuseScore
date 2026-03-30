@@ -148,14 +148,17 @@ target_link_options(MuseAudio PRIVATE "SHELL:-s MODULARIZE=1")
 target_link_options(MuseAudio PRIVATE "SHELL:-s FETCH=1")
 target_link_options(MuseAudio PRIVATE "SHELL:-s INITIAL_MEMORY=50MB")
 target_link_options(MuseAudio PRIVATE "SHELL:-s ALLOW_MEMORY_GROWTH=1")
-target_link_options(MuseAudio PRIVATE "SHELL:-s EXPORTED_RUNTIME_METHODS=ccall,cwrap")
+target_link_options(MuseAudio PRIVATE "SHELL:-s EXPORTED_RUNTIME_METHODS=ccall,cwrap,HEAPU8")
 target_link_options(MuseAudio PRIVATE "SHELL:-s EXPORTED_FUNCTIONS=[_main,_malloc,_free,_Init,_process]")
 
 if (MUSE_MODULE_AUDIO_WORKER)
     target_link_options(MuseAudio PRIVATE "SHELL:-s ENVIRONMENT=worker")
 else()
     target_link_options(MuseAudio PRIVATE "SHELL:-s ENVIRONMENT=shell")
-    target_link_options(MuseAudio PRIVATE "SHELL:-s BINARYEN_ASYNC_COMPILATION=0")
+    # [editude] Removed BINARYEN_ASYNC_COMPILATION=0 — synchronous WASM
+    # compilation of large modules (>2MB) may fail in WebKit AudioWorklets.
+    # Async compilation (the default) uses WebAssembly.compile() which has
+    # no size limit.
     target_link_options(MuseAudio PRIVATE "SHELL:-s SINGLE_FILE=1")
    # target_link_options(MuseAudio PRIVATE "SHELL:-s EXPORT_ES6=1")
 endif()

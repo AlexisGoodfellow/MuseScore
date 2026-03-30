@@ -18,9 +18,10 @@ let AudioDriver = (function () {
 
     var api = {
 
-        inited: false, 
+        inited: false,
         onInited: null,
-        
+        audioContext: null, // [editude] exposed for direct resume in user gesture context
+
         setup: async function(config, rpcPort, audio_context) {
 
             if (audio_context) {
@@ -28,6 +29,8 @@ let AudioDriver = (function () {
             } else {
                 audioContext = new AudioContext()
             }
+            api.audioContext = audioContext;
+            console.log("[audiodriver] AudioContext created, state:", audioContext.state);
 
             try {
 
@@ -42,10 +45,10 @@ let AudioDriver = (function () {
                                 numberOfOutputs: 1,
                                 outputChannelCount: [2],
                                 });
-                console.log("[processor-main] create AudioWorkletNode for audio_worklet_processor")
+                console.log("[audiodriver] AudioWorklet module loaded, AudioWorkletNode created")
 
             } catch (error) {
-                console.error(error)
+                console.error("[audiodriver] AudioWorklet setup error:", error)
             }
 
             // [editude] Guard: if AudioWorklet failed to load (e.g. MuseAudio.js
@@ -84,13 +87,14 @@ let AudioDriver = (function () {
         },
 
         open: function() {
-            console.log("[driver]", "open")
+            console.log("[audiodriver] open — connecting processor, context state:", audioContext.state)
             processor.connect(audioContext.destination)
+            // resume() here is best-effort (may lack user gesture on iOS)
             audioContext.resume()
         },
 
         resume: function() {
-            console.log("[driver]", "resume")
+            console.log("[audiodriver] resume — context state:", audioContext.state)
             audioContext.resume()
         },
 
