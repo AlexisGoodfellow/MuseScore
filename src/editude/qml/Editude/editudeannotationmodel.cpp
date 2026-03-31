@@ -153,7 +153,15 @@ void EditudeAnnotationModel::setExpanded(const QString& annotationId)
 {
     const QString oldId = m_expandedId;
 
-    // Collapse the previously expanded annotation.
+    // Toggle: if clicking the same annotation, collapse it.
+    if (annotationId == oldId) {
+        m_expandedId.clear();
+    } else {
+        m_expandedId = annotationId;
+    }
+
+    // Notify the previously expanded annotation so QML sees expanded=false.
+    // m_expandedId is already updated, so data() returns the new value.
     if (!oldId.isEmpty()) {
         for (int i = 0; i < m_rows.size(); ++i) {
             if (m_rows[i].annotationId == oldId) {
@@ -164,11 +172,7 @@ void EditudeAnnotationModel::setExpanded(const QString& annotationId)
         }
     }
 
-    // Toggle: if clicking the same annotation, collapse it.
-    if (annotationId == oldId) {
-        m_expandedId.clear();
-    } else {
-        m_expandedId = annotationId;
+    if (!m_expandedId.isEmpty() && m_expandedId != oldId) {
         for (int i = 0; i < m_rows.size(); ++i) {
             if (m_rows[i].annotationId == annotationId) {
                 const QModelIndex idx = index(i);
