@@ -75,4 +75,5 @@ void webEnterRangeSelectMode() { WebApi::instance()->enterRangeSelectMode(); }
 
 EMSCRIPTEN_KEEPALIVE
 void webCompleteRangeSelect() { WebApi::instance()->completeRangeSelect(); }
+
 }

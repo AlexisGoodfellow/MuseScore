@@ -22,6 +22,20 @@ let MuseAudio = {
         try {
         //MuseAudio.ccall('Init', '', ['number'], [42]);
         MuseAudio._Init(42)
+
+        // [editude] Replay any RPC messages that arrived before C++ was ready.
+        // _Init(42) sets up WebRpcChannel::setupOnEngine() which registers the
+        // C++ main_worker_rpcListen handler and EngineRpcController method
+        // handlers. Now we can safely replay buffered addSequence/addTrack etc.
+        MuseAudio._rpcReady = true;
+        if (MuseAudio._rpcBuffer && MuseAudio._rpcBuffer.length > 0) {
+            debugLog("[worklet] replaying " + MuseAudio._rpcBuffer.length + " buffered RPC messages");
+            for (var i = 0; i < MuseAudio._rpcBuffer.length; i++) {
+                MuseAudio.main_worker_rpcListen(MuseAudio._rpcBuffer[i]);
+            }
+        }
+        MuseAudio._rpcBuffer = null;
+
         MuseAudio.inited = true;
         globalThis.mainPort.postMessage({type: "DRIVER_INITED" });
         } catch (error) {
@@ -74,7 +88,15 @@ class MuseDriverProcessor extends AudioWorkletProcessor {
                 MuseAudio.mainPort.postMessage(data)
             }
 
-            MuseAudio.main_worker_rpcListen = function(data) {} // will be overridden
+            // [editude] Buffer RPC messages until C++ WASM handler is ready.
+            // The main thread may send addSequence/addTrack before MuseAudio
+            // WASM loads. Without buffering, these hit a no-op and are lost,
+            // causing playback to silently fail (no sequence in the engine).
+            MuseAudio._rpcBuffer = [];
+            MuseAudio._rpcReady = false;
+            MuseAudio.main_worker_rpcListen = function(data) {
+                MuseAudio._rpcBuffer.push(data);
+            }
             MuseAudio.mainPort.onmessage = function(event) {
                 MuseAudio.main_worker_rpcListen(event.data)
             }
@@ -178,19 +200,6 @@ class MuseDriverProcessor extends AudioWorkletProcessor {
                           || (MuseAudio.wasmMemory && MuseAudio.wasmMemory.buffer)
                           || (MuseAudio.asm && MuseAudio.asm.memory && MuseAudio.asm.memory.buffer);
                 const view = new Float32Array(memBuf, this.wasmBuffer.ptr, totalSamples);
-
-                // [editude] One-time diagnostic: detect first non-zero audio
-                if (!this._audioOutputLogged) {
-                    var maxSample = 0;
-                    for (var si = 0; si < totalSamples; si++) {
-                        var abs = view[si] < 0 ? -view[si] : view[si];
-                        if (abs > maxSample) maxSample = abs;
-                    }
-                    if (maxSample > 0) {
-                        this._audioOutputLogged = true;
-                        this.debugLog("non-zero audio detected, max=" + maxSample.toFixed(6));
-                    }
-                }
 
                 for (let ci = 0; ci < output.length; ++ci) {
                     let channel = output[ci];

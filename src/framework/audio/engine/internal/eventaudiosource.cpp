@@ -235,7 +235,7 @@ bool EventAudioSource::readyToPlay() const
     ONLY_AUDIO_ENGINE_THREAD;
 
     if (!m_synth) {
-        return false;
+        return true; // [editude] No synth = nothing to prepare; don't block prepareToPlay
     }
 
     return m_synth->readyToPlay();

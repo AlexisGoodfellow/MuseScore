@@ -41,7 +41,7 @@ void Init(unsigned int)
 void process(uintptr_t ptr, unsigned samplesPerChannel)
 {
     float* stream = reinterpret_cast<float*>(ptr);
-    std::memset(stream, 0.0f, samplesPerChannel * 2);
+    std::memset(stream, 0, samplesPerChannel * 2 * sizeof(float));
     WebAudioEngine::instance()->process(stream, samplesPerChannel);
 }
 }

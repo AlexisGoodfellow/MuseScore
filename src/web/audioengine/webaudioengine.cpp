@@ -23,6 +23,7 @@
 
 #include "global/modularity/ioc.h"
 #include "global/runtime.h"
+#include "global/async/processevents.h"
 
 #include "audio/common/rpc/platform/web/webrpcchannel.h"
 #include "audio/engine/internal/enginecontroller.h"
@@ -91,5 +92,13 @@ void WebAudioEngine::init()
 
 void WebAudioEngine::process(float* stream, unsigned samplesPerChannel)
 {
+    // [editude] Process the kors async event queue for this thread.
+    // On native platforms, startAudioController's worker loop does this.
+    // In the WASM AudioWorklet there is no such loop, so we must pump
+    // the queue here.  Without this, Async::call / AsyncByPromise bodies
+    // (e.g. SequencePlayer::prepareToPlay) are queued but never executed,
+    // which silently blocks continuous playback.
+    async::processMessages();
+
     m_controller->process(stream, samplesPerChannel);
 }
