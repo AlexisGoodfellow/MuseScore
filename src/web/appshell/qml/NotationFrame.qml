@@ -42,6 +42,7 @@ Item {
 
         NoteInputBar {
             id: notToolBar
+            maximumWidth: toolbars.width
         }
     }
 

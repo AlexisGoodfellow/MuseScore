@@ -3135,8 +3135,15 @@ const muse::ui::ToolConfig& NotationUiActions::defaultNoteInputBarConfig()
             { "tuplet", true },
             { "flip", true },
             { "", true },
+            // [editude] Hide voice buttons by default in WASM (editude) builds.
+#ifdef Q_OS_WASM
+            { "voice-1", false },
+            { "voice-2", false },
+#else
             { "voice-1", true },
             { "voice-2", true },
+#endif
+            // [/editude]
             { "voice-3", false },
             { "voice-4", false },
             { "", true },                        // [editude]

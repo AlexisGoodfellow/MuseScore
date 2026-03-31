@@ -59,10 +59,12 @@ Item {
                 return gridView.contentWidth
             }
 
-            var requiredFreeSpace = gridView.cellWidth * 3 + gridView.rowSpacing * 4
+            // Reserve space for the customize (gear) button + its margins.
+            var gearSpace = gridView.cellWidth + customizeButton.anchors.margins * 2
+            var maxGridWidth = root.maximumWidth - gearSpace
 
-            if (root.maximumWidth - gridView.contentWidth < requiredFreeSpace) {
-                return gridView.contentWidth - requiredFreeSpace
+            if (maxGridWidth > 0 && gridView.contentWidth > maxGridWidth) {
+                return maxGridWidth
             }
 
             return gridView.contentWidth

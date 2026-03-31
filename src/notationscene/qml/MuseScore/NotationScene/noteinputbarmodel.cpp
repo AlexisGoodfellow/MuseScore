@@ -131,8 +131,11 @@ void NoteInputBarModel::load()
         MenuItem* item = makeActionItem(uiActionsRegister()->action(citem.action), QString::number(section), subitems);
         items << item;
     }
-
+    // [editude] Skip the "Add" toolbar button in WASM builds (always editude).
+#ifndef Q_OS_WASM
     items << makeAddItem(QString::number(++section));
+#endif
+    // [/editude]
     setItems(items);
 }
 
