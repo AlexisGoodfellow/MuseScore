@@ -43,7 +43,6 @@ qt_add_qml_module(editude_qml
         editudeannotationoverlaymodel.cpp
     QML_FILES
         EditudeNotationOverlay.qml
-        EditudeTouchToolbar.qml
         AnnotationSidePanel.qml
     IMPORTS
         TARGET muse_ui_qml

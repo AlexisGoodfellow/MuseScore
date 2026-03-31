@@ -77,10 +77,6 @@ void EditudeService::setPresenceModel(EditudePresenceModel* model)
                 m_dispatcher()->dispatch(actionCode.toStdString());
             });
 
-#ifdef Q_OS_WASM
-        // Auto-show the touch toolbar on WASM builds.
-        model->setTouchToolbarVisible(true);
-#endif
     }
 }
 

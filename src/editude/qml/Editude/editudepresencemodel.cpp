@@ -86,15 +86,6 @@ void EditudePresenceModel::notifyScoreReady()
     emit scoreReady();
 }
 
-void EditudePresenceModel::setTouchToolbarVisible(bool visible)
-{
-    if (m_touchToolbarVisible == visible) {
-        return;
-    }
-    m_touchToolbarVisible = visible;
-    emit touchToolbarVisibleChanged();
-}
-
 void EditudePresenceModel::setNoteInputActive(bool active)
 {
     if (m_noteInputActive == active) {
