@@ -250,6 +250,11 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
             lastY = t.clientY;
             touchMoved = false;
 
+            // Only show the action bar for touches on the score canvas itself.
+            // Touches on overlaid UI (action bar, annotation panel) should not
+            // trigger Delete / Range Select — those actions have no meaning there.
+            if (!screen.contains(e.target) || actionBar.contains(e.target)) return;
+
             // In pending mode, any tap is the second element — no long-press needed.
             if (rangeSelectPending) return;
 

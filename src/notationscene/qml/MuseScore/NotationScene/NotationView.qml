@@ -78,6 +78,7 @@ FocusScope {
         NotationSwitchPanel {
             id: tabPanel
             Layout.fillWidth: true
+            visible: false // [editude] single-score mode — one project at a time
 
             navigationPanel.section: navSec
             navigationPanel.order: 1
