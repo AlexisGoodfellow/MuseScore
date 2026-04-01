@@ -42,6 +42,24 @@ target_sources(editude PRIVATE
 # so editudemodule.h and editudeservice.cpp can include them by short name.
 target_include_directories(editude PRIVATE qml/Editude)
 
+if(APPLE)
+    target_sources(editude PRIVATE
+        internal/platform/macos/appnap.h
+        internal/platform/macos/appnap.mm
+    )
+    # Compile the .mm file as its own Objective-C++ translation unit —
+    # Foundation headers use @class syntax that breaks in Unity C++ builds.
+    set_source_files_properties(internal/platform/macos/appnap.mm PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON
+        SKIP_PRECOMPILE_HEADERS ON
+    )
+else()
+    target_sources(editude PRIVATE
+        internal/platform/macos/appnap.h
+        internal/platform/stub/appnap.cpp
+    )
+endif()
+
 target_link_libraries(editude PRIVATE
     Qt::WebSockets
     Qt::Network
@@ -49,6 +67,10 @@ target_link_libraries(editude PRIVATE
     notation
     engraving
 )
+
+if(APPLE)
+    target_link_libraries(editude PRIVATE "-framework Foundation")
+endif()
 
 # QML module: registers Editude types and QML files (import Editude 1.0).
 add_subdirectory(qml/Editude)

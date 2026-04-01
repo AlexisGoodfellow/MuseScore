@@ -53,6 +53,7 @@
 #include "global/io/file.h"
 #include "notation/internal/igetscore.h"
 #include "log.h"
+#include "internal/platform/macos/appnap.h"
 #include "annotationoverlay.h"
 #include "qml/Editude/editudeannotationmodel.h"
 #include "qml/Editude/editudeannotationoverlaymodel.h"
@@ -614,6 +615,7 @@ void EditudeService::onServerMessage(const QString& text)
     } else if (type == "sync") {
         m_state = State::Live;
         m_reconnectAttempt = 0;
+        beginRealtimeActivity();
 
         // Apply peer ops that arrived while we were disconnected.  These are
         // the ops since our last known revision; they bring the local score up
@@ -758,14 +760,8 @@ void EditudeService::onServerMessage(const QString& text)
             LOGW() << "[editude] received remote op but score not ready";
             return;
         }
-        // Defer the score mutation to the next event-loop iteration.  This
-        // prevents structural applicator calls (e.g. applyInsertBeats →
-        // MasterScore::insertMeasure) from being invoked while a nested
-        // QEventLoop is spinning inside EditudeTestServer::handleWaitRevision.
-        // m_serverRevision is already updated above so the wait-revision poll
-        // can detect completion before the deferred apply runs.
         const QJsonObject payload = msg.value("payload").toObject();
-        QTimer::singleShot(0, this, [this, payload]() {
+        auto applyRemoteOp = [this, payload]() {
             if (!m_score) return;
             m_applyingRemote = true;
             m_applicator.apply(m_score, payload);
@@ -781,7 +777,20 @@ void EditudeService::onServerMessage(const QString& text)
             }
             refreshAnnotationOverlay();
             refreshPresenceModel();
-        });
+            // ScoreApplicator calls startCmd/endCmd on the raw Score*,
+            // which bypasses the Notation layer.  The paint view listens
+            // to Notation::notationChanged(), so we must fire it explicitly.
+            if (m_currentNotation) {
+                m_currentNotation->notationChanged().send(muse::RectF());
+            }
+        };
+#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+        // Defer to the next event-loop iteration to prevent reentrance
+        // with EditudeTestServer::handleWaitRevision's nested QEventLoop.
+        QTimer::singleShot(0, this, applyRemoteOp);
+#else
+        applyRemoteOp();
+#endif
 
     } else if (type == "op_batch") {
         // Batch of sub-ops from a peer — apply as a single undo transaction.
@@ -796,13 +805,7 @@ void EditudeService::onServerMessage(const QString& text)
             LOGW() << "[editude] received remote op_batch but score not ready";
             return;
         }
-        // Pass the full op_batch message to apply().  Defer the score mutation
-        // to the next event-loop iteration (see "op" handler comment above).
-        // The applicator calls clearAll() after each individual sub-op within
-        // the batch to prevent cross-macro double-frees (see comment in
-        // ScoreApplicator::apply).  The trailing clearAll() here is a no-op
-        // safety net.
-        QTimer::singleShot(0, this, [this, msg]() {
+        auto applyRemoteBatch = [this, msg]() {
             if (!m_score) return;
             m_applyingRemote = true;
             m_applicator.apply(m_score, msg);
@@ -816,7 +819,17 @@ void EditudeService::onServerMessage(const QString& text)
             }
             refreshAnnotationOverlay();
             refreshPresenceModel();
-        });
+            // Notify the paint view (see "op" handler comment above).
+            if (m_currentNotation) {
+                m_currentNotation->notationChanged().send(muse::RectF());
+            }
+        };
+#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+        // Defer to the next event-loop iteration (see "op" handler comment).
+        QTimer::singleShot(0, this, applyRemoteBatch);
+#else
+        applyRemoteBatch();
+#endif
 
     } else if (type == "presence") {
         const QString cid = msg.value("contributor_id").toString();
@@ -1272,6 +1285,7 @@ void EditudeService::onDisconnected()
         return;
     }
     LOGD() << "[editude] WS disconnected; attempt" << m_reconnectAttempt;
+    endRealtimeActivity();
     m_state = State::Reconnecting;
     if (m_socket) {
         m_socket->deleteLater();
