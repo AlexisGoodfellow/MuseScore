@@ -449,6 +449,13 @@ void EditudeService::openScoreForSession()
 
 void EditudeService::bootstrapAndConnect()
 {
+    LOGW() << "[editude] bootstrapAndConnect: ready=" << m_bootstrapReady
+           << " score=" << (m_score ? "set" : "null")
+           << " pendingOps=" << m_pendingOps.size()
+           << " serverParts=" << m_serverParts.size()
+           << " snapshotRev=" << m_snapshotRevision
+           << " serverRev=" << m_serverRevision
+           << " snapshotPath=" << m_snapshotPath;
     if (!m_bootstrapReady || !m_score) {
         return;
     }
@@ -823,6 +830,23 @@ void EditudeService::onServerMessage(const QString& text)
         if (m_annotationModel) {
             m_annotationModel->addAnnotation(msg.value("annotation").toObject());
             refreshAnnotationOverlay();
+        }
+
+    } else if (type == "annotation_updated") {
+        if (m_annotationModel) {
+            const QJsonObject ann = msg.value("annotation").toObject();
+            const QString annId = ann.value("id").toString();
+            QJsonObject fields;
+            if (ann.contains("resolved")) {
+                fields["resolved"] = ann.value("resolved").toBool();
+            }
+            if (ann.contains("body")) {
+                fields["body"] = ann.value("body").toString();
+            }
+            if (!fields.isEmpty()) {
+                m_annotationModel->updateAnnotation(annId, fields);
+                refreshAnnotationOverlay();
+            }
         }
 
     } else if (type == "annotation_reply_created") {
