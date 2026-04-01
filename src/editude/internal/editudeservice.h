@@ -66,7 +66,7 @@ public:
 
     void start();
 
-#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+#if defined(MUE_BUILD_EDITUDE_TEST_DRIVER) || defined(Q_OS_WASM)
     mu::engraving::Score* scoreForTest() const { return m_score; }
     int serverRevisionForTest() const { return m_serverRevision; }
     mu::notation::INotationPtr currentNotationForTest() const { return m_currentNotation; }
@@ -85,7 +85,7 @@ public:
     void setPresenceModel(EditudePresenceModel* model);
     void setAnnotationModel(EditudeAnnotationModel* model);
     void setAnnotationOverlayModel(EditudeAnnotationOverlayModel* model);
-    void setSnapshotPath(const QString& path);
+    void setBootstrapScorePath(const QString& path);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -139,9 +139,9 @@ private:
     QString m_sessionUrl;
     QString m_websocketUrl;
     QString m_projectId;
-    QString m_snapshotPath;
+    QString m_bootstrapScorePath;
     int m_clientSeq = 0;
-    int m_snapshotRevision = 0;
+    int m_bootstrapRevision = 0;
     int m_serverRevision = 0;
     QJsonArray m_pendingOps;
     QJsonArray m_serverParts;  // part UUID map from session-bootstrap (survives snapshot compaction)

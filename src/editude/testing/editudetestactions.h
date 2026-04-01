@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+// Shared action dispatch, score serialisation, and synchronisation logic
+// used by both the native EditudeTestDriver (HTTP) and the WASM
+// EditudeTestBridge (Emscripten/JS).
 
-#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
-#include <QObject>
-#include <QTcpServer>
-#include <QTcpSocket>
 
 #include "engraving/dom/chord.h"
 #include "engraving/dom/engravingobject.h"
@@ -20,30 +18,27 @@
 namespace mu::editude::internal {
 class EditudeService;
 
-class EditudeTestServer : public QObject
+class EditudeTestActions
 {
-    Q_OBJECT
-
-    // Minimal HTTP reply value — status code + JSON body bytes.
+public:
+    // Minimal reply value — status code + JSON body bytes.
     struct Reply { int status; QByteArray body; };
 
-public:
-    explicit EditudeTestServer(EditudeService* svc, quint16 port, QObject* parent = nullptr);
-    void start();
+    explicit EditudeTestActions(EditudeService* svc);
 
-private slots:
-    void onNewConnection();
-    void onReadyRead(QTcpSocket* socket);
+    // ── Public API used by wrappers (HTTP driver, Emscripten bridge) ──
+    Reply dispatchAction(const QJsonObject& body);
+    QJsonObject serializeScore();
+    Reply waitRevision(int minRevision, int timeoutMs = 5000);
+    Reply connect(const QJsonObject& body);
+    Reply status();
+    Reply health();
+
+    Reply errorResponse(int status, const QString& msg);
+    Reply okResponse();
+    int serverRevision() const;
 
 private:
-    Reply handleHealth();
-    Reply handleScore();
-    Reply handleWaitRevision(const QJsonObject& body);
-    Reply handleAction(const QJsonObject& body);
-    Reply dispatchAction(const QJsonObject& body);
-    Reply handleConnect(const QJsonObject& body);
-    Reply handleStatus();
-
     Reply actionInsertNote(const QJsonObject& body);
     Reply actionInsertRest(const QJsonObject& body);
     Reply actionDeleteNote(const QJsonObject& body);
@@ -177,7 +172,6 @@ private:
     Reply actionSetConcertPitch(const QJsonObject& body);
 
     // Serialization helpers — coordinate-addressed (no UUIDs)
-    QJsonObject serializeScore();
     QJsonObject serializePart(mu::engraving::Part* part);
     QJsonArray  serializePartEvents(mu::engraving::Part* part);
     QJsonObject serializeNote(mu::engraving::Note* note,
@@ -221,15 +215,7 @@ private:
     static QString durationTypeName(mu::engraving::DurationType dt);
     static QJsonObject pitchJson(mu::engraving::Note* note);
 
-    Reply errorResponse(int status, const QString& msg);
-    Reply okResponse();
-
     EditudeService* m_svc;
-    quint16 m_port;
-    QTcpServer* m_server = nullptr;
-    QHash<QTcpSocket*, QByteArray> m_buffers;
 };
 
 } // namespace mu::editude::internal
-
-#endif // MUE_BUILD_EDITUDE_TEST_SERVER

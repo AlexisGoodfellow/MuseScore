@@ -57,7 +57,7 @@ public:
     // loaded from an MSCX file (rather than created via AddPart from the server).
     void registerPart(mu::engraving::Part* part, const QString& uuid);
 
-    // Shared static helpers — also used by EditudeTestServer.
+    // Shared static helpers — also used by EditudeTestDriver.
     static int pitchToMidi(const QString& step, int octave, const QString& accidental);
     static mu::engraving::DurationType parseDurationType(const QString& name);
 

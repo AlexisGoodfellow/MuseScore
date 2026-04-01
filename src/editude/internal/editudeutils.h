@@ -2,7 +2,7 @@
 #pragma once
 
 // Shared inline helpers used by ScoreApplicator, OperationTranslator, and
-// EditudeTestServer. Defined inline here to avoid ODR violations in Unity
+// EditudeTestDriver. Defined inline here to avoid ODR violations in Unity
 // builds where both .cpp files compile into the same TU.
 
 #include <QJsonObject>

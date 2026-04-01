@@ -79,10 +79,31 @@ if (MUE_BUILD_EDITUDE_TESTS)
     add_subdirectory(tests)
 endif()
 
-if (MUE_BUILD_EDITUDE_TEST_SERVER)
+# Shared test actions — used by both the native HTTP test driver and the
+# WASM Emscripten bridge.
+if (MUE_BUILD_EDITUDE_TEST_DRIVER OR OS_IS_WASM)
     target_sources(editude PRIVATE
-        testing/editudetestserver.h
-        testing/editudetestserver.cpp
+        testing/editudetestactions.h
+        testing/editudetestactions.cpp
     )
-    target_compile_definitions(editude PRIVATE MUE_BUILD_EDITUDE_TEST_SERVER)
+endif()
+
+if (MUE_BUILD_EDITUDE_TEST_DRIVER)
+    target_sources(editude PRIVATE
+        testing/editudetestdriver.h
+        testing/editudetestdriver.cpp
+    )
+    target_compile_definitions(editude PRIVATE MUE_BUILD_EDITUDE_TEST_DRIVER)
+endif()
+
+if (OS_IS_WASM)
+    target_sources(editude PRIVATE
+        testing/editudetestbridge.h
+        testing/editudetestbridge.cpp
+    )
+    # The bridge file uses emscripten_run_script() with a large raw string
+    # literal that breaks Unity build concatenation.
+    set_source_files_properties(testing/editudetestbridge.cpp PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON
+    )
 endif()

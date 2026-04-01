@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
-
-#include "editudetestserver.h"
+#include "editudetestactions.h"
 
 #include <QCoreApplication>
 #include <QEventLoop>
-#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTimer>
@@ -69,111 +66,18 @@
 using namespace mu::editude::internal;
 using namespace mu::engraving;
 
-EditudeTestServer::EditudeTestServer(EditudeService* svc, quint16 port, QObject* parent)
-    : QObject(parent)
-    , m_svc(svc)
-    , m_port(port)
+EditudeTestActions::EditudeTestActions(EditudeService* svc)
+    : m_svc(svc)
 {
 }
 
-void EditudeTestServer::start()
-{
-    m_server = new QTcpServer(this);
-    connect(m_server, &QTcpServer::newConnection, this, &EditudeTestServer::onNewConnection);
-    if (!m_server->listen(QHostAddress::LocalHost, m_port)) {
-        LOGW() << "[EditudeTestServer] failed to listen on port" << m_port;
-    } else {
-        LOGD() << "[EditudeTestServer] listening on port" << m_port;
-    }
-}
-
-void EditudeTestServer::onNewConnection()
-{
-    QTcpSocket* socket = m_server->nextPendingConnection();
-    connect(socket, &QTcpSocket::readyRead, this, [this, socket]() { onReadyRead(socket); });
-    connect(socket, &QTcpSocket::disconnected, this, [this, socket]() {
-        m_buffers.remove(socket);
-        socket->deleteLater();
-    });
-}
-
-void EditudeTestServer::onReadyRead(QTcpSocket* socket)
-{
-    m_buffers[socket] += socket->readAll();
-    const QByteArray& buf = m_buffers[socket];
-
-    // Wait until the full HTTP header section has arrived.
-    const int sep = buf.indexOf("\r\n\r\n");
-    if (sep < 0)
-        return;
-
-    // Parse request line: "METHOD /path HTTP/1.1"
-    const int lineEnd = buf.indexOf("\r\n");
-    const QList<QByteArray> reqParts = buf.left(lineEnd).split(' ');
-    if (reqParts.size() < 2) { socket->disconnectFromHost(); return; }
-    const QString method = QString::fromLatin1(reqParts[0]);
-    const QString path   = QString::fromLatin1(reqParts[1]).section('?', 0, 0);
-
-    // Extract Content-Length from headers.
-    int contentLength = 0;
-    for (const QByteArray& line : buf.mid(lineEnd + 2, sep - lineEnd - 2).split('\n')) {
-        if (line.trimmed().toLower().startsWith("content-length:"))
-            contentLength = line.trimmed().mid(15).trimmed().toInt();
-    }
-
-    // Wait until the full body has arrived.
-    if (buf.size() - (sep + 4) < contentLength)
-        return;
-
-    const QJsonObject bodyObj = QJsonDocument::fromJson(buf.mid(sep + 4, contentLength)).object();
-
-    // Dispatch to the appropriate handler.
-    Reply reply;
-    if      (method == "GET"  && path == "/health")        reply = handleHealth();
-    else if (method == "GET"  && path == "/score")         reply = handleScore();
-    else if (method == "GET"  && path == "/status")        reply = handleStatus();
-    else if (method == "POST" && path == "/wait_revision") reply = handleWaitRevision(bodyObj);
-    else if (method == "POST" && path == "/action")        reply = handleAction(bodyObj);
-    else if (method == "POST" && path == "/connect")       reply = handleConnect(bodyObj);
-    else                                                   reply = errorResponse(404, "not found");
-
-    // Write the HTTP response and close the connection.
-    const QByteArray statusText = reply.status == 200 ? "OK"
-                                : reply.status == 408 ? "Request Timeout"
-                                : "Error";
-    socket->write("HTTP/1.1 " + QByteArray::number(reply.status) + " " + statusText + "\r\n");
-    socket->write("Content-Type: application/json\r\n");
-    socket->write("Content-Length: " + QByteArray::number(reply.body.size()) + "\r\n");
-    socket->write("Connection: close\r\n");
-    socket->write("\r\n");
-    socket->write(reply.body);
-    socket->flush();
-    socket->disconnectFromHost();
-    m_buffers.remove(socket);
-}
-
-EditudeTestServer::Reply EditudeTestServer::handleHealth()
+EditudeTestActions::Reply EditudeTestActions::health()
 {
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::handleScore()
+EditudeTestActions::Reply EditudeTestActions::waitRevision(int minRevision, int timeoutMs)
 {
-    // Flush any pending deferred applies (QTimer::singleShot(0) from the
-    // op/op_batch handlers) so the score DOM is consistent with
-    // m_serverRevision before we serialize.
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
-
-    if (m_svc->scoreForTest() == nullptr)
-        return errorResponse(503, "score not ready");
-    return { 200, QJsonDocument(serializeScore()).toJson(QJsonDocument::Compact) };
-}
-
-EditudeTestServer::Reply EditudeTestServer::handleWaitRevision(const QJsonObject& body)
-{
-    const int minRevision = body.value("min_revision").toInt();
-    const int timeoutMs   = body.value("timeout_ms").toInt(5000);
-
     // Flush any pending deferred applies before the fast-path check.
     // The op/op_batch handlers update m_serverRevision immediately but defer
     // the actual score mutation via QTimer::singleShot(0).  Without this
@@ -212,7 +116,7 @@ EditudeTestServer::Reply EditudeTestServer::handleWaitRevision(const QJsonObject
     }).toJson(QJsonDocument::Compact) };
 }
 
-EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::dispatchAction(const QJsonObject& body)
 {
     const QString action = body.value("action").toString();
     LOGD() << "[editude-test] dispatchAction:" << action
@@ -302,36 +206,6 @@ EditudeTestServer::Reply EditudeTestServer::dispatchAction(const QJsonObject& bo
     return errorResponse(400, QString("unknown action: %1").arg(action));
 }
 
-EditudeTestServer::Reply EditudeTestServer::handleAction(const QJsonObject& body)
-{
-    // Defer score mutation to the next event-loop iteration.  Action
-    // handlers call ScoreApplicator::apply() which runs startCmd ->
-    // insertMeasure -> endCmd -> doLayoutRange.  Running that layout
-    // pass inside QTcpSocket::readyRead corrupts score-DOM pointers
-    // because Qt's scene-graph (NotationPaintView) still holds live
-    // references to the pre-edit layout data.  Deferring with
-    // QTimer::singleShot(0) matches the pattern used by
-    // EditudeService::onServerMessage for live ops (see lines 266-295
-    // of editudeservice.cpp).
-    Reply result;
-    QEventLoop loop;
-    QTimer::singleShot(0, this, [&]() {
-        result = dispatchAction(body);
-        loop.quit();
-    });
-    loop.exec();
-
-    // Flush pending events so that any WebSocket data queued by
-    // EditudeService::onScoreChanges (called synchronously during the
-    // action's endCmd -> changesChannel) is actually written to the
-    // network before the HTTP response reaches the Python harness.
-    // Without this, the harness may call peer.wait_revision() before
-    // the editor's op_batch has left the process.
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
-
-    return result;
-}
-
 // ---------------------------------------------------------------------------
 // Coordinate-based Part lookup helper
 // ---------------------------------------------------------------------------
@@ -355,7 +229,7 @@ static Part* resolvePartFromBody(const QJsonObject& body, EditudeService* svc)
 // Tier 1 action handlers — coordinate-addressed
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionInsertNote(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionInsertNote(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -417,7 +291,7 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertNote(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionInsertRest(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionInsertRest(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -460,7 +334,7 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertRest(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionDeleteNote(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionDeleteNote(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -525,7 +399,7 @@ EditudeTestServer::Reply EditudeTestServer::actionDeleteNote(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionDeleteRest(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionDeleteRest(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -555,7 +429,7 @@ EditudeTestServer::Reply EditudeTestServer::actionDeleteRest(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetPitch(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetPitch(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -612,7 +486,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPitch(const QJsonObject& bo
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionUndo()
+EditudeTestActions::Reply EditudeTestActions::actionUndo()
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -628,7 +502,7 @@ EditudeTestServer::Reply EditudeTestServer::actionUndo()
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetTie(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetTie(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -707,7 +581,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetTie(const QJsonObject& body
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetVoice(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetVoice(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -751,7 +625,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetVoice(const QJsonObject& bo
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::handleConnect(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::connect(const QJsonObject& body)
 {
     const QString sessionUrl = body.value("session_url").toString();
     if (sessionUrl.isEmpty())
@@ -760,7 +634,7 @@ EditudeTestServer::Reply EditudeTestServer::handleConnect(const QJsonObject& bod
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::handleStatus()
+EditudeTestActions::Reply EditudeTestActions::status()
 {
     return { 200, QJsonDocument(QJsonObject{
         { "state",    m_svc->stateForTest() },
@@ -777,7 +651,7 @@ static QJsonValue strOrNull(const QString& s)
     return s.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(s);
 }
 
-QJsonObject EditudeTestServer::serializeScore()
+QJsonObject EditudeTestActions::serializeScore()
 {
     Score* score = m_svc->scoreForTest();
 
@@ -810,7 +684,7 @@ QJsonObject EditudeTestServer::serializeScore()
     };
 }
 
-QJsonObject EditudeTestServer::serializePart(Part* part)
+QJsonObject EditudeTestActions::serializePart(Part* part)
 {
     QJsonObject instrument{
         { "musescore_id", part->instrumentId().toQString() },
@@ -910,7 +784,7 @@ QJsonObject EditudeTestServer::serializePart(Part* part)
     };
 }
 
-QJsonArray EditudeTestServer::serializePartEvents(Part* part)
+QJsonArray EditudeTestActions::serializePartEvents(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonArray events;
@@ -980,7 +854,7 @@ QJsonArray EditudeTestServer::serializePartEvents(Part* part)
     return events;
 }
 
-QJsonObject EditudeTestServer::serializeNote(Note* note, const Fraction& tick,
+QJsonObject EditudeTestActions::serializeNote(Note* note, const Fraction& tick,
                                               int voice, int staff)
 {
     QJsonObject obj{
@@ -1009,7 +883,7 @@ QJsonObject EditudeTestServer::serializeNote(Note* note, const Fraction& tick,
     return obj;
 }
 
-QJsonObject EditudeTestServer::serializeRest(Rest* rest, const Fraction& tick,
+QJsonObject EditudeTestActions::serializeRest(Rest* rest, const Fraction& tick,
                                               int voice, int staff)
 {
     return QJsonObject{
@@ -1024,7 +898,7 @@ QJsonObject EditudeTestServer::serializeRest(Rest* rest, const Fraction& tick,
     };
 }
 
-QString EditudeTestServer::uuidForPart(Part* part) const
+QString EditudeTestActions::uuidForPart(Part* part) const
 {
     // Check translator map (Part* -> UUID).
     const auto& knownParts = m_svc->translatorKnownPartUuids();
@@ -1042,7 +916,7 @@ QString EditudeTestServer::uuidForPart(Part* part) const
     return QString();
 }
 
-QJsonObject EditudeTestServer::beatJson(const Fraction& tick)
+QJsonObject EditudeTestActions::beatJson(const Fraction& tick)
 {
     const Fraction r = tick.reduced();
     return QJsonObject{
@@ -1051,7 +925,7 @@ QJsonObject EditudeTestServer::beatJson(const Fraction& tick)
     };
 }
 
-QString EditudeTestServer::durationTypeName(DurationType dt)
+QString EditudeTestActions::durationTypeName(DurationType dt)
 {
     switch (dt) {
     case DurationType::V_WHOLE:   return QStringLiteral("whole");
@@ -1065,7 +939,7 @@ QString EditudeTestServer::durationTypeName(DurationType dt)
     }
 }
 
-QJsonObject EditudeTestServer::pitchJson(Note* note)
+QJsonObject EditudeTestActions::pitchJson(Note* note)
 {
     // Mirror OperationTranslator::pitchJson exactly for consistency.
     static const char* const kSteps[] = { "F", "C", "G", "D", "A", "E", "B" };
@@ -1098,7 +972,7 @@ QJsonObject EditudeTestServer::pitchJson(Note* note)
 // Phase 1 -- Part/Staff action handlers
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddPart(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddPart(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -1144,7 +1018,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddPart(const QJsonObject& bod
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemovePart(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemovePart(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -1163,7 +1037,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemovePart(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetPartName(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetPartName(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -1187,7 +1061,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPartName(const QJsonObject&
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetStaffCount(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetStaffCount(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -1234,7 +1108,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStaffCount(const QJsonObjec
 // articulationNameFromSymId, dynamicKindName, markerKindName are defined
 // inline in internal/editudeutils.h (shared with operationtranslator.cpp).
 
-QJsonObject EditudeTestServer::serializePartArticulations(Part* part)
+QJsonObject EditudeTestActions::serializePartArticulations(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1270,7 +1144,7 @@ QJsonObject EditudeTestServer::serializePartArticulations(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartTuplets(Part* part)
+QJsonObject EditudeTestActions::serializePartTuplets(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1339,7 +1213,7 @@ static QString arpeggioDirectionName(ArpeggioType t)
     return s_map.value(t, QStringLiteral("normal"));
 }
 
-QJsonObject EditudeTestServer::serializePartArpeggios(Part* part)
+QJsonObject EditudeTestActions::serializePartArpeggios(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1372,7 +1246,7 @@ QJsonObject EditudeTestServer::serializePartArpeggios(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartGraceNotes(Part* part)
+QJsonObject EditudeTestActions::serializePartGraceNotes(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1408,7 +1282,7 @@ QJsonObject EditudeTestServer::serializePartGraceNotes(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartBreaths(Part* part)
+QJsonObject EditudeTestActions::serializePartBreaths(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1435,7 +1309,7 @@ QJsonObject EditudeTestServer::serializePartBreaths(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartTremolos(Part* part)
+QJsonObject EditudeTestActions::serializePartTremolos(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1468,7 +1342,7 @@ QJsonObject EditudeTestServer::serializePartTremolos(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartTwoNoteTremolos(Part* part)
+QJsonObject EditudeTestActions::serializePartTwoNoteTremolos(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1516,7 +1390,7 @@ QJsonObject EditudeTestServer::serializePartTwoNoteTremolos(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartDynamics(Part* part)
+QJsonObject EditudeTestActions::serializePartDynamics(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1542,7 +1416,7 @@ QJsonObject EditudeTestServer::serializePartDynamics(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartSlurs(Part* part)
+QJsonObject EditudeTestActions::serializePartSlurs(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1585,7 +1459,7 @@ QJsonObject EditudeTestServer::serializePartSlurs(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartHairpins(Part* part)
+QJsonObject EditudeTestActions::serializePartHairpins(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1612,7 +1486,7 @@ QJsonObject EditudeTestServer::serializePartHairpins(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartOctaveLines(Part* part)
+QJsonObject EditudeTestActions::serializePartOctaveLines(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1644,7 +1518,7 @@ QJsonObject EditudeTestServer::serializePartOctaveLines(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartGlissandos(Part* part)
+QJsonObject EditudeTestActions::serializePartGlissandos(Part* part)
 {
     // Glissandos are NOTE-anchored spanners stored on Note::spannerFor(),
     // NOT in score->spanner().  Iterate notes in the part to find them.
@@ -1698,7 +1572,7 @@ QJsonObject EditudeTestServer::serializePartGlissandos(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartPedalLines(Part* part)
+QJsonObject EditudeTestActions::serializePartPedalLines(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1720,7 +1594,7 @@ QJsonObject EditudeTestServer::serializePartPedalLines(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartTrillLines(Part* part)
+QJsonObject EditudeTestActions::serializePartTrillLines(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1756,7 +1630,7 @@ QJsonObject EditudeTestServer::serializePartTrillLines(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartLyricsMap(Part* part)
+QJsonObject EditudeTestActions::serializePartLyricsMap(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1800,7 +1674,7 @@ QJsonObject EditudeTestServer::serializePartLyricsMap(Part* part)
 // Tier 4 serialization helpers
 // ---------------------------------------------------------------------------
 
-QJsonArray EditudeTestServer::serializeScoreRepeatBarlines()
+QJsonArray EditudeTestActions::serializeScoreRepeatBarlines()
 {
     Score* score = m_svc->scoreForTest();
     QJsonArray arr;
@@ -1823,7 +1697,7 @@ QJsonArray EditudeTestServer::serializeScoreRepeatBarlines()
     return arr;
 }
 
-QJsonObject EditudeTestServer::serializeScoreVoltas()
+QJsonObject EditudeTestActions::serializeScoreVoltas()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1849,7 +1723,7 @@ QJsonObject EditudeTestServer::serializeScoreVoltas()
     return result;
 }
 
-QJsonObject EditudeTestServer::serializeScoreMarkers()
+QJsonObject EditudeTestActions::serializeScoreMarkers()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1873,7 +1747,7 @@ QJsonObject EditudeTestServer::serializeScoreMarkers()
     return result;
 }
 
-QJsonObject EditudeTestServer::serializeScoreJumps()
+QJsonObject EditudeTestActions::serializeScoreJumps()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -1900,7 +1774,7 @@ QJsonObject EditudeTestServer::serializeScoreJumps()
     return result;
 }
 
-QJsonArray EditudeTestServer::serializeMeasureLenOverrides()
+QJsonArray EditudeTestActions::serializeMeasureLenOverrides()
 {
     Score* score = m_svc->scoreForTest();
     QJsonArray arr;
@@ -1919,7 +1793,7 @@ QJsonArray EditudeTestServer::serializeMeasureLenOverrides()
 // Tier 3 action handlers — coordinate-addressed
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionSetPartInstrument(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetPartInstrument(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -1956,7 +1830,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetPartInstrument(const QJsonO
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetStringData(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetStringData(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -1998,7 +1872,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStringData(const QJsonObjec
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetCapo(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetCapo(const QJsonObject& body)
 {
     // Capo is tracked in the Python model.  The C++ test server acknowledges
     // the action without modifying the score -- this mirrors the applicator's
@@ -2007,7 +1881,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetCapo(const QJsonObject& bod
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetTabNote(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetTabNote(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2048,7 +1922,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetTabNote(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetDrumset(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetDrumset(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2104,7 +1978,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetDrumset(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetNoteHead(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetNoteHead(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2145,7 +2019,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetNoteHead(const QJsonObject&
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionAddArticulation(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddArticulation(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2254,7 +2128,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddArticulation(const QJsonObj
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveArticulation(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveArticulation(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2360,7 +2234,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveArticulation(const QJson
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionAddArpeggio(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddArpeggio(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2405,7 +2279,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddArpeggio(const QJsonObject&
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveArpeggio(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveArpeggio(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2439,7 +2313,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveArpeggio(const QJsonObje
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionAddTuplet(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddTuplet(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2536,7 +2410,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddTuplet(const QJsonObject& b
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveTuplet(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveTuplet(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2588,7 +2462,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTuplet(const QJsonObject
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionAddGraceNote(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddGraceNote(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2664,7 +2538,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddGraceNote(const QJsonObject
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveGraceNote(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveGraceNote(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2707,7 +2581,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveGraceNote(const QJsonObj
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionAddBreathMark(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddBreathMark(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2743,7 +2617,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddBreathMark(const QJsonObjec
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveBreathMark(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveBreathMark(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2790,7 +2664,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveBreathMark(const QJsonOb
 // Tremolo actions (single-note) -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddTremolo(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddTremolo(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2825,7 +2699,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddTremolo(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveTremolo(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveTremolo(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2862,7 +2736,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTremolo(const QJsonObjec
 // Two-note tremolo actions -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddTwoNoteTremolo(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddTwoNoteTremolo(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2907,7 +2781,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddTwoNoteTremolo(const QJsonO
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveTwoNoteTremolo(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveTwoNoteTremolo(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2943,7 +2817,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTwoNoteTremolo(const QJs
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionAddDynamic(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddDynamic(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -2998,7 +2872,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddDynamic(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetDynamic(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetDynamic(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3063,7 +2937,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetDynamic(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveDynamic(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveDynamic(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3104,7 +2978,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveDynamic(const QJsonObjec
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionAddSlur(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddSlur(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3149,7 +3023,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddSlur(const QJsonObject& bod
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveSlur(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveSlur(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3195,7 +3069,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveSlur(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionAddHairpin(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddHairpin(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3223,7 +3097,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddHairpin(const QJsonObject& 
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveHairpin(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveHairpin(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3265,7 +3139,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveHairpin(const QJsonObjec
 // Advanced spanners -- octave lines (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddOctaveLine(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddOctaveLine(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3301,7 +3175,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddOctaveLine(const QJsonObjec
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveOctaveLine(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveOctaveLine(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3342,7 +3216,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveOctaveLine(const QJsonOb
 // Advanced spanners -- glissandos (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddGlissando(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddGlissando(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3399,7 +3273,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddGlissando(const QJsonObject
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveGlissando(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveGlissando(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3447,7 +3321,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveGlissando(const QJsonObj
 // Advanced spanners -- pedal lines (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddPedalLine(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddPedalLine(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3476,7 +3350,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddPedalLine(const QJsonObject
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemovePedalLine(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemovePedalLine(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3517,7 +3391,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemovePedalLine(const QJsonObj
 // Advanced spanners -- trill lines (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddTrillLine(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddTrillLine(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3567,7 +3441,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddTrillLine(const QJsonObject
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveTrillLine(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveTrillLine(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3604,7 +3478,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveTrillLine(const QJsonObj
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionAddLyric(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddLyric(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3651,7 +3525,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddLyric(const QJsonObject& bo
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetLyric(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetLyric(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3694,7 +3568,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetLyric(const QJsonObject& bo
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveLyric(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveLyric(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3739,7 +3613,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveLyric(const QJsonObject&
 // Staff text action handlers -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddStaffText(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddStaffText(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3776,7 +3650,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddStaffText(const QJsonObject
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetStaffText(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetStaffText(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3819,7 +3693,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStaffText(const QJsonObject
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveStaffText(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveStaffText(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3864,7 +3738,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveStaffText(const QJsonObj
 // System text action handlers -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddSystemText(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddSystemText(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3895,7 +3769,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddSystemText(const QJsonObjec
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetSystemText(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetSystemText(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3931,7 +3805,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetSystemText(const QJsonObjec
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveSystemText(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveSystemText(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -3969,7 +3843,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveSystemText(const QJsonOb
 // Rehearsal mark action handlers -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddRehearsalMark(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddRehearsalMark(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4000,7 +3874,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddRehearsalMark(const QJsonOb
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetRehearsalMark(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetRehearsalMark(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4035,7 +3909,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetRehearsalMark(const QJsonOb
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveRehearsalMark(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveRehearsalMark(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4073,7 +3947,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveRehearsalMark(const QJso
 // Tier 4 action handlers -- coordinate-addressed
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionSetStartRepeat(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetStartRepeat(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4097,7 +3971,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetStartRepeat(const QJsonObje
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetEndRepeat(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetEndRepeat(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4126,7 +4000,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetEndRepeat(const QJsonObject
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionInsertVolta(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionInsertVolta(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4141,7 +4015,7 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertVolta(const QJsonObject&
         : errorResponse(500, "insert_volta failed");
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveVolta(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveVolta(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4172,7 +4046,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveVolta(const QJsonObject&
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionInsertMarker(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionInsertMarker(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4187,7 +4061,7 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertMarker(const QJsonObject
         : errorResponse(500, "insert_marker failed");
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveMarker(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveMarker(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4222,7 +4096,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveMarker(const QJsonObject
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionInsertJump(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionInsertJump(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4237,7 +4111,7 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertJump(const QJsonObject& 
         : errorResponse(500, "insert_jump failed");
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveJump(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveJump(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4275,7 +4149,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveJump(const QJsonObject& 
 // Structural + metadata action handlers
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionSetMeasureLen(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetMeasureLen(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4306,7 +4180,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetMeasureLen(const QJsonObjec
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionInsertBeats(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionInsertBeats(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4321,7 +4195,7 @@ EditudeTestServer::Reply EditudeTestServer::actionInsertBeats(const QJsonObject&
         : errorResponse(500, "insert_beats failed");
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionDeleteBeats(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionDeleteBeats(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4336,7 +4210,7 @@ EditudeTestServer::Reply EditudeTestServer::actionDeleteBeats(const QJsonObject&
         : errorResponse(500, "delete_beats failed");
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetScoreMetadata(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetScoreMetadata(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4351,7 +4225,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetScoreMetadata(const QJsonOb
         : errorResponse(500, "set_score_metadata failed");
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetConcertPitch(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetConcertPitch(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4369,7 +4243,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetConcertPitch(const QJsonObj
 // Tier 2 -- score directive action handlers
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionSetTimeSignature(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetTimeSignature(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4383,7 +4257,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetTimeSignature(const QJsonOb
         : errorResponse(500, "set_time_signature failed");
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetTempo(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetTempo(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4415,7 +4289,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetTempo(const QJsonObject& bo
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetKeySignature(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetKeySignature(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4460,7 +4334,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetKeySignature(const QJsonObj
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetClef(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetClef(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4530,7 +4404,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetClef(const QJsonObject& bod
 // Tier 3 -- chord symbol action handlers (coordinate-addressed)
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::actionAddChordSymbol(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionAddChordSymbol(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4562,7 +4436,7 @@ EditudeTestServer::Reply EditudeTestServer::actionAddChordSymbol(const QJsonObje
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionSetChordSymbol(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionSetChordSymbol(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4597,7 +4471,7 @@ EditudeTestServer::Reply EditudeTestServer::actionSetChordSymbol(const QJsonObje
     return okResponse();
 }
 
-EditudeTestServer::Reply EditudeTestServer::actionRemoveChordSymbol(const QJsonObject& body)
+EditudeTestActions::Reply EditudeTestActions::actionRemoveChordSymbol(const QJsonObject& body)
 {
     Score* score = m_svc->scoreForTest();
     if (!score) {
@@ -4634,7 +4508,7 @@ EditudeTestServer::Reply EditudeTestServer::actionRemoveChordSymbol(const QJsonO
 // New serialization helpers
 // ---------------------------------------------------------------------------
 
-QJsonArray EditudeTestServer::serializeMetricGrid()
+QJsonArray EditudeTestActions::serializeMetricGrid()
 {
     Score* score = m_svc->scoreForTest();
     QJsonArray result;
@@ -4660,7 +4534,7 @@ QJsonArray EditudeTestServer::serializeMetricGrid()
     return result;
 }
 
-QJsonArray EditudeTestServer::serializeTempoMap()
+QJsonArray EditudeTestActions::serializeTempoMap()
 {
     Score* score = m_svc->scoreForTest();
     QJsonArray result;
@@ -4689,7 +4563,7 @@ QJsonArray EditudeTestServer::serializeTempoMap()
     return result;
 }
 
-QJsonArray EditudeTestServer::serializePartKeyChanges(Part* part)
+QJsonArray EditudeTestActions::serializePartKeyChanges(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonArray result;
@@ -4713,7 +4587,7 @@ QJsonArray EditudeTestServer::serializePartKeyChanges(Part* part)
     return result;
 }
 
-QJsonArray EditudeTestServer::serializePartClefChanges(Part* part)
+QJsonArray EditudeTestActions::serializePartClefChanges(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonArray result;
@@ -4764,7 +4638,7 @@ QJsonArray EditudeTestServer::serializePartClefChanges(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializeScoreChordSymbols()
+QJsonObject EditudeTestActions::serializeScoreChordSymbols()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -4787,7 +4661,7 @@ QJsonObject EditudeTestServer::serializeScoreChordSymbols()
     return result;
 }
 
-QJsonObject EditudeTestServer::serializePartStaffTexts(Part* part)
+QJsonObject EditudeTestActions::serializePartStaffTexts(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -4813,7 +4687,7 @@ QJsonObject EditudeTestServer::serializePartStaffTexts(Part* part)
     return result;
 }
 
-QJsonObject EditudeTestServer::serializeScoreSystemTexts()
+QJsonObject EditudeTestActions::serializeScoreSystemTexts()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -4836,7 +4710,7 @@ QJsonObject EditudeTestServer::serializeScoreSystemTexts()
     return result;
 }
 
-QJsonObject EditudeTestServer::serializeScoreRehearsalMarks()
+QJsonObject EditudeTestActions::serializeScoreRehearsalMarks()
 {
     Score* score = m_svc->scoreForTest();
     QJsonObject result;
@@ -4863,14 +4737,17 @@ QJsonObject EditudeTestServer::serializeScoreRehearsalMarks()
 // Helper responses
 // ---------------------------------------------------------------------------
 
-EditudeTestServer::Reply EditudeTestServer::errorResponse(int status, const QString& msg)
+EditudeTestActions::Reply EditudeTestActions::errorResponse(int status, const QString& msg)
 {
     return { status, QJsonDocument(QJsonObject{ { "error", msg } }).toJson(QJsonDocument::Compact) };
 }
 
-EditudeTestServer::Reply EditudeTestServer::okResponse()
+EditudeTestActions::Reply EditudeTestActions::okResponse()
 {
     return { 200, QJsonDocument(QJsonObject{ { "ok", true } }).toJson(QJsonDocument::Compact) };
 }
 
-#endif // MUE_BUILD_EDITUDE_TEST_SERVER
+int EditudeTestActions::serverRevision() const
+{
+    return m_svc->serverRevisionForTest();
+}

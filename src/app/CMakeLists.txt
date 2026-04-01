@@ -315,8 +315,8 @@ target_link_libraries(MuseScoreStudio PRIVATE ${LINK_LIB} ${COVERAGE_LINK_FLAGS}
 if (MUE_BUILD_EDITUDE_MODULE)
     target_compile_definitions(MuseScoreStudio PRIVATE MUE_BUILD_EDITUDE_MODULE)
 endif()
-if (MUE_BUILD_EDITUDE_TEST_SERVER)
-    target_compile_definitions(MuseScoreStudio PRIVATE MUE_BUILD_EDITUDE_TEST_SERVER)
+if (MUE_BUILD_EDITUDE_TEST_DRIVER)
+    target_compile_definitions(MuseScoreStudio PRIVATE MUE_BUILD_EDITUDE_TEST_DRIVER)
 endif()
 ## [/editude] ##
 

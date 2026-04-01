@@ -22,6 +22,10 @@
 
 #include "internal/editudeservice.h"
 #include "internal/editudeuiactions.h"
+
+#ifdef Q_OS_WASM
+#include "testing/editudetestbridge.h"
+#endif
 #include "qml/Editude/editudeannotationmodel.h"
 #include "qml/Editude/editudeannotationoverlaymodel.h"
 #include "qml/Editude/editudepresencemodel.h"
@@ -90,11 +94,11 @@ void EditudeModuleContext::registerExports()
 
     // NOTE: session recovery suppression moved to onInit() — see comment there.
 
-    // ── Snapshot fetch + startup scenario steering ──────────────────────
+    // ── Bootstrap score fetch + startup scenario steering ────────────────
     //
     // If EDITUDE_SESSION_URL is set, fetch session metadata and the latest
-    // snapshot synchronously so we can tell the startup scenario to open
-    // the NOTATION page directly (no HOME page flash).
+    // bootstrap score synchronously so we can tell the startup scenario to
+    // open the NOTATION page directly (no HOME page flash).
 
     const QString sessionUrl = QString::fromUtf8(qgetenv("EDITUDE_SESSION_URL"));
     if (sessionUrl.isEmpty()) {
@@ -129,8 +133,9 @@ void EditudeModuleContext::registerExports()
         }
 
         // 2. Sync GET /projects/{pid}/latest-snapshot → editude server
-        QUrl snapshotUrl(serverUrl + "/projects/" + projectId + "/latest-snapshot");
-        QNetworkRequest snapReq(snapshotUrl);
+        //    (downloads the bootstrap score — the latest server-side snapshot)
+        QUrl bootstrapUrl(serverUrl + "/projects/" + projectId + "/latest-snapshot");
+        QNetworkRequest snapReq(bootstrapUrl);
         snapReq.setRawHeader("Authorization", QString("Bearer %1").arg(token).toUtf8());
 
         QNetworkReply* snapReply = nam.get(snapReq);
@@ -149,21 +154,21 @@ void EditudeModuleContext::registerExports()
             if (tmpFile.open()) {
                 tmpFile.write(msczData);
                 tmpFile.close();
-                m_snapshotTmpPath = tmpFile.fileName();
-                m_service->setSnapshotPath(m_snapshotTmpPath);
+                m_bootstrapTmpPath = tmpFile.fileName();
+                m_service->setBootstrapScorePath(m_bootstrapTmpPath);
 
                 // Tell the startup scenario to open this file directly → NOTATION page.
                 if (m_startupScenario()) {
                     m_startupScenario()->setStartupScoreFile(
-                        mu::project::ProjectFile(muse::io::path_t(m_snapshotTmpPath)));
+                        mu::project::ProjectFile(muse::io::path_t(m_bootstrapTmpPath)));
                 }
-                LOGI() << "[EditudeModule] snapshot written to" << m_snapshotTmpPath
+                LOGI() << "[EditudeModule] bootstrap score written to" << m_bootstrapTmpPath
                        << "(" << msczData.size() << "bytes)";
             } else {
-                LOGW() << "[EditudeModule] failed to create temp file for snapshot";
+                LOGW() << "[EditudeModule] failed to create temp file for bootstrap score";
             }
         } else {
-            LOGD() << "[EditudeModule] no snapshot available (new project or 404)";
+            LOGD() << "[EditudeModule] no bootstrap score available (new project or 404)";
         }
         snapReply->deleteLater();
     }
@@ -215,20 +220,24 @@ void EditudeModuleContext::onInit(const muse::IApplication::RunMode& mode)
         m_annotationModel->requestCreation();
     });
 
-#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
-    LOGI() << "[EditudeModule] test server enabled, EDITUDE_TEST_PORT=" << qgetenv("EDITUDE_TEST_PORT");
+#ifdef MUE_BUILD_EDITUDE_TEST_DRIVER
+    LOGI() << "[EditudeModule] test driver enabled, EDITUDE_TEST_PORT=" << qgetenv("EDITUDE_TEST_PORT");
     {
         const QByteArray portEnv = qgetenv("EDITUDE_TEST_PORT");
         if (!portEnv.isEmpty()) {
             bool ok = false;
             const quint16 port = static_cast<quint16>(portEnv.toUShort(&ok));
             if (ok) {
-                m_testServer = std::make_unique<internal::EditudeTestServer>(
+                m_testServer = std::make_unique<internal::EditudeTestDriver>(
                     m_service.get(), port);
                 m_testServer->start();
             }
         }
     }
+#endif
+
+#ifdef Q_OS_WASM
+    internal::initTestBridge(m_service.get());
 #endif
 
     m_globalContext()->currentNotationChanged().onNotify(this, [this]() {
@@ -252,7 +261,7 @@ void EditudeModuleContext::onDeinit()
     m_globalContext()->currentNotationChanged().disconnect(this);
     m_service.reset();
 
-    if (!m_snapshotTmpPath.isEmpty()) {
-        QFile::remove(m_snapshotTmpPath);
+    if (!m_bootstrapTmpPath.isEmpty()) {
+        QFile::remove(m_bootstrapTmpPath);
     }
 }

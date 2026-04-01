@@ -157,9 +157,9 @@ void EditudeService::setAnnotationOverlayModel(EditudeAnnotationOverlayModel* mo
     // setNotationViewMatrix() → remapRows() → dataChanged() path.
 }
 
-void EditudeService::setSnapshotPath(const QString& path)
+void EditudeService::setBootstrapScorePath(const QString& path)
 {
-    m_snapshotPath = path;
+    m_bootstrapScorePath = path;
 }
 
 void EditudeService::start()
@@ -198,11 +198,11 @@ void EditudeService::start()
             emscripten::val::global("JSON").call<std::string>("stringify", bootstrap));
         QJsonObject bootstrapObj = QJsonDocument::fromJson(bootstrapJson.toUtf8()).object();
 
-        // Extract snapshot MSCZ (base64-encoded) and write to Emscripten VFS.
+        // Extract bootstrap score MSCZ (base64-encoded) and write to Emscripten VFS.
         QJsonValue snapVal = bootstrapObj.value("snapshot");
         if (snapVal.isObject()) {
             QJsonObject snapshot = snapVal.toObject();
-            m_snapshotRevision = snapshot.value("revision").toInt(0);
+            m_bootstrapRevision = snapshot.value("revision").toInt(0);
             QString contentB64 = snapshot.value("content_b64").toString();
             LOGI() << "[editude] content_b64 length=" << contentB64.size();
             QByteArray msczData = QByteArray::fromBase64(contentB64.toUtf8());
@@ -217,15 +217,15 @@ void EditudeService::start()
             muse::ByteArray museData(msczData.constData(), msczData.size());
             muse::Ret writeRet = muse::io::File::writeFile(tmpPath, museData);
             if (writeRet) {
-                m_snapshotPath = tmpPath.toQString();
-                LOGI() << "[editude] WASM snapshot written to" << tmpPath
+                m_bootstrapScorePath = tmpPath.toQString();
+                LOGI() << "[editude] WASM bootstrap score written to" << tmpPath
                        << "(" << msczData.size() << "bytes)";
             } else {
-                LOGW() << "[editude] failed to write snapshot:"
+                LOGW() << "[editude] failed to write bootstrap score:"
                        << writeRet.toString();
             }
         } else {
-            m_snapshotRevision = 0;
+            m_bootstrapRevision = 0;
         }
 
         m_serverRevision = bootstrapObj.value("server_revision").toInt(0);
@@ -234,14 +234,14 @@ void EditudeService::start()
         m_bootstrapReady = true;
 
         LOGI() << "[editude] WASM bootstrap parsed:"
-               << " snapshotRev=" << m_snapshotRevision
+               << " bootstrapRev=" << m_bootstrapRevision
                << " serverRev=" << m_serverRevision
                << " pendingOps=" << m_pendingOps.size()
                << " parts=" << m_serverParts.size()
-               << " snapshotPath=" << m_snapshotPath;
+               << " bootstrapScorePath=" << m_bootstrapScorePath;
     } else {
         LOGW() << "[editude] window.editudeSession.bootstrap not set";
-        m_snapshotRevision = 0;
+        m_bootstrapRevision = 0;
         m_serverRevision   = 0;
         m_pendingOps       = QJsonArray();
         m_serverParts      = QJsonArray();
@@ -339,7 +339,7 @@ void EditudeService::start()
             return;
         }
 
-        m_snapshotRevision = obj.value("snapshot_revision").toInt(0);
+        m_bootstrapRevision = obj.value("snapshot_revision").toInt(0);
         m_serverRevision   = obj.value("server_revision").toInt(0);
         m_pendingOps       = obj.value("snapshot_ops").toArray();
         m_serverParts      = obj.value("parts").toArray();
@@ -405,13 +405,13 @@ bool EditudeService::eventFilter(QObject* watched, QEvent* event)
 
 void EditudeService::openScoreForSession()
 {
-    LOGI() << "[editude] openScoreForSession snapshotPath=" << m_snapshotPath
-           << " snapshotRev=" << m_snapshotRevision
+    LOGI() << "[editude] openScoreForSession bootstrapScorePath=" << m_bootstrapScorePath
+           << " bootstrapRev=" << m_bootstrapRevision
            << " score=" << (m_score ? "set" : "null");
 
-    if (!m_snapshotPath.isEmpty()) {
+    if (!m_bootstrapScorePath.isEmpty()) {
         if (!m_score) {
-            // Score not loaded yet.  Open the snapshot file via MuseScore's
+            // Score not loaded yet.  Open the bootstrap score file via MuseScore's
             // own openProject().  It internally opens the notation page after
             // loading the score, which correctly wires up the navigation
             // context (ScoreView panel active → UiCtxProjectFocused → actions
@@ -421,9 +421,9 @@ void EditudeService::openScoreForSession()
             // If the startup scenario already loaded the file (via
             // setStartupScoreFile in registerExports), m_score is set and we
             // skip this — no double-open.
-            LOGI() << "[editude] calling openProject(" << m_snapshotPath << ")";
+            LOGI() << "[editude] calling openProject(" << m_bootstrapScorePath << ")";
             m_projectFiles()->openProject(
-                mu::project::ProjectFile(muse::io::path_t(m_snapshotPath)));
+                mu::project::ProjectFile(muse::io::path_t(m_bootstrapScorePath)));
             LOGI() << "[editude] openProject returned, score=" << (m_score ? "set" : "null");
         }
         bootstrapAndConnect();
@@ -431,8 +431,8 @@ void EditudeService::openScoreForSession()
         // clobbering it.  Set the flag so the opened() handler in start()
         // navigates back to NOTATION when HOME fires.
         m_reclaimNotation = true;
-    } else if (m_snapshotRevision == 0) {
-        // m_snapshotRevision == 0 — brand-new project.  Open MuseScore's
+    } else if (m_bootstrapRevision == 0) {
+        // m_bootstrapRevision == 0 — brand-new project.  Open MuseScore's
         // "New Score" wizard so the user can pick a template/instruments.
         // onNotationChanged() fires when they finish the wizard.
         //
@@ -454,9 +454,9 @@ void EditudeService::bootstrapAndConnect()
            << " score=" << (m_score ? "set" : "null")
            << " pendingOps=" << m_pendingOps.size()
            << " serverParts=" << m_serverParts.size()
-           << " snapshotRev=" << m_snapshotRevision
+           << " bootstrapRev=" << m_bootstrapRevision
            << " serverRev=" << m_serverRevision
-           << " snapshotPath=" << m_snapshotPath;
+           << " bootstrapScorePath=" << m_bootstrapScorePath;
     if (!m_bootstrapReady || !m_score) {
         return;
     }
@@ -784,9 +784,9 @@ void EditudeService::onServerMessage(const QString& text)
                 m_currentNotation->notationChanged().send(muse::RectF());
             }
         };
-#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+#ifdef MUE_BUILD_EDITUDE_TEST_DRIVER
         // Defer to the next event-loop iteration to prevent reentrance
-        // with EditudeTestServer::handleWaitRevision's nested QEventLoop.
+        // with EditudeTestDriver::handleWaitRevision's nested QEventLoop.
         QTimer::singleShot(0, this, applyRemoteOp);
 #else
         applyRemoteOp();
@@ -824,7 +824,7 @@ void EditudeService::onServerMessage(const QString& text)
                 m_currentNotation->notationChanged().send(muse::RectF());
             }
         };
-#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+#ifdef MUE_BUILD_EDITUDE_TEST_DRIVER
         // Defer to the next event-loop iteration (see "op" handler comment).
         QTimer::singleShot(0, this, applyRemoteBatch);
 #else
@@ -920,8 +920,8 @@ void EditudeService::onNotationChanged(mu::notation::INotationPtr notation)
     }
 
     // Apply bootstrap ops and open the WebSocket if the session info
-    // has already arrived from the network.  When the snapshot path is
-    // passed as a command-line argument, StartupScenario loads the file
+    // has already arrived from the network.  When the bootstrap score path
+    // is passed as a command-line argument, StartupScenario loads the file
     // before the network reply — in that case bootstrapAndConnect() is
     // a no-op here and runs later from openScoreForSession().
     bootstrapAndConnect();
@@ -1658,7 +1658,7 @@ QJsonObject EditudeService::getSelectionAnchor()
     return anchor;
 }
 
-#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
+#if defined(MUE_BUILD_EDITUDE_TEST_DRIVER) || defined(Q_OS_WASM)
 
 void EditudeService::connectToSession(const QString& sessionUrl)
 {
@@ -1704,8 +1704,8 @@ void EditudeService::connectToSession(const QString& sessionUrl)
     m_token.clear();
     m_websocketUrl.clear();
     m_projectId.clear();
-    m_snapshotPath.clear();
-    m_snapshotRevision = 0;
+    m_bootstrapScorePath.clear();
+    m_bootstrapRevision = 0;
     m_tokenExpiry = 0;
 
     // Reset OT subsystems so stale Part*/Element* ↔ UUID mappings from the
@@ -1758,7 +1758,7 @@ void EditudeService::connectToSession(const QString& sessionUrl)
         // snapshot at revision 0 is valid and must be fetched.
         QJsonValue snapRevVal = obj.value("snapshot_revision");
         bool hasSnapshot = !snapRevVal.isNull() && !snapRevVal.isUndefined();
-        m_snapshotRevision = snapRevVal.toInt(0);
+        m_bootstrapRevision = snapRevVal.toInt(0);
         m_serverRevision   = obj.value("server_revision").toInt(0);
         m_pendingOps       = obj.value("snapshot_ops").toArray();
         m_serverParts      = obj.value("parts").toArray();
@@ -1806,15 +1806,15 @@ void EditudeService::connectToSession(const QString& sessionUrl)
             });
         };
 
-        // If the project has a snapshot on the server, fetch it before
-        // closing the current project so openScoreForSession() can load it.
-        // snapshot_revision is null (hasSnapshot == false) for brand-new
-        // projects; a value of 0 means a snapshot exists at revision 0.
+        // If the project has a snapshot on the server, fetch the bootstrap
+        // score before closing the current project so openScoreForSession()
+        // can load it.  snapshot_revision is null (hasSnapshot == false) for
+        // brand-new projects; a value of 0 means a snapshot exists at rev 0.
         if (hasSnapshot) {
-            QUrl snapshotUrl = deriveServerBaseUrl();
-            snapshotUrl.setPath(QString("/projects/%1/latest-snapshot").arg(m_projectId));
+            QUrl bootstrapUrl = deriveServerBaseUrl();
+            bootstrapUrl.setPath(QString("/projects/%1/latest-snapshot").arg(m_projectId));
 
-            QNetworkRequest snapReq(snapshotUrl);
+            QNetworkRequest snapReq(bootstrapUrl);
             snapReq.setRawHeader("Authorization",
                                  QString("Bearer %1").arg(m_token).toUtf8());
 
@@ -1824,6 +1824,23 @@ void EditudeService::connectToSession(const QString& sessionUrl)
                 snapReply->deleteLater();
                 if (snapReply->error() == QNetworkReply::NoError) {
                     const QByteArray msczData = snapReply->readAll();
+#ifdef Q_OS_WASM
+                    // WASM: write via MuseScore's io::File abstraction, which
+                    // targets Emscripten's MEMFS.  QTemporaryFile writes to a
+                    // path invisible to openProject()'s MscReader.
+                    muse::io::path_t tmpPath("/mu/temp/editude_bootstrap.mscz");
+                    muse::io::File::remove(tmpPath);
+                    muse::ByteArray museData(msczData.constData(), msczData.size());
+                    muse::Ret writeRet = muse::io::File::writeFile(tmpPath, museData);
+                    if (writeRet) {
+                        m_bootstrapScorePath = tmpPath.toQString();
+                        LOGD() << "[editude] connectToSession: WASM bootstrap score written to"
+                               << tmpPath << "(" << msczData.size() << "bytes)";
+                    } else {
+                        LOGW() << "[editude] connectToSession: WASM bootstrap score write failed:"
+                               << writeRet.toString();
+                    }
+#else
                     QTemporaryFile tmpFile;
                     tmpFile.setFileTemplate(
                         QDir::tempPath() + "/editude_XXXXXX.mscz");
@@ -1831,18 +1848,19 @@ void EditudeService::connectToSession(const QString& sessionUrl)
                     if (tmpFile.open()) {
                         tmpFile.write(msczData);
                         tmpFile.close();
-                        m_snapshotPath = tmpFile.fileName();
-                        LOGD() << "[editude] connectToSession: snapshot written to"
-                               << m_snapshotPath << "(" << msczData.size() << "bytes)";
+                        m_bootstrapScorePath = tmpFile.fileName();
+                        LOGD() << "[editude] connectToSession: bootstrap score written to"
+                               << m_bootstrapScorePath << "(" << msczData.size() << "bytes)";
                     }
+#endif
                 } else {
-                    LOGW() << "[editude] connectToSession: snapshot fetch failed:"
+                    LOGW() << "[editude] connectToSession: bootstrap score fetch failed:"
                            << snapReply->errorString();
                 }
                 closeAndReopen();
             });
         } else {
-            // No snapshot — new project; proceed directly.
+            // No bootstrap score — new project; proceed directly.
             closeAndReopen();
         }
     });
@@ -1860,7 +1878,7 @@ QString EditudeService::stateForTest() const
     }
 }
 
-#endif // MUE_BUILD_EDITUDE_TEST_SERVER
+#endif // MUE_BUILD_EDITUDE_TEST_DRIVER || Q_OS_WASM
 
 void EditudeService::refreshPresenceModel()
 {

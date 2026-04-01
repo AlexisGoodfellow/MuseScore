@@ -38,8 +38,8 @@
 #include "qml/Editude/editudeannotationoverlaymodel.h"
 #include "qml/Editude/editudepresencemodel.h"
 
-#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
-#include "testing/editudetestserver.h"
+#ifdef MUE_BUILD_EDITUDE_TEST_DRIVER
+#include "testing/editudetestdriver.h"
 #endif
 
 namespace mu::editude {
@@ -72,14 +72,14 @@ public:
     void onDeinit() override;
 
 private:
-    QString m_snapshotTmpPath;
+    QString m_bootstrapTmpPath;
     std::shared_ptr<internal::EditudeService> m_service;
     std::shared_ptr<internal::EditudeUiActions> m_uiActions;
     internal::EditudePresenceModel* m_presenceModel = nullptr;   // application-scoped singleton
     internal::EditudeAnnotationModel* m_annotationModel = nullptr; // application-scoped singleton
     internal::EditudeAnnotationOverlayModel* m_annotationOverlayModel = nullptr; // application-scoped singleton
-#ifdef MUE_BUILD_EDITUDE_TEST_SERVER
-    std::unique_ptr<internal::EditudeTestServer> m_testServer;
+#ifdef MUE_BUILD_EDITUDE_TEST_DRIVER
+    std::unique_ptr<internal::EditudeTestDriver> m_testServer;
 #endif
 };
 }
