@@ -1,0 +1,9 @@
+// [editude] Minimal QSettings stub for the MuseAudio standalone WASM build.
+// settings.h forward-declares QSettings and holds a QSettings* member, but
+// the audio engine never instantiates or dereferences it.
+// Guarded with __cplusplus because this file is force-included into C files
+// (FluidSynth) via add_compile_options(-include ...).
+#pragma once
+#ifdef __cplusplus
+class QSettings {};
+#endif

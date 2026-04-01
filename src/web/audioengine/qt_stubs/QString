@@ -1,0 +1,23 @@
+// [editude] Minimal QString stub for the MuseAudio standalone WASM build.
+//
+// The audio engine never uses QString at runtime, but framework headers
+// (audiotypes.h RESOURCE_TYPE_MAP, settings.h) reference it outside
+// NO_QT_SUPPORT guards.  audioutils.h returns muse::String from QString map
+// values, so our stub must be implicitly convertible to String.  The simplest
+// way: inherit from muse::String and add a const-char* constructor (for string
+// literal initialisers like "undefined" in RESOURCE_TYPE_MAP).
+//
+// Guarded with __cplusplus because this file is force-included into C files
+// (FluidSynth) via add_compile_options(-include ...).
+#pragma once
+#ifdef __cplusplus
+#include <global/types/string.h>
+
+class QString : public muse::String {
+public:
+    QString() = default;
+    QString(const char* s) : muse::String(muse::String::fromAscii(s ? s : "")) {}
+    QString(const muse::String& s) : muse::String(s) {}
+    int size() const { return static_cast<int>(muse::String::size()); }
+};
+#endif
