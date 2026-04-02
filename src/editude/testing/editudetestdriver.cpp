@@ -99,6 +99,14 @@ void EditudeTestDriver::onReadyRead(QTcpSocket* socket)
         QEventLoop loop;
         QTimer::singleShot(0, this, [&]() {
             reply = m_actions.dispatchAction(bodyObj);
+            // The test driver calls Score::startCmd/endCmd directly,
+            // bypassing NotationInteraction.  MuseScore's paint view
+            // only redraws in response to notationChanged() — which is
+            // fired by NotationInteraction, not by Score::endCmd().
+            // Without this explicit notification the paint view never
+            // learns about the mutation and the score doesn't visually
+            // update until the user scrolls.
+            m_actions.notifyPaintView();
             loop.quit();
         });
         loop.exec();

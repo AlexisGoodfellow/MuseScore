@@ -37,6 +37,7 @@ public:
     Reply errorResponse(int status, const QString& msg);
     Reply okResponse();
     int serverRevision() const;
+    void notifyPaintView();
 
 private:
     Reply actionInsertNote(const QJsonObject& body);

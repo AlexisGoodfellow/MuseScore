@@ -4751,3 +4751,11 @@ int EditudeTestActions::serverRevision() const
 {
     return m_svc->serverRevisionForTest();
 }
+
+void EditudeTestActions::notifyPaintView()
+{
+    auto notation = m_svc->currentNotationForTest();
+    if (notation) {
+        notation->notationChanged().send(muse::RectF());
+    }
+}
