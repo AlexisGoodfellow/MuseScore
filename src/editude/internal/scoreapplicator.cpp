@@ -448,34 +448,16 @@ bool ScoreApplicator::applySetDuration(Score* score, const QJsonObject& op)
         return false;
     }
 
-    // If the op specifies a pitch, find that specific note's chord. Otherwise
-    // use the ChordRest directly (could be a rest or single-note chord).
-    int midiForRefind = -1;
-    if (op.contains("pitch") && !op["pitch"].isNull()) {
-        const QJsonObject pitchObj = op["pitch"].toObject();
-        midiForRefind = pitchToMidi(pitchObj["step"].toString(),
-                                    pitchObj["octave"].toInt(),
-                                    pitchObj["accidental"].toString());
-    } else if (cr->type() == ElementType::CHORD) {
-        Chord* chord = toChord(cr);
-        if (!chord->notes().empty()) {
-            midiForRefind = chord->notes().front()->pitch();
-        }
-    }
-
     TDuration dur(dt);
     dur.setDots(dots);
 
-    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
-    if (!seg) {
-        LOGW() << "[editude] applySetDuration: no segment at tick" << tick.toString();
-        return false;
-    }
-
+    // Use changeCRlen (the interactive path) rather than setNoteRest.
+    // setNoteRest creates ALL fills with the same NoteVal, so contraction
+    // of a note would fill the gap with copies of the note instead of rests.
+    // changeCRlen correctly creates fill rests on contraction and handles
+    // expansion by overwriting.
     score->startCmd(TranslatableString("undoableAction", "Set duration"));
-    score->setNoteRest(seg, track,
-                       midiForRefind >= 0 ? NoteVal(midiForRefind) : NoteVal(),
-                       dur.ticks());
+    score->changeCRlen(cr, dur);
     score->endCmd();
     return true;
 }

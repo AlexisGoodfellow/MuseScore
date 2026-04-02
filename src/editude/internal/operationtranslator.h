@@ -104,6 +104,8 @@ private:
     static QJsonObject buildSetNoteHead(mu::engraving::Note* note, const QString& partId);
     static QJsonObject buildSetVoice(mu::engraving::EngravingItem* item,
                                      const QString& partId, int oldVoice);
+    static QJsonObject buildSetDuration(mu::engraving::ChordRest* cr,
+                                        const QString& partId);
 
     // Directive builders.
     static QJsonObject buildSetTimeSignature(mu::engraving::TimeSig* ts);

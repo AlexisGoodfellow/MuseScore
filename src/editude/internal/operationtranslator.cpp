@@ -98,19 +98,22 @@ static int findOldMidiPitch(Note* note)
     if (!undoStack) {
         return -1;
     }
-    const UndoMacro* macro = undoStack->last();
-    if (!macro) {
-        return -1;
-    }
-    for (size_t i = 0; i < macro->childCount(); ++i) {
-        const UndoCommand* cmd = macro->commands()[i];
-        if (cmd->type() != CommandType::ChangeProperty) {
+    // Try last() first (forward path).  After UndoStack::undo() decrements
+    // m_currentIndex, the undone macro sits at next() rather than last(),
+    // so fall back to next() for the undo path.
+    for (const UndoMacro* macro : { undoStack->last(), undoStack->next() }) {
+        if (!macro) {
             continue;
         }
-        const auto* cp = static_cast<const ChangeProperty*>(cmd);
-        if (cp->getElement() == note && cp->getId() == Pid::PITCH) {
-            // After flip(), data() holds the OLD value.
-            return cp->data().toInt();
+        for (size_t i = 0; i < macro->childCount(); ++i) {
+            const UndoCommand* cmd = macro->commands()[i];
+            if (cmd->type() != CommandType::ChangeProperty) {
+                continue;
+            }
+            const auto* cp = static_cast<const ChangeProperty*>(cmd);
+            if (cp->getElement() == note && cp->getId() == Pid::PITCH) {
+                return cp->data().toInt();
+            }
         }
     }
     return -1;
@@ -129,22 +132,63 @@ static int findOldVoice(EngravingItem* item, Part* /*part*/)
     if (!undoStack) {
         return -1;
     }
-    const UndoMacro* macro = undoStack->last();
-    if (!macro) {
-        return -1;
-    }
-    for (size_t i = 0; i < macro->childCount(); ++i) {
-        const UndoCommand* cmd = macro->commands()[i];
-        if (cmd->type() != CommandType::ChangeProperty) {
+    // Try last() first (forward path), then next() (undo path).
+    for (const UndoMacro* macro : { undoStack->last(), undoStack->next() }) {
+        if (!macro) {
             continue;
         }
-        const auto* cp = static_cast<const ChangeProperty*>(cmd);
-        if (cp->getElement() == item && cp->getId() == Pid::VOICE) {
-            // After flip(), data() holds the OLD value (0-based).
-            return cp->data().toInt() + 1; // convert to wire 1-4
+        for (size_t i = 0; i < macro->childCount(); ++i) {
+            const UndoCommand* cmd = macro->commands()[i];
+            if (cmd->type() != CommandType::ChangeProperty) {
+                continue;
+            }
+            const auto* cp = static_cast<const ChangeProperty*>(cmd);
+            if (cp->getElement() == item && cp->getId() == Pid::VOICE) {
+                return cp->data().toInt() + 1; // convert to wire 1-4
+            }
         }
     }
     return -1;
+}
+
+// ---------------------------------------------------------------------------
+// File-scope helper: find old DurationTypeWithDots for a ChordRest from the
+// undo stack.
+//
+// After a duration change is committed, the ChordRest already holds the NEW
+// duration.  The undo stack's last macro contains a ChangeProperty command
+// for Pid::DURATION_TYPE_WITH_DOTS that stores the old value after flip().
+//
+// Returns DurationTypeWithDots with V_INVALID if not found.
+// ---------------------------------------------------------------------------
+static DurationTypeWithDots findOldDuration(ChordRest* cr)
+{
+    DurationTypeWithDots invalid;
+    if (!cr || !cr->score()) {
+        return invalid;
+    }
+    const UndoStack* undoStack = cr->score()->undoStack();
+    if (!undoStack) {
+        return invalid;
+    }
+    // Try last() first (forward path), then next() (undo path).
+    for (const UndoMacro* macro : { undoStack->last(), undoStack->next() }) {
+        if (!macro) {
+            continue;
+        }
+        for (size_t i = 0; i < macro->childCount(); ++i) {
+            const UndoCommand* cmd = macro->commands()[i];
+            if (cmd->type() != CommandType::ChangeProperty) {
+                continue;
+            }
+            const auto* cp = static_cast<const ChangeProperty*>(cmd);
+            if (cp->getElement() == cr
+                && cp->getId() == Pid::DURATION_TYPE_WITH_DOTS) {
+                return cp->data().value<DurationTypeWithDots>();
+            }
+        }
+    }
+    return invalid;
 }
 
 // ---------------------------------------------------------------------------
@@ -307,12 +351,81 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
+    // ── Pre-scan: identify side-effect elements from duration changes ──
+    // changeCRlen() modifies a ChordRest's duration (via ChangeProperty on
+    // Pid::DURATION_TYPE_WITH_DOTS) and creates fill rests / removes
+    // overwritten elements as side effects.  The C++ applicator handles
+    // all these side effects atomically via setNoteRest(), so emitting
+    // separate InsertRest/DeleteNote ops for them would cause double-
+    // application.  Collect them here so Passes 2, 4, and 8 can skip them.
+    //
+    // Skip when a ChangeMeasureLen is present: adjustToLen() changes rest
+    // durations as a side effect of the measure resize, and Pass 42
+    // already emits the SetMeasureLen op.  Emitting a SetDuration for the
+    // rest would reference elements that don't exist in the Python model.
+    bool hasMeasureLenChange = false;
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (obj && obj->type() == ElementType::MEASURE
+            && cmds.count(CommandType::ChangeMeasureLen)) {
+            hasMeasureLenChange = true;
+            break;
+        }
+    }
+    QSet<EngravingObject*> durationSideEffects;
+    if (changedPropertyIdSet.count(Pid::DURATION_TYPE_WITH_DOTS)
+        && !hasMeasureLenChange) {
+        // Find the target ChordRest's track.
+        track_idx_t durationChangeTrack = muse::nidx;
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::ChangeProperty)) {
+                continue;
+            }
+            if (obj->type() != ElementType::CHORD
+                && obj->type() != ElementType::REST) {
+                continue;
+            }
+            auto* cr = static_cast<ChordRest*>(obj);
+            // Verify this element actually has the DURATION_TYPE_WITH_DOTS
+            // property change (not just any ChangeProperty).
+            if (findOldDuration(cr).type != DurationType::V_INVALID) {
+                durationChangeTrack = cr->track();
+                break;
+            }
+        }
+        // Suppress all AddElement/RemoveElement at the same track — they are
+        // guaranteed side effects of changeCRlen's atomic operation.
+        if (durationChangeTrack != muse::nidx) {
+            for (const auto& [obj, cmds] : changedObjects) {
+                if (!obj) {
+                    continue;
+                }
+                const bool isAdd = cmds.count(CommandType::AddElement);
+                const bool isRem = cmds.count(CommandType::RemoveElement);
+                if (!isAdd && !isRem) {
+                    continue;
+                }
+                if (obj->type() == ElementType::NOTE
+                    || obj->type() == ElementType::CHORD
+                    || obj->type() == ElementType::REST) {
+                    auto* item = static_cast<EngravingItem*>(obj);
+                    if (item->track() == durationChangeTrack) {
+                        durationSideEffects.insert(obj);
+                    }
+                }
+            }
+        }
+    }
+
     // ── Pass 2: InsertNote ─────────────────────────────────────────────────
     // Emit one InsertNote per note. Multi-note chords produce multiple
     // InsertNote ops at the same (beat, voice, staff) with different pitches;
     // the server creates the chord implicitly.
     QSet<EngravingObject*> handledNotes;
     for (const auto& [chord, notes] : newChordNotes.asKeyValueRange()) {
+        // Skip side-effect elements from duration changes.
+        if (durationSideEffects.contains(chord)) {
+            continue;
+        }
         // Skip elements with unsupported duration types (e.g. V_MEASURE for
         // measure rests created during MuseScore's internal initialisation).
         if (durationTypeName(chord->durationType().type()) == QLatin1String("unknown")) {
@@ -526,6 +639,10 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 if (obj->type() != ElementType::REST) {
                     continue;
                 }
+                // Skip side-effect rests from duration changes.
+                if (durationSideEffects.contains(obj)) {
+                    continue;
+                }
                 Rest* rest = static_cast<Rest*>(obj);
                 if (durationTypeName(rest->durationType().type())
                     == QLatin1String("unknown")) {
@@ -697,6 +814,10 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || !cmds.count(CommandType::RemoveElement)) {
             continue;
         }
+        // Skip side-effect removals from duration changes.
+        if (durationSideEffects.contains(obj)) {
+            continue;
+        }
         if (obj->type() == ElementType::CHORD) {
             // Skip grace chords — they are handled by Pass 34 (RemoveGraceNote).
             if (static_cast<Chord*>(obj)->isGrace()) {
@@ -719,6 +840,12 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (obj->type() == ElementType::NOTE) {
             Note* note   = static_cast<Note*>(obj);
             Chord* chord = note->chord();
+
+            // Skip side-effect note removals from duration changes.
+            if (durationSideEffects.contains(obj)
+                || (chord && durationSideEffects.contains(chord))) {
+                continue;
+            }
 
             // Skip notes belonging to grace chords — handled by Pass 34.
             if (chord && chord->isGrace()) {
@@ -1941,6 +2068,39 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         ops.append(op);
     }
 
+    // ── Pass 43: ChangeProperty + Pid::DURATION_TYPE_WITH_DOTS → SetDuration
+    // Suppressed when a ChangeMeasureLen is present (see pre-scan comment).
+    if (changedPropertyIdSet.count(Pid::DURATION_TYPE_WITH_DOTS)
+        && !hasMeasureLenChange) {
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::ChangeProperty)) {
+                continue;
+            }
+            if (obj->type() != ElementType::CHORD
+                && obj->type() != ElementType::REST) {
+                continue;
+            }
+            ChordRest* cr = static_cast<ChordRest*>(obj);
+            const DurationTypeWithDots oldDur = findOldDuration(cr);
+            if (oldDur.type == DurationType::V_INVALID) {
+                continue;
+            }
+            Part* crPart = cr->staff() ? cr->staff()->part() : nullptr;
+            if (!crPart) {
+                crPart = resolvePartFromTrack(cr->track(), m_knownPartUuids);
+            }
+            if (!crPart) {
+                continue;
+            }
+            const QString partUuid =
+                resolvePartUuid(crPart, lazyAddPartOps);
+            if (partUuid.isEmpty()) {
+                continue;
+            }
+            ops.append(buildSetDuration(cr, partUuid));
+        }
+    }
+
     // Prepend any lazily-generated AddPart ops so the server registers parts
     // before processing the element ops that reference them.
     if (!lazyAddPartOps.isEmpty()) {
@@ -2142,6 +2302,33 @@ QJsonObject OperationTranslator::buildSetVoice(EngravingItem* item,
         Chord* ch = toChord(item);
         if (!ch->notes().empty()) {
             payload["pitch"] = pitchJsonFromNote(ch->notes().front());
+        }
+    }
+
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetDuration(ChordRest* cr,
+                                                   const QString& partId)
+{
+    Part* part = cr->staff() ? cr->staff()->part() : nullptr;
+    QJsonObject durObj;
+    durObj["type"] = durationTypeName(cr->durationType().type());
+    durObj["dots"] = cr->dots();
+
+    QJsonObject payload;
+    payload["type"]     = QStringLiteral("SetDuration");
+    payload["part_id"]  = partId;
+    payload["beat"]     = beatJson(cr->tick());
+    payload["duration"] = durObj;
+    payload["voice"]    = part ? voiceFromTrack(part, cr->track()) : 1;
+    payload["staff"]    = part ? staffFromTrack(part, cr->track()) : 0;
+
+    // Include pitch for Chords so the peer can address the correct element.
+    if (cr->type() == ElementType::CHORD) {
+        Chord* chord = toChord(cr);
+        if (!chord->notes().empty()) {
+            payload["pitch"] = pitchJsonFromNote(chord->notes().front());
         }
     }
 

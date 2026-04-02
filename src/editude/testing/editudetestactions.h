@@ -45,6 +45,7 @@ private:
     Reply actionDeleteNote(const QJsonObject& body);
     Reply actionDeleteRest(const QJsonObject& body);
     Reply actionSetPitch(const QJsonObject& body);
+    Reply actionSetDuration(const QJsonObject& body);
     Reply actionUndo();
 
     // Tier 1 — extended ops

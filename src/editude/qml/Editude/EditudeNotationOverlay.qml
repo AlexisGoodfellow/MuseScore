@@ -40,6 +40,7 @@ import Editude 1.0
  */
 Item {
     id: root
+    clip: true
 
     // Forward parent matrix changes to the C++ model so cursor rects
     // are recomputed in screen coordinates whenever the view scrolls or zooms.

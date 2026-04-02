@@ -128,6 +128,7 @@ EditudeTestActions::Reply EditudeTestActions::dispatchAction(const QJsonObject& 
     if (action == QLatin1String("delete_note"))   return actionDeleteNote(body);
     if (action == QLatin1String("delete_rest"))   return actionDeleteRest(body);
     if (action == QLatin1String("set_pitch"))     return actionSetPitch(body);
+    if (action == QLatin1String("set_duration"))  return actionSetDuration(body);
     if (action == QLatin1String("set_tie"))       return actionSetTie(body);
     if (action == QLatin1String("set_voice"))     return actionSetVoice(body);
     if (action == QLatin1String("undo"))          return actionUndo();
@@ -481,6 +482,46 @@ EditudeTestActions::Reply EditudeTestActions::actionSetPitch(const QJsonObject& 
     note->undoChangeProperty(Pid::PITCH, midi);
     note->undoChangeProperty(Pid::TPC1, tpc1);
     note->undoChangeProperty(Pid::TPC2, tpc2);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestActions::Reply EditudeTestActions::actionSetDuration(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, voice, staff);
+    if (!cr) {
+        return errorResponse(404, "ChordRest not found at coordinate");
+    }
+
+    const QJsonObject durObj = body["duration"].toObject();
+    const DurationType dt = ScoreApplicator::parseDurationType(
+        durObj["type"].toString());
+    if (dt == DurationType::V_INVALID) {
+        return errorResponse(422, "invalid duration type");
+    }
+    const int dots = durObj["dots"].toInt(0);
+
+    TDuration dur(dt);
+    dur.setDots(dots);
+
+    score->startCmd(TranslatableString("test", "set duration"));
+    score->changeCRlen(cr, dur);
     score->endCmd();
 
     return okResponse();
