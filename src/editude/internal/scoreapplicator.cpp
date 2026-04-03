@@ -61,6 +61,7 @@
 #include "engraving/dom/accidental.h"
 #include "engraving/dom/arpeggio.h"
 #include "engraving/dom/glissando.h"
+#include "engraving/dom/guitarbend.h"
 #include "engraving/dom/ornament.h"
 #include "engraving/dom/ottava.h"
 #include "engraving/dom/pedal.h"
@@ -556,9 +557,16 @@ bool ScoreApplicator::applySetVoice(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const track_idx_t newTrack = trackFromCoord(part, newVoice, stf);
+    // Use changeSelectedElementsVoice — the same path as the keyboard shortcut.
+    // Raw undoChangeProperty(Pid::TRACK) changes m_track but does NOT move the
+    // element in the segment array, so the score serialises with the old voice.
+    if (cr->isChord()) {
+        score->select(toChord(cr)->upNote());
+    } else {
+        score->select(cr);
+    }
     score->startCmd(TranslatableString("undoableAction", "Set voice"));
-    cr->undoChangeProperty(Pid::TRACK, static_cast<int>(newTrack));
+    score->changeSelectedElementsVoice(static_cast<voice_idx_t>(newVoice - 1));
     score->endCmd();
     return true;
 }
@@ -1288,6 +1296,9 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     // Advanced spanners — glissandos
     if (type == QLatin1String("AddGlissando"))    return applyAddGlissando(score, payload);
     if (type == QLatin1String("RemoveGlissando")) return applyRemoveGlissando(score, payload);
+    // Guitar bends
+    if (type == QLatin1String("AddGuitarBend"))    return applyAddGuitarBend(score, payload);
+    if (type == QLatin1String("RemoveGuitarBend")) return applyRemoveGuitarBend(score, payload);
     // Advanced spanners — pedal lines
     if (type == QLatin1String("AddPedalLine"))    return applyAddPedalLine(score, payload);
     if (type == QLatin1String("RemovePedalLine")) return applyRemovePedalLine(score, payload);
@@ -1312,8 +1323,9 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     // Tier 4 — navigation marks
     if (type == QLatin1String("SetStartRepeat")) return applySetStartRepeat(score, payload);
     if (type == QLatin1String("SetEndRepeat"))   return applySetEndRepeat(score, payload);
-    if (type == QLatin1String("InsertVolta"))  return applyInsertVolta(score, payload);
-    if (type == QLatin1String("RemoveVolta"))  return applyRemoveVolta(score, payload);
+    if (type == QLatin1String("InsertVolta"))       return applyInsertVolta(score, payload);
+    if (type == QLatin1String("RemoveVolta"))       return applyRemoveVolta(score, payload);
+    if (type == QLatin1String("SetVoltaNumbers"))   return applySetVoltaNumbers(score, payload);
     if (type == QLatin1String("InsertMarker")) return applyInsertMarker(score, payload);
     if (type == QLatin1String("RemoveMarker")) return applyRemoveMarker(score, payload);
     if (type == QLatin1String("InsertJump"))   return applyInsertJump(score, payload);
@@ -2685,6 +2697,110 @@ bool ScoreApplicator::applyRemoveGlissando(Score* score, const QJsonObject& op)
 }
 
 // ---------------------------------------------------------------------------
+// Guitar bends (dual-coordinate, note-anchored)
+// ---------------------------------------------------------------------------
+
+static GuitarBendType parseBendType(const QString& s)
+{
+    if (s == QLatin1String("PRE_BEND"))        return GuitarBendType::PRE_BEND;
+    if (s == QLatin1String("GRACE_NOTE_BEND")) return GuitarBendType::GRACE_NOTE_BEND;
+    if (s == QLatin1String("SLIGHT_BEND"))     return GuitarBendType::SLIGHT_BEND;
+    if (s == QLatin1String("DIVE"))            return GuitarBendType::DIVE;
+    if (s == QLatin1String("PRE_DIVE"))        return GuitarBendType::PRE_DIVE;
+    if (s == QLatin1String("DIP"))             return GuitarBendType::DIP;
+    if (s == QLatin1String("SCOOP"))           return GuitarBendType::SCOOP;
+    return GuitarBendType::BEND;
+}
+
+bool ScoreApplicator::applyAddGuitarBend(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddGuitarBend: unknown or missing part_id";
+        return false;
+    }
+
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject eb = op["end_beat"].toObject();
+    const QJsonObject sp = op["start_pitch"].toObject();
+    const QJsonObject ep = op["end_pitch"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const int startMidi = pitchToMidi(sp["step"].toString(), sp["octave"].toInt(),
+                                      sp["accidental"].toString());
+    const int endMidi   = pitchToMidi(ep["step"].toString(), ep["octave"].toInt(),
+                                      ep["accidental"].toString());
+    const int startVoice = op["start_voice"].toInt(1);
+    const int startStaff = op["start_staff"].toInt(0);
+    const int endVoice   = op["end_voice"].toInt(1);
+    const int endStaff   = op["end_staff"].toInt(0);
+    const GuitarBendType bendType = parseBendType(op["bend_type"].toString());
+
+    Note* startNote = findNoteAtCoord(score, part, startTick, startMidi, startVoice, startStaff);
+    Note* endNote   = findNoteAtCoord(score, part, endTick, endMidi, endVoice, endStaff);
+    if (!startNote || !endNote) {
+        LOGW() << "[editude] applyAddGuitarBend: start or end note not found";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add guitar bend"));
+    GuitarBend* bend = Factory::createGuitarBend(startNote);
+    bend->setAnchor(Spanner::Anchor::NOTE);
+    bend->setTrack(startNote->track());
+    bend->setTrack2(endNote->track());
+    bend->setTick(startNote->tick());
+    bend->setTick2(endNote->tick());
+    bend->setStartElement(startNote);
+    bend->setEndElement(endNote);
+    bend->setParent(startNote);
+    bend->setBendType(bendType);
+    score->undoAddElement(bend);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveGuitarBend(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveGuitarBend: unknown or missing part_id";
+        return false;
+    }
+
+    const QJsonObject sb = op["start_beat"].toObject();
+    const QJsonObject sp = op["start_pitch"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const int startMidi = pitchToMidi(sp["step"].toString(), sp["octave"].toInt(),
+                                      sp["accidental"].toString());
+    const int startVoice = op["start_voice"].toInt(1);
+    const int startStaff = op["start_staff"].toInt(0);
+
+    Note* startNote = findNoteAtCoord(score, part, startTick, startMidi, startVoice, startStaff);
+    if (!startNote) {
+        LOGW() << "[editude] applyRemoveGuitarBend: start note not found";
+        return false;
+    }
+
+    // Find guitar bend starting from this note.
+    GuitarBend* target = nullptr;
+    for (Spanner* sp2 : startNote->spannerFor()) {
+        if (sp2->type() == ElementType::GUITAR_BEND) {
+            target = static_cast<GuitarBend*>(sp2);
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveGuitarBend: guitar bend not found on start note";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Remove guitar bend"));
+    score->undoRemoveElement(target);
+    score->endCmd();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Advanced spanners — pedal lines (beat-range + part-addressed)
 // ---------------------------------------------------------------------------
 
@@ -3401,6 +3517,48 @@ bool ScoreApplicator::applyRemoveVolta(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Remove volta"));
     score->undoRemoveElement(target);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applySetVoltaNumbers(Score* score, const QJsonObject& op)
+{
+    const QJsonObject startBeatObj = op["start_beat"].toObject();
+    const Fraction startTick(startBeatObj["numerator"].toInt(),
+                             startBeatObj["denominator"].toInt());
+
+    // Match by start tick and old_numbers.
+    const QJsonArray oldNumbersArr = op["old_numbers"].toArray();
+    std::vector<int> oldEndings;
+    for (const auto& v : oldNumbersArr) {
+        oldEndings.push_back(v.toInt());
+    }
+
+    Volta* target = nullptr;
+    for (auto it = score->spanner().lower_bound(startTick.ticks());
+         it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+        Spanner* sp = it->second;
+        if (sp->isVolta() && sp->tick() == startTick) {
+            Volta* v = toVolta(sp);
+            if (v->endings() == oldEndings) {
+                target = v;
+                break;
+            }
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applySetVoltaNumbers: volta not found at start_beat";
+        return false;
+    }
+
+    const QJsonArray numbersArr = op["numbers"].toArray();
+    std::vector<int> newEndings;
+    for (const auto& v : numbersArr) {
+        newEndings.push_back(v.toInt());
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Set volta numbers"));
+    target->undoChangeProperty(Pid::VOLTA_ENDING, PropertyValue::fromValue(newEndings));
     score->endCmd();
     return true;
 }

@@ -61,6 +61,18 @@
 
 using namespace mu::editude::internal;
 
+// RAII guard — sets m_applyingRemote to true on construction, false on destruction.
+// Prevents the flag from sticking if m_applicator.apply() throws.
+class EditudeService::RemoteApplyGuard {
+public:
+    explicit RemoteApplyGuard(EditudeService* svc) : m_svc(svc) { m_svc->m_applyingRemote = true; }
+    ~RemoteApplyGuard() { m_svc->m_applyingRemote = false; }
+    RemoteApplyGuard(const RemoteApplyGuard&) = delete;
+    RemoteApplyGuard& operator=(const RemoteApplyGuard&) = delete;
+private:
+    EditudeService* m_svc;
+};
+
 EditudeService::EditudeService(const muse::modularity::ContextPtr& iocCtx, QObject* parent)
     : QObject(parent)
     , Contextable(iocCtx)
@@ -483,11 +495,12 @@ void EditudeService::bootstrapAndConnect()
     }
 
     if (!m_pendingOps.isEmpty()) {
-        m_applyingRemote = true;
-        m_applicator.bootstrapPartMap(m_score);
-        applyPendingOps();
-        m_score->undoStack()->clearAll();
-        m_applyingRemote = false;
+        {
+            RemoteApplyGuard guard(this);
+            m_applicator.bootstrapPartMap(m_score);
+            applyPendingOps();
+            m_score->undoStack()->clearAll();
+        }
         m_pendingOps = QJsonArray();
 
         // Sync part registrations from applicator → translator.  When
@@ -616,7 +629,6 @@ void EditudeService::onServerMessage(const QString& text)
         m_state = State::Live;
         m_reconnectAttempt = 0;
         beginRealtimeActivity();
-
         // Apply peer ops that arrived while we were disconnected.  These are
         // the ops since our last known revision; they bring the local score up
         // to date before we re-submit our buffered offline edits.
@@ -627,12 +639,13 @@ void EditudeService::onServerMessage(const QString& text)
         // as a v1 limitation — the OT system corrects the server-side state.
         const QJsonArray syncOps = msg.value("ops").toArray();
         if (!syncOps.isEmpty() && m_score) {
-            m_applyingRemote = true;
-            for (const QJsonValue& v : syncOps) {
-                m_applicator.apply(m_score, v.toObject().value("payload").toObject());
+            {
+                RemoteApplyGuard guard(this);
+                for (const QJsonValue& v : syncOps) {
+                    m_applicator.apply(m_score, v.toObject().value("payload").toObject());
+                }
+                m_score->undoStack()->clearAll();
             }
-            m_score->undoStack()->clearAll();
-            m_applyingRemote = false;
             markScoreSaved();
             LOGD() << "[editude] applied" << syncOps.size() << "sync ops from peers";
         }
@@ -763,10 +776,11 @@ void EditudeService::onServerMessage(const QString& text)
         const QJsonObject payload = msg.value("payload").toObject();
         auto applyRemoteOp = [this, payload]() {
             if (!m_score) return;
-            m_applyingRemote = true;
-            m_applicator.apply(m_score, payload);
-            m_score->undoStack()->clearAll();
-            m_applyingRemote = false;
+            {
+                RemoteApplyGuard guard(this);
+                m_applicator.apply(m_score, payload);
+                m_score->undoStack()->clearAll();
+            }
             markScoreSaved();
             // Sync any new part registrations from applicator to translator
             // so subsequent onScoreChanges() calls don't generate spurious
@@ -782,6 +796,9 @@ void EditudeService::onServerMessage(const QString& text)
             // to Notation::notationChanged(), so we must fire it explicitly.
             if (m_currentNotation) {
                 m_currentNotation->notationChanged().send(muse::RectF());
+            }
+            if (m_presenceModel) {
+                m_presenceModel->kickSceneGraph();
             }
         };
 #ifdef MUE_BUILD_EDITUDE_TEST_DRIVER
@@ -807,10 +824,11 @@ void EditudeService::onServerMessage(const QString& text)
         }
         auto applyRemoteBatch = [this, msg]() {
             if (!m_score) return;
-            m_applyingRemote = true;
-            m_applicator.apply(m_score, msg);
-            m_score->undoStack()->clearAll();
-            m_applyingRemote = false;
+            {
+                RemoteApplyGuard guard(this);
+                m_applicator.apply(m_score, msg);
+                m_score->undoStack()->clearAll();
+            }
             markScoreSaved();
             // Sync part registrations (see "op" handler comment above).
             for (auto it = m_applicator.partUuidToPart().cbegin();
@@ -822,6 +840,9 @@ void EditudeService::onServerMessage(const QString& text)
             // Notify the paint view (see "op" handler comment above).
             if (m_currentNotation) {
                 m_currentNotation->notationChanged().send(muse::RectF());
+            }
+            if (m_presenceModel) {
+                m_presenceModel->kickSceneGraph();
             }
         };
 #ifdef MUE_BUILD_EDITUDE_TEST_DRIVER
@@ -1048,6 +1069,9 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
     refreshPresenceModel();
 }
 
+// ---------------------------------------------------------------------------
+// WASM frame scheduling fix
+//
 void EditudeService::markScoreSaved()
 {
     if (!m_score || !m_score->masterScore()) {

@@ -91,6 +91,7 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    class RemoteApplyGuard;  // RAII guard for m_applyingRemote (defined in .cpp)
     enum class State { Disconnected, Authenticating, Joining, Live, Reconnecting };
 
     void onConnected();

@@ -143,6 +143,9 @@ private:
     // Advanced spanners — glissandos
     bool applyAddGlissando(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveGlissando(mu::engraving::Score* score, const QJsonObject& payload);
+    // Guitar bends
+    bool applyAddGuitarBend(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveGuitarBend(mu::engraving::Score* score, const QJsonObject& payload);
     // Advanced spanners — pedal lines
     bool applyAddPedalLine(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemovePedalLine(mu::engraving::Score* score, const QJsonObject& payload);
@@ -170,6 +173,7 @@ private:
     bool applySetEndRepeat(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyInsertVolta(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveVolta(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applySetVoltaNumbers(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyInsertMarker(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveMarker(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyInsertJump(mu::engraving::Score* score, const QJsonObject& payload);

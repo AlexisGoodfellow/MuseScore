@@ -37,6 +37,7 @@
 #include "engraving/dom/dynamic.h"
 #include "engraving/dom/engravingitem.h"
 #include "engraving/dom/glissando.h"
+#include "engraving/dom/guitarbend.h"
 #include "engraving/dom/harmony.h"
 #include "engraving/dom/hairpin.h"
 #include "engraving/dom/instrument.h"
@@ -143,8 +144,15 @@ static int findOldVoice(EngravingItem* item, Part* /*part*/)
                 continue;
             }
             const auto* cp = static_cast<const ChangeProperty*>(cmd);
-            if (cp->getElement() == item && cp->getId() == Pid::VOICE) {
+            if (cp->getElement() != item) {
+                continue;
+            }
+            if (cp->getId() == Pid::VOICE) {
                 return cp->data().toInt() + 1; // convert to wire 1-4
+            }
+            if (cp->getId() == Pid::TRACK) {
+                // Track = staffIdx * VOICES + voice.  Extract voice component.
+                return static_cast<int>(cp->data().value<track_idx_t>() % VOICES) + 1;
             }
         }
     }
@@ -416,14 +424,91 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
+    // ── Pre-scan: detect structural voice changes ────────────────────────
+    // changeSelectedElementsVoice() removes a chord from one voice and
+    // creates a copy of its note(s) at another voice.  The undo entries are
+    // structural (AddElement/RemoveElement), not ChangeProperty, so Pass 12
+    // won't fire.  Detect this pattern to emit SetVoice instead of
+    // decomposed InsertNote + DeleteNote — the decomposed ops don't
+    // replicate the fill rests changeSelectedElementsVoice creates.
+    struct StructuralVoiceChange {
+        Note* newNote;
+        Chord* oldChord;
+        int oldVoice;
+        QString partUuid;
+    };
+    QVector<StructuralVoiceChange> structuralVoiceChanges;
+    QSet<EngravingObject*> voiceChangeSideEffects;
+    {
+        QVector<Chord*> removedChords;
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::RemoveElement)) continue;
+            if (obj->type() != ElementType::CHORD) continue;
+            auto* ch = static_cast<Chord*>(obj);
+            if (ch->isGrace()) continue;
+            removedChords.append(ch);
+        }
+        QVector<Note*> addedNotes;
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::AddElement)) continue;
+            if (obj->type() != ElementType::NOTE) continue;
+            addedNotes.append(static_cast<Note*>(obj));
+        }
+        for (Chord* oldChord : removedChords) {
+            for (Note* newNote : addedNotes) {
+                Chord* newChord = newNote->chord();
+                if (!newChord) continue;
+                if (newChord->tick() != oldChord->tick()) continue;
+                if (newChord->staffIdx() != oldChord->staffIdx()) continue;
+                if (newChord->voice() == oldChord->voice()) continue;
+
+                bool pitchMatch = false;
+                for (Note* oldNote : oldChord->notes()) {
+                    if (newNote->pitch() == oldNote->pitch()) {
+                        pitchMatch = true;
+                        break;
+                    }
+                }
+                if (!pitchMatch) continue;
+
+                Part* notePart = newNote->staff()
+                                 ? newNote->staff()->part() : nullptr;
+                if (!notePart) continue;
+                const QString partUuid =
+                    resolvePartUuid(notePart, lazyAddPartOps);
+                if (partUuid.isEmpty()) continue;
+
+                int oldVoice = voiceFromTrack(notePart, oldChord->track());
+                structuralVoiceChanges.append(
+                    {newNote, oldChord, oldVoice, partUuid});
+
+                // Suppress all related elements from other passes.
+                voiceChangeSideEffects.insert(newNote);
+                voiceChangeSideEffects.insert(newChord);
+                voiceChangeSideEffects.insert(oldChord);
+                for (Note* n : oldChord->notes()) {
+                    voiceChangeSideEffects.insert(n);
+                }
+                for (const auto& [robj, rcmds] : changedObjects) {
+                    if (!robj || robj->type() != ElementType::REST) continue;
+                    auto* rest = static_cast<Rest*>(robj);
+                    if (rest->staffIdx() != oldChord->staffIdx()) continue;
+                    voiceChangeSideEffects.insert(robj);
+                }
+                break;
+            }
+        }
+    }
+
     // ── Pass 2: InsertNote ─────────────────────────────────────────────────
     // Emit one InsertNote per note. Multi-note chords produce multiple
     // InsertNote ops at the same (beat, voice, staff) with different pitches;
     // the server creates the chord implicitly.
     QSet<EngravingObject*> handledNotes;
     for (const auto& [chord, notes] : newChordNotes.asKeyValueRange()) {
-        // Skip side-effect elements from duration changes.
-        if (durationSideEffects.contains(chord)) {
+        // Skip side-effect elements from voice or duration changes.
+        if (durationSideEffects.contains(chord)
+            || voiceChangeSideEffects.contains(chord)) {
             continue;
         }
         // Skip elements with unsupported duration types (e.g. V_MEASURE for
@@ -444,7 +529,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
 
     // Also emit InsertNote for notes added to existing chords (was Pass 4).
     for (EngravingObject* obj : notesAddedToExistingChords) {
-        if (handledNotes.contains(obj)) {
+        if (handledNotes.contains(obj) || voiceChangeSideEffects.contains(obj)) {
             continue;
         }
         Note* note   = static_cast<Note*>(obj);
@@ -639,8 +724,9 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 if (obj->type() != ElementType::REST) {
                     continue;
                 }
-                // Skip side-effect rests from duration changes.
-                if (durationSideEffects.contains(obj)) {
+                // Skip side-effect rests from voice or duration changes.
+                if (durationSideEffects.contains(obj)
+                    || voiceChangeSideEffects.contains(obj)) {
                     continue;
                 }
                 Rest* rest = static_cast<Rest*>(obj);
@@ -814,8 +900,9 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || !cmds.count(CommandType::RemoveElement)) {
             continue;
         }
-        // Skip side-effect removals from duration changes.
-        if (durationSideEffects.contains(obj)) {
+        // Skip side-effect removals from voice or duration changes.
+        if (durationSideEffects.contains(obj)
+            || voiceChangeSideEffects.contains(obj)) {
             continue;
         }
         if (obj->type() == ElementType::CHORD) {
@@ -841,9 +928,11 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             Note* note   = static_cast<Note*>(obj);
             Chord* chord = note->chord();
 
-            // Skip side-effect note removals from duration changes.
+            // Skip side-effect note removals from voice or duration changes.
             if (durationSideEffects.contains(obj)
-                || (chord && durationSideEffects.contains(chord))) {
+                || voiceChangeSideEffects.contains(obj)
+                || (chord && (durationSideEffects.contains(chord)
+                              || voiceChangeSideEffects.contains(chord)))) {
                 continue;
             }
 
@@ -907,7 +996,8 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         // on a single-note chord — only the chord gets the undo command.
         if (obj->type() == ElementType::CHORD
             && removedChordsAndRests.contains(obj)
-            && !emittedRemovals.contains(obj)) {
+            && !emittedRemovals.contains(obj)
+            && !voiceChangeSideEffects.contains(obj)) {
             Chord* chord = static_cast<Chord*>(obj);
             LOGW() << "[editude] Pass8 CHORD handler: chord=" << (void*)chord
                    << " notes=" << chord->notes().size()
@@ -1071,8 +1161,11 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 12: ChangeProperty + Pid::VOICE → SetVoice ─────────────────
-    if (changedPropertyIdSet.count(Pid::VOICE)) {
+    // ── Pass 12: ChangeProperty + Pid::VOICE or Pid::TRACK → SetVoice ───
+    // The inspector path uses Pid::VOICE; the programmatic path (and test
+    // driver) uses Pid::TRACK.  Both represent a voice change.
+    if (changedPropertyIdSet.count(Pid::VOICE)
+        || changedPropertyIdSet.count(Pid::TRACK)) {
         for (const auto& [obj, cmds] : changedObjects) {
             if (!obj || !cmds.count(CommandType::ChangeProperty)) {
                 continue;
@@ -1102,6 +1195,12 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             }
             ops.append(buildSetVoice(item, partUuid, oldVoice));
         }
+    }
+
+    // Structural voice changes (from changeSelectedElementsVoice) detected
+    // by the pre-scan — emit SetVoice for each.
+    for (const auto& vc : structuralVoiceChanges) {
+        ops.append(buildSetVoice(vc.newNote, vc.partUuid, vc.oldVoice));
     }
 
     // ── Pass 13: SetPartName / SetPartInstrument ────────────────────────
@@ -1664,7 +1763,38 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 29: Pedal Lines (part-scoped, beat-range) ──────────────────
+    // ── Pass 29: Guitar Bends (dual-coordinate, note-anchored) ─────────
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::GUITAR_BEND) {
+            continue;
+        }
+        auto* bend = static_cast<GuitarBend*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            Part* bendPart = static_cast<EngravingItem*>(bend)->part();
+            if (!bendPart) {
+                bendPart = resolvePartFromTrack(
+                    bend->track(), m_knownPartUuids);
+            }
+            if (!bendPart) continue;
+            const QString bendPartUuid =
+                resolvePartUuid(bendPart, lazyAddPartOps);
+            if (bendPartUuid.isEmpty()) continue;
+            ops.append(buildAddGuitarBend(bend, bendPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            Part* bendPart = static_cast<EngravingItem*>(bend)->part();
+            if (!bendPart) {
+                bendPart = resolvePartFromTrack(
+                    bend->track(), m_knownPartUuids);
+            }
+            if (!bendPart) continue;
+            const QString bendPartUuid =
+                resolvePartUuid(bendPart, lazyAddPartOps);
+            if (bendPartUuid.isEmpty()) continue;
+            ops.append(buildRemoveGuitarBend(bend, bendPartUuid));
+        }
+    }
+
+    // ── Pass 30: Pedal Lines (part-scoped, beat-range) ───────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::PEDAL) {
             continue;
@@ -1688,7 +1818,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 30: Trill Lines (part-scoped, beat-range) ──────────────────
+    // ── Pass 31: Trill Lines (part-scoped, beat-range) ──────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::TRILL) {
             continue;
@@ -1712,7 +1842,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 31: Arpeggios (coordinate-addressed) ───────────────────────
+    // ── Pass 32: Arpeggios (coordinate-addressed) ───────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::ARPEGGIO) {
             continue;
@@ -1750,7 +1880,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 32: Single-note tremolos (coordinate-addressed) ────────────
+    // ── Pass 33: Single-note tremolos (coordinate-addressed) ────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::TREMOLO_SINGLECHORD) {
             continue;
@@ -1788,7 +1918,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 33: Two-note tremolos (dual-anchor) ─────────────────────────
+    // ── Pass 34: Two-note tremolos (dual-anchor) ─────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::TREMOLO_TWOCHORD) {
             continue;
@@ -1826,7 +1956,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 34: Grace notes (coordinate-addressed) ─────────────────────
+    // ── Pass 35: Grace notes (coordinate-addressed) ─────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::CHORD) {
             continue;
@@ -1866,7 +1996,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 35: Breath marks / caesuras (beat-anchored) ──────────────────
+    // ── Pass 36: Breath marks / caesuras (beat-anchored) ──────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::BREATH) {
             continue;
@@ -1902,7 +2032,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 36: InsertBeats / DeleteBeats ───────────────────────────────
+    // ── Pass 37: InsertBeats / DeleteBeats ───────────────────────────────
     {
         QVector<Measure*> insertedMeasures;
         QVector<Measure*> removedMeasures;
@@ -1953,7 +2083,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 37: InsertVolta / RemoveVolta ───────────────────────────────
+    // ── Pass 38: InsertVolta / RemoveVolta / SetVoltaNumbers ─────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::VOLTA) {
             continue;
@@ -1968,10 +2098,34 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             }
             ops.append(buildRemoveVolta(volta->tick(), volta->tick2(),
                                         voltaNumbers));
+        } else if (cmds.count(CommandType::ChangeProperty)
+                   && changedPropertyIdSet.count(Pid::VOLTA_ENDING)) {
+            // Retrieve old endings from the undo stack.
+            QJsonArray oldNumbers;
+            const UndoStack* us = volta->score()->undoStack();
+            if (us) {
+                for (const UndoMacro* macro : { us->last(), us->next() }) {
+                    if (!macro) continue;
+                    for (size_t i = 0; i < macro->childCount(); ++i) {
+                        const UndoCommand* cmd = macro->commands()[i];
+                        if (cmd->type() != CommandType::ChangeProperty) continue;
+                        const auto* cp = static_cast<const ChangeProperty*>(cmd);
+                        if (cp->getElement() == volta && cp->getId() == Pid::VOLTA_ENDING) {
+                            const auto oldEndings = cp->data().value<std::vector<int>>();
+                            for (int n : oldEndings) {
+                                oldNumbers.append(n);
+                            }
+                            break;
+                        }
+                    }
+                    if (!oldNumbers.isEmpty()) break;
+                }
+            }
+            ops.append(buildSetVoltaNumbers(volta, oldNumbers));
         }
     }
 
-    // ── Pass 38: InsertMarker / RemoveMarker ─────────────────────────────
+    // ── Pass 39: InsertMarker / RemoveMarker ─────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::MARKER) {
             continue;
@@ -1987,7 +2141,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 39: InsertJump / RemoveJump ─────────────────────────────────
+    // ── Pass 40: InsertJump / RemoveJump ─────────────────────────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::JUMP) {
             continue;
@@ -2000,7 +2154,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 40: SetStartRepeat / SetEndRepeat ─────────────────────────────
+    // ── Pass 41: SetStartRepeat / SetEndRepeat ─────────────────────────────
     if (changedPropertyIdSet.count(Pid::REPEAT_START)
         || changedPropertyIdSet.count(Pid::REPEAT_END)
         || changedPropertyIdSet.count(Pid::REPEAT_COUNT)) {
@@ -2023,7 +2177,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 41: SetScoreMetadata ─────────────────────────────────────────
+    // ── Pass 42: SetScoreMetadata ─────────────────────────────────────────
     if (!changedMetaTags.isEmpty()) {
         static const QHash<QString, QString> s_reverseFieldMap = {
             { "workTitle",       "title"           },
@@ -2048,7 +2202,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 42: SetMeasureLen (pickup / anacrusis measures) ────────────
+    // ── Pass 43: SetMeasureLen (pickup / anacrusis measures) ────────────
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::MEASURE) {
             continue;
@@ -3246,6 +3400,86 @@ QJsonObject OperationTranslator::buildRemoveGlissando(EngravingObject* glissObj,
 }
 
 // ---------------------------------------------------------------------------
+// Guitar bends (dual-coordinate, note-anchored)
+// ---------------------------------------------------------------------------
+
+static QString guitarBendTypeName(GuitarBendType t)
+{
+    switch (t) {
+    case GuitarBendType::BEND:            return QStringLiteral("BEND");
+    case GuitarBendType::PRE_BEND:        return QStringLiteral("PRE_BEND");
+    case GuitarBendType::GRACE_NOTE_BEND: return QStringLiteral("GRACE_NOTE_BEND");
+    case GuitarBendType::SLIGHT_BEND:     return QStringLiteral("SLIGHT_BEND");
+    case GuitarBendType::DIVE:            return QStringLiteral("DIVE");
+    case GuitarBendType::PRE_DIVE:        return QStringLiteral("PRE_DIVE");
+    case GuitarBendType::DIP:             return QStringLiteral("DIP");
+    case GuitarBendType::SCOOP:           return QStringLiteral("SCOOP");
+    }
+    return QStringLiteral("BEND");
+}
+
+QJsonObject OperationTranslator::buildAddGuitarBend(EngravingObject* bendObj,
+                                                      const QString& partId)
+{
+    auto* bend = static_cast<GuitarBend*>(bendObj);
+
+    Note* startNote = bend->startNote();
+    Note* endNote   = bend->endNote();
+
+    Part* part = startNote && startNote->staff()
+                 ? startNote->staff()->part() : nullptr;
+
+    QJsonObject payload;
+    payload["type"]      = QStringLiteral("AddGuitarBend");
+    payload["part_id"]   = partId;
+    payload["bend_type"] = guitarBendTypeName(bend->bendType());
+
+    if (startNote && part) {
+        payload["start_beat"]  = beatJson(startNote->chord()->tick());
+        payload["start_pitch"] = pitchJsonFromNote(startNote);
+        payload["start_voice"] = voiceFromTrack(part, startNote->track());
+        payload["start_staff"] = staffFromTrack(part, startNote->track());
+    }
+    if (endNote && part) {
+        payload["end_beat"]  = beatJson(endNote->chord()->tick());
+        payload["end_pitch"] = pitchJsonFromNote(endNote);
+        payload["end_voice"] = voiceFromTrack(part, endNote->track());
+        payload["end_staff"] = staffFromTrack(part, endNote->track());
+    }
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveGuitarBend(EngravingObject* bendObj,
+                                                         const QString& partId)
+{
+    auto* bend = static_cast<GuitarBend*>(bendObj);
+
+    Note* startNote = bend->startNote();
+    Note* endNote   = bend->endNote();
+
+    Part* part = startNote && startNote->staff()
+                 ? startNote->staff()->part() : nullptr;
+
+    QJsonObject payload;
+    payload["type"]    = QStringLiteral("RemoveGuitarBend");
+    payload["part_id"] = partId;
+
+    if (startNote && part) {
+        payload["start_beat"]  = beatJson(startNote->chord()->tick());
+        payload["start_pitch"] = pitchJsonFromNote(startNote);
+        payload["start_voice"] = voiceFromTrack(part, startNote->track());
+        payload["start_staff"] = staffFromTrack(part, startNote->track());
+    }
+    if (endNote && part) {
+        payload["end_beat"]  = beatJson(endNote->chord()->tick());
+        payload["end_pitch"] = pitchJsonFromNote(endNote);
+        payload["end_voice"] = voiceFromTrack(part, endNote->track());
+        payload["end_staff"] = staffFromTrack(part, endNote->track());
+    }
+    return payload;
+}
+
+// ---------------------------------------------------------------------------
 // Advanced spanners — pedal lines (part-scoped, beat-range)
 // ---------------------------------------------------------------------------
 
@@ -3613,6 +3847,22 @@ QJsonObject OperationTranslator::buildRemoveVolta(const Fraction& startTick,
     payload["start_beat"] = beatJson(startTick);
     payload["end_beat"]   = beatJson(endTick);
     payload["numbers"]    = numbers;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildSetVoltaNumbers(EngravingObject* voltaObj,
+                                                       const QJsonArray& oldNumbers)
+{
+    auto* v = static_cast<Volta*>(voltaObj);
+    QJsonArray newNumbers;
+    for (int n : v->endings()) {
+        newNumbers.append(n);
+    }
+    QJsonObject payload;
+    payload["type"]        = QStringLiteral("SetVoltaNumbers");
+    payload["start_beat"]  = beatJson(v->tick());
+    payload["old_numbers"] = oldNumbers;
+    payload["numbers"]     = newNumbers;
     return payload;
 }
 

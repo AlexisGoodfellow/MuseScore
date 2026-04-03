@@ -78,6 +78,13 @@ public:
     // on the notation paint view so that keyboard shortcuts work.
     void notifyScoreReady();
 
+    // Called by EditudeService after applying a remote op.  Emits a signal
+    // that the QML overlay handles by calling update() on the parent
+    // NotationPaintView.  On WASM, QQuickPaintedItem::update() marks the
+    // item dirty but may not schedule a new animation frame; routing through
+    // QML's signal processing pipeline ensures the scene graph syncs.
+    void kickSceneGraph();
+
     QString toastText() const { return m_toastText; }
     bool noteInputActive() const { return m_noteInputActive; }
 
@@ -98,6 +105,7 @@ Q_SIGNALS:
     void toastTextChanged();
     void noteInputActiveChanged();
     void scoreReady();
+    void sceneGraphKickRequested();
     void actionDispatched(const QString& actionCode);
 
 private:

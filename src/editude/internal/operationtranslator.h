@@ -228,6 +228,12 @@ private:
     static QJsonObject buildRemoveGlissando(mu::engraving::EngravingObject* gliss,
                                             const QString& partId);
 
+    // Guitar bends (dual-coordinate, note-anchored).
+    static QJsonObject buildAddGuitarBend(mu::engraving::EngravingObject* bend,
+                                           const QString& partId);
+    static QJsonObject buildRemoveGuitarBend(mu::engraving::EngravingObject* bend,
+                                              const QString& partId);
+
     // Advanced spanners — pedal lines.
     static QJsonObject buildAddPedalLine(mu::engraving::EngravingObject* pedal,
                                           const QString& partId);
@@ -285,6 +291,8 @@ private:
     static QJsonObject buildRemoveVolta(const mu::engraving::Fraction& startTick,
                                         const mu::engraving::Fraction& endTick,
                                         const QJsonArray& numbers);
+    static QJsonObject buildSetVoltaNumbers(mu::engraving::EngravingObject* volta,
+                                            const QJsonArray& oldNumbers);
 
     // Tier 4 — markers.
     static QJsonObject buildInsertMarker(mu::engraving::EngravingObject* marker);

@@ -96,6 +96,10 @@ const char* editudeTestAction(const char* jsonStr)
     if (!s_actions) return "{}";
     QJsonObject body = QJsonDocument::fromJson(QByteArray(jsonStr)).object();
     auto reply = s_actions->dispatchAction(body);
+    // The WASM test bridge calls Score::startCmd/endCmd directly, bypassing
+    // NotationInteraction.  The paint view only redraws in response to
+    // notationChanged() — fire it explicitly (matches native test driver).
+    s_actions->notifyPaintView();
     // Process events so that WebSocket data from changesChannel is flushed.
     QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
     static QByteArray buf;

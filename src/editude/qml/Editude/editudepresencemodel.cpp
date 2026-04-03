@@ -65,6 +65,11 @@ void EditudePresenceModel::setCanvasData(
     }
 }
 
+void EditudePresenceModel::kickSceneGraph()
+{
+    emit sceneGraphKickRequested();
+}
+
 void EditudePresenceModel::showToast(const QString& text)
 {
     m_toastText = text;

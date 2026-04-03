@@ -78,6 +78,13 @@ Item {
             focusRetry.attempts = 0
             focusRetry.start()
         }
+        // WASM: QQuickPaintedItem::update() marks the notation view dirty
+        // but may not schedule an animation frame on macOS WKWebView.
+        // Routing through QML's signal pipeline ensures the scene graph
+        // syncs and the dirty paint item is rendered.
+        function onSceneGraphKickRequested() {
+            root.parent.update()
+        }
     }
 
     Timer {
