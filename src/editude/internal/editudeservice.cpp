@@ -2014,3 +2014,35 @@ void EditudeService::refreshAnnotationOverlay()
 
     m_annotationOverlayModel->setCanvasData(data);
 }
+
+// ---------------------------------------------------------------------------
+// [editure] WASM audio output latency bridge
+//
+// The AudioWorklet renders audio ahead of the speaker output.  The gap
+// (output pipeline latency) causes the playback cursor to lead the audible
+// audio.  JavaScript measures the real delay via
+// AudioContext.getOutputTimestamp() and posts it here so the C++ playback
+// controller can compensate.
+// ---------------------------------------------------------------------------
+
+#ifdef Q_OS_WASM
+
+static double s_audioOutputLatencySec = 0.0;
+
+extern "C" {
+
+EMSCRIPTEN_KEEPALIVE
+void editudeSetAudioOutputLatency(double latencySec)
+{
+    s_audioOutputLatencySec = latencySec;
+    LOGI() << "[editude] audio output latency set to" << latencySec << "sec";
+}
+
+}  // extern "C"
+
+double editudeGetAudioOutputLatency()
+{
+    return s_audioOutputLatencySec;
+}
+
+#endif  // Q_OS_WASM

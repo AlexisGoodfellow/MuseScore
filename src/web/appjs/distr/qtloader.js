@@ -131,6 +131,30 @@ async function qtLoad(config)
         return response.json();
     }
     const filesToPreload = (await Promise.all(config.qt.preload.map(preloadFetchHelper))).flat();
+    console.log("[qtloader] preload manifest: " + filesToPreload.length + " files to preload");
+
+    // [editude] Pre-fetch all preload file contents BEFORE the WASM module
+    // initializes.  The original code used FS.createPreloadedFile() which
+    // starts async XHR fetches and relies on Emscripten's addRunDependency
+    // to delay main().  However, Qt sets noInitialRun=true and calls
+    // callMain() directly, bypassing the dependency system.  This means
+    // main() can run before the async fetches complete, leaving the virtual
+    // filesystem empty.  By pre-fetching here and using synchronous
+    // FS.writeFile() in preRun, the files are guaranteed to exist when
+    // main() starts.
+    const preloadedFileData = new Map();
+    if (filesToPreload.length > 0) {
+        await Promise.all(filesToPreload.map(async (file) => {
+            const source = file.source.replace('$QTDIR', config.qt.qtdir);
+            const response = await fetch(source);
+            if (!response.ok)
+                throw new Error("Could not fetch preload content: " + source);
+            preloadedFileData.set(file.destination, new Uint8Array(await response.arrayBuffer()));
+        }));
+        console.log("[qtloader] pre-fetched " + preloadedFileData.size + " files into memory");
+    }
+    // [/editude]
+
     const qtPreRun = (instance) => {
         // Copy qt.environment to instance.ENV
         throwIfEnvUsedButNotExported(instance, config);
@@ -156,25 +180,28 @@ async function qtLoad(config)
             }
         }
 
-        const extractFilenameAndDir = (path) => {
-            const parts = path.split('/');
-            const filename = parts.pop();
-            const dir = parts.join('/');
-            return {
-                filename: filename,
-                dir: dir
-            };
-        }
         const preloadFile = (file) => {
             makeDirs(instance.FS, file.destination);
-            const source = file.source.replace('$QTDIR', config.qt.qtdir);
-            const filenameAndDir = extractFilenameAndDir(file.destination);
-            instance.FS.createPreloadedFile(filenameAndDir.dir, filenameAndDir.filename, source, true, true);
+            // [editude] Write pre-fetched data synchronously instead of using
+            // the async createPreloadedFile (see pre-fetch comment above).
+            const data = preloadedFileData.get(file.destination);
+            if (data) {
+                instance.FS.writeFile(file.destination, data);
+            }
+            // [/editude]
         }
         const isFsExported = typeof instance.FS === 'object';
         if (!isFsExported)
             throw new Error('FS must be exported if preload is used');
         filesToPreload.forEach(preloadFile);
+
+        // [editude] Create directories that MuseScore's C++ code expects to
+        // exist on WASM.  Template preloading already creates /files/share/…
+        // but the user-data and temp-score paths are never preloaded.
+        // FileSystem (QFile/QDir) requires parent dirs unlike MemFileSystem.
+        const wasmDirs = ["/files/data", "/mu/temp"];
+        wasmDirs.forEach(d => makeDirs(instance.FS, d + "/placeholder"));
+        // [/editude]
     }
 
     if (!config.preRun)

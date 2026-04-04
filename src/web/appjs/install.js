@@ -20,6 +20,34 @@ function copyFile(src, dst) {
     }
 }
 
+// [editude] Recursively copy a directory tree.
+function copyDirRecursive(src, dst) {
+    fs.mkdirSync(dst, { recursive: true });
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        const srcPath = src + "/" + entry.name;
+        const dstPath = dst + "/" + entry.name;
+        if (entry.isDirectory()) {
+            copyDirRecursive(srcPath, dstPath);
+        } else {
+            copyFile(srcPath, dstPath);
+        }
+    }
+}
+
+// [editude] Walk a directory and collect all file paths (relative to base).
+function collectFiles(dir, base, out) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = dir + "/" + entry.name;
+        if (entry.isDirectory()) {
+            collectFiles(full, base, out);
+        } else {
+            out.push(full.slice(base.length + 1)); // relative to base
+        }
+    }
+    return out;
+}
+// [/editude]
+
 function replaceAll(str, find, replace) {
   return String(str).replace(new RegExp(find, 'g'), replace);
 }
@@ -62,4 +90,25 @@ if (!fs.existsSync(SF_DST)) {
   fs.mkdirSync(OUTPUT_DIR+"/sound", { recursive: true });
   copyFile(SF_SRC, SF_DST);
 }
+
+// [editude] Copy templates and generate preload manifest for qtloader.js.
+// MuseScore's TemplatesRepository discovers .mscx dirs under /files/share/templates.
+const TEMPLATES_SRC = ROOT + "/share/templates"
+const TEMPLATES_DST = OUTPUT_DIR + "/templates"
+if (fs.existsSync(TEMPLATES_SRC) && !fs.existsSync(TEMPLATES_DST)) {
+  console.info("Copying templates...")
+  copyDirRecursive(TEMPLATES_SRC, TEMPLATES_DST);
+
+  // Generate preload manifest — each entry maps a URL-relative source to an
+  // absolute path inside the Emscripten virtual filesystem.
+  const files = collectFiles(TEMPLATES_DST, OUTPUT_DIR, []);
+  const manifest = files.map(f => ({
+    source: f,
+    destination: "/files/share/" + f
+  }));
+  const manifestPath = OUTPUT_DIR + "/templates_preload.json";
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  console.info("Templates preload manifest: " + files.length + " files => " + manifestPath);
+}
+// [/editude]
 

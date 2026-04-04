@@ -130,6 +130,9 @@ class MuseDriverProcessor extends AudioWorkletProcessor {
     onMessageFromMain(event) {
         if (event.data.type == "INITIALIZE_DRIVER") {
             this.init(event.data)
+        } else if (event.data.type == "ENABLE_NATIVE_AUDIO") {
+            this._nativeAudioEnabled = true;
+            this.debugLog("[worklet] native audio bridge enabled");
         }
     }
 
@@ -211,6 +214,18 @@ class MuseDriverProcessor extends AudioWorkletProcessor {
                             channel[i] = 0;
                         }
                     }
+                }
+
+                // [editude] Forward rendered samples to main thread for the
+                // native audio bridge.  Uses transferable ArrayBuffer so the
+                // postMessage is zero-copy within the WebContent process.
+                if (this._nativeAudioEnabled) {
+                    var nativeSamples = new Float32Array(totalSamples);
+                    nativeSamples.set(view);
+                    this.port.postMessage(
+                        {type: 'audio', data: nativeSamples.buffer},
+                        [nativeSamples.buffer]
+                    );
                 }
             } catch (err) {
                 if (!this._errorLogged) {

@@ -68,6 +68,31 @@ async function setupDriver(Module)
                 AudioDriver.audioContext.resume();
             }
             Module._startAudioProcessing();
+
+            // [editure] Enable the native audio bridge if the Swift shell
+            // injected the flag.  When active, the AudioWorklet forwards
+            // rendered samples to Swift via postMessage, and AVAudioEngine
+            // plays them through CoreAudio with measurable latency.  The
+            // latency value is pushed from Swift via evaluateJavaScript
+            // rather than polled here.
+            if (window._editudeNativeAudio) {
+                AudioDriver.enableNativeAudio();
+                console.log("[muimpl] native audio bridge — latency set by Swift shell");
+            } else if (typeof Module._editudeSetAudioOutputLatency === 'function') {
+                // Fallback: poll Web Audio API latency (non-WKWebView envs).
+                var maxLatency = 0;
+                (function pollLatency() {
+                    var ctx = AudioDriver.audioContext;
+                    if (ctx && ctx.state === 'running') {
+                        var latency = AudioDriver.getOutputLatencySec();
+                        if (latency > maxLatency) {
+                            maxLatency = latency;
+                            Module._editudeSetAudioOutputLatency(maxLatency);
+                        }
+                    }
+                    requestAnimationFrame(pollLatency);
+                })();
+            }
         }, 1500);
     }
 
@@ -114,6 +139,9 @@ const MuImpl = {
             config: config, // static configuration
 
             qt: {
+                // [editude] Preload template files into the Emscripten virtual
+                // filesystem so MuseScore's TemplatesRepository can discover them.
+                preload: ["templates_preload.json"],
                 onLoaded: opt.onLoaded,
                 onExit: opt.onExit,
                 entryFunction: window.MuseScoreStudio_entry, // from MuseScoreStudio.js

@@ -229,17 +229,14 @@ else()
 
     include(GetPlatformInfo)
 
-    if (OS_IS_WASM)
-        target_sources(muse_global PRIVATE
-            io/internal/memfilesystem.cpp
-            io/internal/memfilesystem.h
-        )
-    else()
-        target_sources(muse_global PRIVATE
-            io/internal/filesystem.cpp
-            io/internal/filesystem.h
-        )
-    endif()
+    # [editude] Always compile FileSystem — WASM needs it too so that
+    # template files preloaded into Emscripten's virtual FS via
+    # qtloader.js are visible to the C++ code through QFile/QDir.
+    target_sources(muse_global PRIVATE
+        io/internal/filesystem.cpp
+        io/internal/filesystem.h
+    )
+    # [/editude]
 
     if (OS_IS_WIN)
         target_sources(muse_global PRIVATE

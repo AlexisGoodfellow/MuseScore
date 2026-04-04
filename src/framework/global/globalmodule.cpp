@@ -53,11 +53,9 @@
 #include "diagnostics/idiagnosticspathsregister.h"
 #endif
 
-#ifdef Q_OS_WASM
-#include "io/internal/memfilesystem.h"
-#else
+// [editude] Always include FileSystem — WASM uses it too (see registerExports).
 #include "io/internal/filesystem.h"
-#endif
+// [/editude]
 
 #ifdef Q_OS_WIN
 #include "platform/win/waitabletimer.h"
@@ -112,11 +110,15 @@ void GlobalModule::registerExports()
     globalIoc()->registerExport<ITickerProvider>(moduleName(), m_tickerProvider);
     globalIoc()->registerExport<api::IApiRegister>(moduleName(), new api::ApiRegister());
 
-#ifdef Q_OS_WASM
-    globalIoc()->registerExport<IFileSystem>(moduleName(), new MemFileSystem());
-#else
+    // [editude] Use the real FileSystem on WASM instead of MemFileSystem.
+    // MemFileSystem is a flat key-value map that is invisible to Emscripten's
+    // virtual filesystem.  Template files (and any other assets) preloaded
+    // via qtloader.js FS.writeFile() must be readable through QFile/QDir,
+    // which Emscripten maps to its virtual FS.  FileSystem supports the
+    // full POSIX API (exists, scanFiles, makePath) that MemFileSystem stubs
+    // out as NOT_IMPLEMENTED.
     globalIoc()->registerExport<IFileSystem>(moduleName(), new FileSystem());
-#endif
+    // [/editude]
 }
 
 void GlobalModule::registerApi()

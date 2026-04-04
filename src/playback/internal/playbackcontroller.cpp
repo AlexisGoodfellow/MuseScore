@@ -40,6 +40,12 @@
 #include "defer.h"
 #include "log.h"
 
+// [editude] Forward-declare the WASM output-latency getter so the cursor
+// can compensate for the AudioContext pipeline delay.
+#ifdef Q_OS_WASM
+extern double editudeGetAudioOutputLatency();
+#endif
+
 using namespace muse;
 using namespace muse::actions;
 using namespace muse::async;
@@ -1493,8 +1499,22 @@ void PlaybackController::setupSequenceTracks()
 void PlaybackController::setupSequencePlayer()
 {
     currentPlayer()->playbackPositionChanged().onReceive(this, [this](const audio::secs_t pos) {
-        m_currentTick = notationPlayback()->secToTick(pos);
-        m_currentPlaybackPositionChanged.send(pos, m_currentTick);
+        // [editude] On WASM the mixer clock reports the *rendered* position,
+        // but the AudioContext output pipeline hasn't delivered that audio to
+        // the speakers yet.  Subtract the dynamically-measured pipeline
+        // latency (from AudioContext.getOutputTimestamp()) so the cursor
+        // tracks the *heard* position instead.
+#ifdef Q_OS_WASM
+        audio::secs_t heardPos = pos - audio::secs_t(editudeGetAudioOutputLatency());
+        if (heardPos < 0.0) {
+            heardPos = 0.0;
+        }
+#else
+        audio::secs_t heardPos = pos;
+#endif
+        m_currentTick = notationPlayback()->secToTick(heardPos);
+        m_currentPlaybackPositionChanged.send(heardPos, m_currentTick);
+        // [/editude]
 
         updateCurrentTempo();
 

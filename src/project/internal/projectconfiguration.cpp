@@ -87,7 +87,14 @@ void ProjectConfiguration::init()
         m_userScoresPathChanged.send(val.toPath());
     });
 
+    // [editude] Default to template-based creation on WASM where templates are
+    // bundled into the virtual filesystem. Desktop keeps FromInstruments.
+#ifdef Q_OS_WASM
+    Val preferredScoreCreationMode = Val(PreferredScoreCreationMode::FromTemplate);
+#else
     Val preferredScoreCreationMode = Val(PreferredScoreCreationMode::FromInstruments);
+#endif
+    // [/editude]
     settings()->setDefaultValue(PREFERRED_SCORE_CREATION_MODE_KEY, preferredScoreCreationMode);
 
     settings()->setDefaultValue(HOME_SCORES_PAGE_VIEW_TYPE, Val(HomeScoresPageViewType::Grid));
