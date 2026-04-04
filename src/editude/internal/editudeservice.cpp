@@ -855,8 +855,9 @@ void EditudeService::onServerMessage(const QString& text)
     } else if (type == "presence") {
         const QString cid = msg.value("contributor_id").toString();
         const QJsonObject sel = msg.value("selection").toObject();
+        const QString displayName = msg.value("display_name").toString();
         if (!cid.isEmpty()) {
-            m_presenceOverlay.updateCursor(cid, sel);
+            m_presenceOverlay.updateCursor(cid, sel, displayName);
             refreshPresenceModel();
         }
 
@@ -1910,7 +1911,7 @@ void EditudeService::refreshPresenceModel()
         return;
     }
 
-    QVector<QPair<QColor, QVector<muse::RectF>>> data;
+    QVector<std::tuple<QColor, QString, QVector<muse::RectF>>> data;
 
     for (const auto& cursor : m_presenceOverlay.cursors()) {
         if (cursor.state == "none" || cursor.state.isEmpty()) {
@@ -1940,7 +1941,7 @@ void EditudeService::refreshPresenceModel()
         }
 
         if (!rects.isEmpty()) {
-            data.append({ cursor.color, rects });
+            data.append(std::make_tuple(cursor.color, cursor.displayName, rects));
         }
     }
 

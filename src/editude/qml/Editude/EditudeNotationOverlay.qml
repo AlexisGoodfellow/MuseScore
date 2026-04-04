@@ -117,13 +117,38 @@ Item {
     // Presence cursor rectangles — one rectangle per remote contributor selection.
     Repeater {
         model: EditudePresenceModel
-        delegate: Rectangle {
+        delegate: Item {
             x: model.screenRect.x
             y: model.screenRect.y
             width: model.screenRect.width
             height: model.screenRect.height
-            color: model.rectColor
             enabled: false
+
+            Rectangle {
+                anchors.fill: parent
+                color: model.rectColor
+            }
+
+            // Name label — shown only on the first rect of each contributor.
+            Rectangle {
+                visible: model.displayName !== ""
+                anchors.bottom: parent.top
+                anchors.left: parent.left
+                color: Qt.rgba(model.rectColor.r, model.rectColor.g,
+                               model.rectColor.b, 0.85)
+                radius: 2
+                width: nameLabel.implicitWidth + 8
+                height: nameLabel.implicitHeight + 4
+
+                Text {
+                    id: nameLabel
+                    anchors.centerIn: parent
+                    text: model.displayName
+                    color: "#ffffff"
+                    font.pixelSize: 11
+                    font.weight: Font.Medium
+                }
+            }
         }
     }
 

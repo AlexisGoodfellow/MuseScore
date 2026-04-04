@@ -41,11 +41,11 @@ EditudePresenceModel* EditudePresenceModel::instance()
 }
 
 void EditudePresenceModel::setCanvasData(
-    const QVector<QPair<QColor, QVector<muse::RectF>>>& canvasData)
+    const QVector<std::tuple<QColor, QString, QVector<muse::RectF>>>& canvasData)
 {
     // Count incoming rows before modifying anything.
     int newCount = 0;
-    for (const auto& [color, rects] : canvasData) {
+    for (const auto& [color, name, rects] : canvasData) {
         newCount += rects.size();
     }
 
@@ -128,12 +128,15 @@ void EditudePresenceModel::setNotationViewMatrix(const QVariant& matrix)
 void EditudePresenceModel::remapRows()
 {
     m_rows.clear();
-    for (const auto& [color, rects] : m_canvasData) {
+    for (const auto& [color, name, rects] : m_canvasData) {
+        bool first = true;
         for (const muse::RectF& r : rects) {
             QRectF qr(r.x(), r.y(), r.width(), r.height());
             Row row;
             row.screenRect = m_matrix.mapRect(qr);
             row.color      = color;
+            row.name       = first ? name : QString();
+            first = false;
             m_rows.append(row);
         }
     }
@@ -156,6 +159,7 @@ QVariant EditudePresenceModel::data(const QModelIndex& index, int role) const
     switch (role) {
     case RectRole:  return row.screenRect;
     case ColorRole: return row.color;
+    case NameRole:  return row.name;
     default:        return {};
     }
 }
@@ -163,7 +167,8 @@ QVariant EditudePresenceModel::data(const QModelIndex& index, int role) const
 QHash<int, QByteArray> EditudePresenceModel::roleNames() const
 {
     return {
-        { RectRole,  "screenRect" },
-        { ColorRole, "rectColor"  },
+        { RectRole,  "screenRect"  },
+        { ColorRole, "rectColor"   },
+        { NameRole,  "displayName" },
     };
 }

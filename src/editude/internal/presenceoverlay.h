@@ -34,6 +34,7 @@ namespace mu::editude::internal {
 
 struct RemoteCursor {
     QString contributorId;
+    QString displayName;
     QString state;            // "single" | "range" | "none"
     // For "single" state: ticks of each selected element (replaces old UUID list).
     QVector<int> elementTicks;
@@ -51,7 +52,8 @@ class PresenceOverlay
 public:
     // Update or clear a contributor's cursor from an incoming presence JSON selection.
     // If state == "none", the entry is removed.
-    void updateCursor(const QString& contributorId, const QJsonObject& selection);
+    void updateCursor(const QString& contributorId, const QJsonObject& selection,
+                      const QString& displayName = {});
 
     // Remove all cursors (e.g. on project close).
     void clear();

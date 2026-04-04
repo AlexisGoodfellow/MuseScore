@@ -31,6 +31,7 @@
 #include <QVector>
 #include <QPair>
 #include <QtQml/qqml.h>
+#include <tuple>
 
 #include "draw/types/geometry.h"
 
@@ -45,8 +46,9 @@ namespace mu::editude::internal {
  * multiple rows if its selection spans more than one system).
  *
  * Roles:
- *   RectRole  (Qt::UserRole+1) → QRectF  — screen-space rectangle
- *   ColorRole (Qt::UserRole+2) → QColor  — contributor's assigned colour
+ *   RectRole  (Qt::UserRole+1) → QRectF   — screen-space rectangle
+ *   ColorRole (Qt::UserRole+2) → QColor   — contributor's assigned colour
+ *   NameRole  (Qt::UserRole+3) → QString  — display name (non-empty on first rect only)
  */
 class EditudePresenceModel : public QAbstractListModel
 {
@@ -59,6 +61,7 @@ public:
     enum Roles {
         RectRole  = Qt::UserRole + 1,
         ColorRole = Qt::UserRole + 2,
+        NameRole  = Qt::UserRole + 3,
     };
 
     explicit EditudePresenceModel(QObject* parent = nullptr);
@@ -67,8 +70,8 @@ public:
     static EditudePresenceModel* instance();
 
     // Called by EditudeService when presence data changes.
-    // canvasData: list of (colour, list-of-canvas-rects) per contributor cursor.
-    void setCanvasData(const QVector<QPair<QColor, QVector<muse::RectF>>>& canvasData);
+    // canvasData: list of (colour, name, list-of-canvas-rects) per contributor cursor.
+    void setCanvasData(const QVector<std::tuple<QColor, QString, QVector<muse::RectF>>>& canvasData);
 
     // Shows a transient toast notification; auto-clears after 4 s.
     void showToast(const QString& text);
@@ -114,9 +117,10 @@ private:
     struct Row {
         QRectF screenRect;
         QColor color;
+        QString name;  // non-empty only on the first rect of each contributor
     };
 
-    QVector<QPair<QColor, QVector<muse::RectF>>> m_canvasData;
+    QVector<std::tuple<QColor, QString, QVector<muse::RectF>>> m_canvasData;
     QTransform m_matrix;
     QVector<Row> m_rows;
 

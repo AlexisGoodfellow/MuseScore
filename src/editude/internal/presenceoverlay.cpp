@@ -40,7 +40,8 @@ const QVector<QColor> PresenceOverlay::k_palette = {
     QColor(0xE3, 0x77, 0xC2, 0x60),  // pink
 };
 
-void PresenceOverlay::updateCursor(const QString& contributorId, const QJsonObject& selection)
+void PresenceOverlay::updateCursor(const QString& contributorId, const QJsonObject& selection,
+                                   const QString& displayName)
 {
     const QString state = selection.value("state").toString();
 
@@ -51,6 +52,7 @@ void PresenceOverlay::updateCursor(const QString& contributorId, const QJsonObje
 
     RemoteCursor cursor;
     cursor.contributorId = contributorId;
+    cursor.displayName   = displayName;
     cursor.state         = state;
     cursor.startStaff    = selection.value("start_staff").toInt(0);
     cursor.endStaff      = selection.value("end_staff").toInt(0);
