@@ -349,7 +349,8 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     //   1g. Structural voice changes — claims remove+add pattern
     //   1h. Tuplet operations — fullyRemovedTuplets, newlyCreatedTuplets
     //   1i. Undo-of-InsertRest heuristic
-    //   1j. hasMeasureLenChange flag
+    //   1j. Side-effect removal claiming (cascaded spanners/decorations)
+    //   1k. hasMeasureLenChange flag
     // ═══════════════════════════════════════════════════════════════════
 
     // ── 1a. Group newly-added Notes by parent Chord ──────────────────
@@ -409,6 +410,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     }
 
     bool batchHasMeasureInsert = false;
+    Fraction deletedRangeStart(-1, 1), deletedRangeEnd(-1, 1);
     {
         QVector<Measure*> insertedMeasures;
         QVector<Measure*> removedMeasures;
@@ -472,6 +474,10 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 op["at_beat"]  = beatJson(atBeat);
                 op["duration"] = beatJson(totalDur);
                 ops.append(op);
+
+                // Record deleted range for Phase 1j claiming.
+                deletedRangeStart = atBeat;
+                deletedRangeEnd   = atBeat + totalDur;
             }
         }
     }
@@ -806,6 +812,208 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             && removedRestCount > 0 && addedRestCount > 0
             && removedRestCount > addedRestCount
             && fullyRemovedTuplets.isEmpty();
+    }
+
+    // ── 1j. Claim side-effect removals from note/measure deletion ────
+    // When a note or measure is deleted, MuseScore internally removes
+    // attached spanners, decorations, and other dependent elements.
+    // The Python applicator already cascade-removes these elements
+    // (_cascade_delete_tier3 for DeleteNote; 5-case overlap filter for
+    // DeleteBeats), so emitting separate removal ops would be redundant
+    // and potentially malformed (anchor pointers may be stale after the
+    // parent element is unlinked from the score).  Claim them here.
+    {
+        // 1. Collect ALL removed chords/notes (regardless of claimed
+        //    status — a chord claimed by duration side effects is still
+        //    being removed, and its spanners are still side effects).
+        std::unordered_set<EngravingObject*> removedCR;
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj) continue;
+            if (!cmds.count(CommandType::RemoveElement)) continue;
+            if (obj->type() == ElementType::CHORD
+                || obj->type() == ElementType::REST
+                || obj->type() == ElementType::NOTE) {
+                removedCR.insert(obj);
+            }
+        }
+
+        const bool hasDeletedRange = deletedRangeStart >= Fraction(0, 1);
+
+        // Helper: is this element (or its parent chord) being removed?
+        auto isAnchorRemoved = [&](EngravingObject* el) -> bool {
+            if (!el) return false;
+            if (removedCR.count(el)) return true;
+            // For ChordRest anchors, check notes.
+            if (el->isChordRest()) {
+                auto* cr = static_cast<ChordRest*>(el);
+                if (cr->isChord()) {
+                    for (Note* n : static_cast<Chord*>(cr)->notes()) {
+                        if (removedCR.count(n)) return true;
+                    }
+                }
+            }
+            // For Note anchors, check parent chord.
+            if (el->isNote()) {
+                auto* note = static_cast<Note*>(el);
+                if (note->chord() && removedCR.count(note->chord()))
+                    return true;
+            }
+            return false;
+        };
+
+        auto isInDeletedRange = [&](const Fraction& tick) -> bool {
+            return hasDeletedRange
+                   && tick >= deletedRangeStart && tick < deletedRangeEnd;
+        };
+
+        // 2. Scan for side-effect removals and claim them.
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::RemoveElement)) continue;
+            if (claimed.contains(obj)) continue;
+
+            bool isSideEffect = false;
+
+            switch (obj->type()) {
+            case ElementType::SLUR: {
+                auto* s = static_cast<Slur*>(obj);
+                isSideEffect = isAnchorRemoved(s->startElement())
+                               || isAnchorRemoved(s->endElement())
+                               || isInDeletedRange(s->tick());
+                break;
+            }
+            case ElementType::GLISSANDO: {
+                auto* g = static_cast<Glissando*>(obj);
+                isSideEffect = isAnchorRemoved(g->startElement())
+                               || isAnchorRemoved(g->endElement())
+                               || isInDeletedRange(g->tick());
+                break;
+            }
+            case ElementType::GUITAR_BEND: {
+                auto* b = static_cast<GuitarBend*>(obj);
+                isSideEffect = isAnchorRemoved(b->startNote())
+                               || isAnchorRemoved(b->endNote())
+                               || isInDeletedRange(b->tick());
+                break;
+            }
+            case ElementType::TREMOLO_TWOCHORD: {
+                auto* t = static_cast<TremoloTwoChord*>(obj);
+                isSideEffect = isAnchorRemoved(t->chord1())
+                               || isAnchorRemoved(t->chord2());
+                if (!isSideEffect && t->chord1()) {
+                    isSideEffect = isInDeletedRange(t->chord1()->tick());
+                }
+                break;
+            }
+            case ElementType::HAIRPIN:
+            case ElementType::PEDAL:
+            case ElementType::OTTAVA:
+            case ElementType::TRILL: {
+                auto* sp = static_cast<Spanner*>(obj);
+                isSideEffect = isInDeletedRange(sp->tick())
+                               || isInDeletedRange(sp->tick2());
+                break;
+            }
+            case ElementType::ARTICULATION: {
+                auto* art = static_cast<Articulation*>(obj);
+                ChordRest* cr = art->chordRest();
+                isSideEffect = isAnchorRemoved(cr);
+                if (!isSideEffect && cr) {
+                    isSideEffect = isInDeletedRange(cr->tick());
+                }
+                break;
+            }
+            case ElementType::DYNAMIC: {
+                auto* dyn = static_cast<Dynamic*>(obj);
+                isSideEffect = isInDeletedRange(dyn->tick());
+                break;
+            }
+            case ElementType::LYRICS: {
+                auto* lyr = static_cast<Lyrics*>(obj);
+                ChordRest* cr = lyr->chordRest();
+                isSideEffect = isAnchorRemoved(cr);
+                if (!isSideEffect && cr) {
+                    isSideEffect = isInDeletedRange(cr->tick());
+                }
+                break;
+            }
+            case ElementType::BREATH: {
+                auto* br = static_cast<Breath*>(obj);
+                Fraction t = br->segment() ? br->segment()->tick()
+                                           : br->tick();
+                isSideEffect = isInDeletedRange(t);
+                break;
+            }
+            case ElementType::ARPEGGIO: {
+                auto* arp = static_cast<Arpeggio*>(obj);
+                Chord* ch = arp->chord();
+                isSideEffect = isAnchorRemoved(ch);
+                if (!isSideEffect && ch) {
+                    isSideEffect = isInDeletedRange(ch->tick());
+                }
+                break;
+            }
+            case ElementType::TREMOLO_SINGLECHORD: {
+                auto* tr = static_cast<TremoloSingleChord*>(obj);
+                Chord* ch = tr->chord();
+                isSideEffect = isAnchorRemoved(ch);
+                if (!isSideEffect && ch) {
+                    isSideEffect = isInDeletedRange(ch->tick());
+                }
+                break;
+            }
+            case ElementType::STAFF_TEXT: {
+                auto* st = static_cast<StaffText*>(obj);
+                isSideEffect = isInDeletedRange(st->tick());
+                break;
+            }
+            case ElementType::SYSTEM_TEXT: {
+                auto* st = static_cast<SystemText*>(obj);
+                isSideEffect = isInDeletedRange(st->tick());
+                break;
+            }
+            case ElementType::REHEARSAL_MARK: {
+                auto* rm = static_cast<RehearsalMark*>(obj);
+                isSideEffect = isInDeletedRange(rm->tick());
+                break;
+            }
+            case ElementType::HARMONY: {
+                auto* h = static_cast<Harmony*>(obj);
+                isSideEffect = isInDeletedRange(h->tick());
+                break;
+            }
+            case ElementType::MARKER: {
+                auto* m = static_cast<Marker*>(obj);
+                isSideEffect = isInDeletedRange(m->tick());
+                break;
+            }
+            case ElementType::JUMP: {
+                auto* j = static_cast<Jump*>(obj);
+                isSideEffect = isInDeletedRange(j->tick());
+                break;
+            }
+            case ElementType::VOLTA: {
+                auto* v = static_cast<Volta*>(obj);
+                isSideEffect = isInDeletedRange(v->tick());
+                break;
+            }
+            case ElementType::KEYSIG: {
+                auto* ks = static_cast<KeySig*>(obj);
+                isSideEffect = isInDeletedRange(ks->tick());
+                break;
+            }
+            case ElementType::CLEF: {
+                auto* cl = static_cast<Clef*>(obj);
+                isSideEffect = isInDeletedRange(cl->tick());
+                break;
+            }
+            default:
+                break;
+            }
+
+            if (isSideEffect) {
+                claimed.insert(obj);
+            }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1462,6 +1670,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::HARMONY) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* harmony = static_cast<Harmony*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             const Fraction tick = harmony->tick().reduced();
@@ -1538,6 +1747,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::ARTICULATION) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* art = static_cast<Articulation*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             ChordRest* cr = art->chordRest();
@@ -1587,6 +1797,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::DYNAMIC) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* dyn = static_cast<Dynamic*>(obj);
         Part* dynPart = static_cast<EngravingItem*>(dyn)->part();
         if (!dynPart) {
@@ -1612,6 +1823,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::LYRICS) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* lyr = static_cast<Lyrics*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             ChordRest* cr = lyr->chordRest();
@@ -1673,6 +1885,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::STAFF_TEXT) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* staffText = static_cast<StaffText*>(obj);
         Part* textPart = static_cast<EngravingItem*>(staffText)->part();
         if (!textPart) {
@@ -1701,6 +1914,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::SYSTEM_TEXT) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* sysText = static_cast<SystemText*>(obj);
 
         if (cmds.count(CommandType::AddElement)) {
@@ -1719,6 +1933,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::REHEARSAL_MARK) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* mark = static_cast<RehearsalMark*>(obj);
 
         if (cmds.count(CommandType::AddElement)) {
@@ -1737,6 +1952,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::ARPEGGIO) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* arp = static_cast<Arpeggio*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             Chord* ch = arp->chord();
@@ -1775,6 +1991,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::TREMOLO_SINGLECHORD) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* trem = static_cast<TremoloSingleChord*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             Chord* ch = trem->chord();
@@ -1813,6 +2030,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::BREATH) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* breath = static_cast<Breath*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             Segment* seg = breath->segment();
@@ -1852,6 +2070,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::SLUR) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* slur = static_cast<Slur*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             Part* slurPart = static_cast<EngravingItem*>(slur)->part();
@@ -1883,6 +2102,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::HAIRPIN) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* hp = static_cast<Hairpin*>(obj);
         Part* hpPart = static_cast<EngravingItem*>(hp)->part();
         if (!hpPart) {
@@ -1910,6 +2130,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::OTTAVA) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* ottava = static_cast<Ottava*>(obj);
         Part* ottavaPart = static_cast<EngravingItem*>(ottava)->part();
         if (!ottavaPart) {
@@ -1945,6 +2166,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::GLISSANDO) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* gliss = static_cast<Glissando*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             Part* glissPart = static_cast<EngravingItem*>(gliss)->part();
@@ -1976,6 +2198,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::GUITAR_BEND) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* bend = static_cast<GuitarBend*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             Part* bendPart = static_cast<EngravingItem*>(bend)->part();
@@ -2007,6 +2230,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::PEDAL) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* pedal = static_cast<Pedal*>(obj);
         Part* pedalPart = static_cast<EngravingItem*>(pedal)->part();
         if (!pedalPart) {
@@ -2031,6 +2255,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::TRILL) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* trill = static_cast<Trill*>(obj);
         Part* trillPart = static_cast<EngravingItem*>(trill)->part();
         if (!trillPart) {
@@ -2055,6 +2280,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::TREMOLO_TWOCHORD) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* trem = static_cast<TremoloTwoChord*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             Chord* ch1 = trem->chord1();
@@ -2096,6 +2322,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::VOLTA) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* volta = static_cast<Volta*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             ops.append(buildInsertVolta(volta));
@@ -2137,6 +2364,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::MARKER) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* marker = static_cast<Marker*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             ops.append(buildInsertMarker(marker));
@@ -2153,6 +2381,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!obj || obj->type() != ElementType::JUMP) {
             continue;
         }
+        if (claimed.contains(obj)) continue;
         auto* jump = static_cast<Jump*>(obj);
         if (cmds.count(CommandType::AddElement)) {
             ops.append(buildInsertJump(jump));
