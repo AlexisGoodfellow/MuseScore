@@ -23,6 +23,7 @@
 #include "web/appjs/webapi.h"
 
 #include <emscripten.h>
+#include <string>
 
 using namespace mu::appjs;
 
@@ -75,5 +76,9 @@ void webEnterRangeSelectMode() { WebApi::instance()->enterRangeSelectMode(); }
 
 EMSCRIPTEN_KEEPALIVE
 void webCompleteRangeSelect() { WebApi::instance()->completeRangeSelect(); }
+
+// [editure] Generic action dispatch for JS → MuseScore actions (e.g. "add-annotation").
+EMSCRIPTEN_KEEPALIVE
+void webDispatchAction(const char* actionCode) { WebApi::instance()->dispatchAction(std::string(actionCode)); }
 
 }

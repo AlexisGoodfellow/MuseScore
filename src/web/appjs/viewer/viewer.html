@@ -121,7 +121,43 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
           // runtime
           onLoaded: () => {
             showUi(screen);
-            // [editude] Notify iOS shell that the WASM app is painting.
+
+            // [editude] Ensure the Qt WASM canvas receives keyboard focus.
+            // In WKWebView, the Swift shell calls makeFirstResponder(); in a
+            // browser iframe we must do the equivalent from JS.  Qt creates
+            // a <canvas> inside #screen — find it, make it focusable, and
+            // focus it.  Also install a click handler to re-focus after any
+            // click (the browser may shift focus to the parent frame).
+            (function setupKeyboardFocus() {
+              var canvas = screen.querySelector('canvas');
+              if (!canvas) {
+                // Qt hasn't created the canvas yet — retry on next frame.
+                requestAnimationFrame(setupKeyboardFocus);
+                return;
+              }
+              if (!canvas.hasAttribute('tabindex')) {
+                canvas.tabIndex = 0;
+              }
+              canvas.style.outline = 'none'; // hide focus ring
+              canvas.focus();
+
+              // Re-focus canvas on any click inside the screen area.
+              screen.addEventListener('mousedown', function() {
+                canvas.focus();
+              });
+
+              // Prevent browser defaults for keys the editor needs.
+              // Without this, Backspace navigates back, arrows scroll, etc.
+              canvas.addEventListener('keydown', function(e) {
+                if (['Backspace', 'Tab', 'ArrowUp', 'ArrowDown',
+                     'ArrowLeft', 'ArrowRight', ' '].indexOf(e.key) !== -1) {
+                  e.preventDefault();
+                }
+              });
+              console.log("[viewer] keyboard focus handler installed on canvas");
+            })();
+
+            // [editude] Notify shell that the WASM app is painting.
             // Dismisses the "Synchronizing..." spinner independently of
             // C++ EditudeService bootstrap (which may still be loading the score).
             if (window.webkit && window.webkit.messageHandlers &&
@@ -337,7 +373,9 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
               case 'paste':  if (mod._webPaste) mod._webPaste(); hideActionBar(); break;
               case 'delete': if (mod._webDelete) mod._webDelete(); hideActionBar(); break;
               case 'annotate':
-                console.log("[action-bar] annotate — not yet wired");
+                if (mod.ccall) {
+                  mod.ccall('webDispatchAction', null, ['string'], ['add-annotation']);
+                }
                 hideActionBar();
                 break;
             }

@@ -73,6 +73,9 @@ public:
     void enterRangeSelectMode();
     void completeRangeSelect();
 
+    // [editude] Generic action dispatch for JS-triggered MuseScore actions.
+    void dispatchAction(const std::string& actionCode);
+
 private:
 
     WebApi() = default;

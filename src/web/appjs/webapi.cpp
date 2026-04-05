@@ -287,6 +287,16 @@ void WebApi::completeRangeSelect()
     LOGI() << "completeRangeSelect: range created";
 }
 
+// [editude] Generic action dispatch — lets JS trigger any registered MuseScore
+// action by name (e.g. "add-annotation", "toggle-annotations").
+void WebApi::dispatchAction(const std::string& actionCode)
+{
+    auto disp = contextResolve<muse::actions::IActionsDispatcher>();
+    if (disp) {
+        disp->dispatch(actionCode);
+    }
+}
+
 void WebApi::onProjectSaved(const muse::io::path_t& path, mu::project::SaveMode)
 {
     IF_ASSERT_FAILED(io::File::exists(path)) {
