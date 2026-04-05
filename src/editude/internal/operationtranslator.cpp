@@ -311,8 +311,15 @@ QVector<QJsonObject> OperationTranslator::bootstrapPartsFromScore(
     return ops;
 }
 
+
 // ---------------------------------------------------------------------------
-// translateAll — main dispatch (coordinate-based addressing)
+// translateAll — two-phase pipeline (tier-based architecture)
+//
+// Phase 1: Compound-op detection — identifies operations that produce side
+//          effects and claims those objects so Phase 2 doesn't re-emit them.
+// Phase 2: Per-tier emission — iterates unclaimed objects grouped by tier.
+//
+// See ADR 2026-04-05-translator-tier-architecture.md for rationale.
 // ---------------------------------------------------------------------------
 QVector<QJsonObject> OperationTranslator::translateAll(
     const std::map<EngravingObject*, std::unordered_set<CommandType>>& changedObjects,
@@ -325,12 +332,32 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     // the element ops that reference them.
     QVector<QJsonObject> lazyAddPartOps;
 
-    // ── Pass 1: Group newly-added Notes by parent Chord ───────────────────
+    // Unified set of objects claimed by compound-op detection (Phase 1).
+    // Phase 2 skips any object in this set to avoid double-emission.
+    QSet<EngravingObject*> claimed;
+
+    // ═══════════════════════════════════════════════════════════════════
+    // PHASE 1: Compound-op detection and side-effect claiming
     //
-    // A Note with AddElement whose parent Chord also has AddElement is part of
-    // a new chord insertion (InsertNote).
-    // A Note with AddElement whose parent Chord does NOT have AddElement is a
-    // pitch added to an existing chord — now also emitted as InsertNote.
+    // Detector ordering is fixed and load-bearing:
+    //   1a. Note grouping by chord (data structure for Stream tier)
+    //   1b. InsertBeats/DeleteBeats — claims TimeSig replications
+    //   1c. AddPart/RemovePart — must precede SetTimeSignature early return
+    //   1d. SetTimeSignature — early return claims entire batch
+    //   1e. SetTempo — independent, no side effects
+    //   1f. Duration side effects — claims fill rests
+    //   1g. Structural voice changes — claims remove+add pattern
+    //   1h. Tuplet operations — fullyRemovedTuplets, newlyCreatedTuplets
+    //   1i. Undo-of-InsertRest heuristic
+    //   1j. hasMeasureLenChange flag
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── 1a. Group newly-added Notes by parent Chord ──────────────────
+    //
+    // A Note with AddElement whose parent Chord also has AddElement is part
+    // of a new chord insertion (InsertNote).
+    // A Note with AddElement whose parent Chord does NOT have AddElement is
+    // a pitch added to an existing chord — also emitted as InsertNote.
     QHash<Chord*, QVector<Note*>> newChordNotes;
     QSet<EngravingObject*> notesAddedToExistingChords;
     for (const auto& [obj, cmds] : changedObjects) {
@@ -345,7 +372,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (!chord) {
             continue;
         }
-        // Skip grace chords — they are handled by Pass 34 (AddGraceNote).
+        // Skip grace chords — handled by AddGraceNote in Stream tier.
         if (chord->isGrace()) {
             continue;
         }
@@ -354,23 +381,219 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             && chordIt->second.count(CommandType::AddElement)) {
             newChordNotes[chord].append(note);
         } else {
-            // Note added to an existing chord — track for Pass 2.
             notesAddedToExistingChords.insert(obj);
         }
     }
 
-    // ── Pre-scan: identify side-effect elements from duration changes ──
-    // changeCRlen() modifies a ChordRest's duration (via ChangeProperty on
-    // Pid::DURATION_TYPE_WITH_DOTS) and creates fill rests / removes
+    // ── 1b. InsertBeats / DeleteBeats ────────────────────────────────
+    // Detect InsertMeasures/RemoveMeasures and emit structural ops.
+    // When measures are inserted, MuseScore replicates the time signature
+    // to new measures via AddElement on TimeSig objects.  These are side
+    // effects — claim them so SetTimeSignature (1d) doesn't fire.
+    //
+    // IMPORTANT: When a genuine time signature change triggers
+    // rewriteMeasures, InsertMeasures/RemoveMeasures appear as side
+    // effects.  These must NOT be emitted as InsertBeats/DeleteBeats —
+    // the receiver will call its own rewriteMeasures when it processes
+    // SetTimeSignature.  Detect this by checking for ChangeProperty on
+    // any TimeSig object (genuine time sig changes modify the existing
+    // TimeSig via ChangeProperty; replications from measure insertion
+    // only use AddElement).
+    bool batchHasTimeSigPropertyChange = false;
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (obj && obj->type() == ElementType::TIMESIG
+            && cmds.count(CommandType::ChangeProperty)) {
+            batchHasTimeSigPropertyChange = true;
+            break;
+        }
+    }
+
+    bool batchHasMeasureInsert = false;
+    {
+        QVector<Measure*> insertedMeasures;
+        QVector<Measure*> removedMeasures;
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || obj->type() != ElementType::MEASURE) {
+                continue;
+            }
+            auto* m = static_cast<Measure*>(obj);
+            if (cmds.count(CommandType::InsertMeasures)) {
+                insertedMeasures.append(m);
+            } else if (cmds.count(CommandType::RemoveMeasures)) {
+                removedMeasures.append(m);
+            }
+        }
+
+        // If a genuine time sig change is present, InsertMeasures/
+        // RemoveMeasures are from rewriteMeasures — don't emit structural
+        // ops and don't claim TimeSigs.  Phase 1d will handle everything.
+        if (!batchHasTimeSigPropertyChange) {
+            batchHasMeasureInsert = !insertedMeasures.isEmpty();
+
+            // Claim all TimeSig objects in this batch — they are replications
+            // from the measure insertion, not genuine time signature changes.
+            if (batchHasMeasureInsert || !removedMeasures.isEmpty()) {
+                for (const auto& [obj, cmds] : changedObjects) {
+                    if (obj && obj->type() == ElementType::TIMESIG) {
+                        claimed.insert(obj);
+                    }
+                }
+            }
+
+            auto sortByTick = [](Measure* a, Measure* b) {
+                return a->tick() < b->tick();
+            };
+
+            if (!insertedMeasures.isEmpty()) {
+                std::sort(insertedMeasures.begin(), insertedMeasures.end(),
+                          sortByTick);
+                const Fraction atBeat = insertedMeasures.first()->tick();
+                Fraction totalDur;
+                for (Measure* m : insertedMeasures) {
+                    totalDur += m->ticks();
+                }
+                QJsonObject op;
+                op["type"]     = QStringLiteral("InsertBeats");
+                op["at_beat"]  = beatJson(atBeat);
+                op["duration"] = beatJson(totalDur);
+                ops.append(op);
+            }
+
+            if (!removedMeasures.isEmpty()) {
+                std::sort(removedMeasures.begin(), removedMeasures.end(),
+                          sortByTick);
+                const Fraction atBeat = removedMeasures.first()->tick();
+                Fraction totalDur;
+                for (Measure* m : removedMeasures) {
+                    totalDur += m->ticks();
+                }
+                QJsonObject op;
+                op["type"]     = QStringLiteral("DeleteBeats");
+                op["at_beat"]  = beatJson(atBeat);
+                op["duration"] = beatJson(totalDur);
+                ops.append(op);
+            }
+        }
+    }
+
+    // ── 1c. AddPart / RemovePart ─────────────────────────────────────
+    // Must run BEFORE the SetTimeSignature early return (1d) because
+    // adding a part creates staves whose TimeSig/KeySig/Clef elements
+    // appear in the same batch.  Without this, the early return would
+    // suppress the AddPart op entirely.
+    //
+    // Track newly-added Parts: Parts tier must skip SetStaffCount for
+    // these because AddPart already carries the staff_count field.
+    QSet<Part*> newlyAddedParts;
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::PART) {
+            continue;
+        }
+        Part* part = static_cast<Part*>(obj);
+        if (cmds.count(CommandType::AddElement)
+            || cmds.count(CommandType::InsertPart)) {
+            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_knownPartUuids[part] = uuid;
+            ops.append(buildAddPart(part, uuid));
+            newlyAddedParts.insert(part);
+        } else if (cmds.count(CommandType::RemoveElement)
+                   || cmds.count(CommandType::RemovePart)) {
+            const QString uuid = m_knownPartUuids.value(part);
+            if (!uuid.isEmpty()) {
+                m_knownPartUuids.remove(part);
+                ops.append(buildRemovePart(uuid));
+            }
+        }
+    }
+
+    // ── 1d. SetTimeSignature ─────────────────────────────────────────
+    // A TimeSig may appear with AddElement (new time sig added) OR
+    // ChangeProperty (existing time sig modified by cmdAddTimeSig).
+    //
+    // Important: when a staff is added (InsertStaff/InsertPart),
+    // MuseScore's cmdAddStaves replicates the existing TimeSig to the
+    // new staff via undoAddElement.  This is a REPLICATION, not a
+    // genuine time signature change.  We must NOT emit SetTimeSignature
+    // or trigger the compound-op early return for these replications.
+    //
+    // Objects already claimed by 1b (InsertBeats) are also skipped.
+    bool batchHasStaffInsert = false;
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj) {
+            continue;
+        }
+        if (obj->type() == ElementType::STAFF
+            && (cmds.count(CommandType::InsertStaff)
+                || cmds.count(CommandType::RemoveStaff))) {
+            batchHasStaffInsert = true;
+            break;
+        }
+        if (obj->type() == ElementType::PART
+            && (cmds.count(CommandType::InsertPart)
+                || cmds.count(CommandType::AddElement))) {
+            batchHasStaffInsert = true;
+            break;
+        }
+    }
+
+    bool emittedTimeSig = false;
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj) {
+            continue;
+        }
+        // Skip objects already claimed by InsertBeats (1b).
+        if (claimed.contains(obj)) {
+            continue;
+        }
+        if (obj->type() == ElementType::TIMESIG) {
+            const bool isGenuine =
+                cmds.count(CommandType::ChangeProperty)
+                || (cmds.count(CommandType::AddElement) && !batchHasStaffInsert);
+            if (isGenuine) {
+                auto* ts = toTimeSig(static_cast<EngravingItem*>(obj));
+                if (ts) {
+                    ops.append(buildSetTimeSignature(ts));
+                    emittedTimeSig = true;
+                }
+            }
+        }
+    }
+
+    // SetTimeSignature is a compound op: cmdAddTimeSig on the receiver
+    // calls rewriteMeasures which restructures measure boundaries,
+    // creates/removes rests, etc.  All other changes in this batch are
+    // side effects and must NOT be emitted.
+    if (emittedTimeSig) {
+        if (!lazyAddPartOps.isEmpty()) {
+            QVector<QJsonObject> result = lazyAddPartOps;
+            result.append(ops);
+            return result;
+        }
+        return ops;
+    }
+
+    // ── 1e. SetTempo ─────────────────────────────────────────────────
+    // SetTempo has no side effects — emit it independently.
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::TEMPO_TEXT) {
+            continue;
+        }
+        if (cmds.count(CommandType::AddElement)) {
+            ops.append(buildSetTempo(static_cast<TempoText*>(obj)));
+        }
+    }
+
+    // ── 1f. Duration side effects ────────────────────────────────────
+    // changeCRlen() modifies a ChordRest's duration (via ChangeProperty
+    // on Pid::DURATION_TYPE_WITH_DOTS) and creates fill rests / removes
     // overwritten elements as side effects.  The C++ applicator handles
     // all these side effects atomically via setNoteRest(), so emitting
     // separate InsertRest/DeleteNote ops for them would cause double-
-    // application.  Collect them here so Passes 2, 4, and 8 can skip them.
+    // application.  Claim them so Phase 2 skips them.
     //
-    // Skip when a ChangeMeasureLen is present: adjustToLen() changes rest
-    // durations as a side effect of the measure resize, and Pass 42
-    // already emits the SetMeasureLen op.  Emitting a SetDuration for the
-    // rest would reference elements that don't exist in the Python model.
+    // Skip when a ChangeMeasureLen is present: adjustToLen() changes
+    // rest durations as a side effect of the measure resize, and the
+    // Navigation tier emits the SetMeasureLen op.
     bool hasMeasureLenChange = false;
     for (const auto& [obj, cmds] : changedObjects) {
         if (obj && obj->type() == ElementType::MEASURE
@@ -379,7 +602,6 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             break;
         }
     }
-    QSet<EngravingObject*> durationSideEffects;
     if (changedPropertyIdSet.count(Pid::DURATION_TYPE_WITH_DOTS)
         && !hasMeasureLenChange) {
         // Find the target ChordRest's track.
@@ -393,15 +615,13 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 continue;
             }
             auto* cr = static_cast<ChordRest*>(obj);
-            // Verify this element actually has the DURATION_TYPE_WITH_DOTS
-            // property change (not just any ChangeProperty).
             if (findOldDuration(cr).type != DurationType::V_INVALID) {
                 durationChangeTrack = cr->track();
                 break;
             }
         }
-        // Suppress all AddElement/RemoveElement at the same track — they are
-        // guaranteed side effects of changeCRlen's atomic operation.
+        // Claim all AddElement/RemoveElement at the same track — they
+        // are guaranteed side effects of changeCRlen's atomic operation.
         if (durationChangeTrack != muse::nidx) {
             for (const auto& [obj, cmds] : changedObjects) {
                 if (!obj) {
@@ -417,20 +637,21 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                     || obj->type() == ElementType::REST) {
                     auto* item = static_cast<EngravingItem*>(obj);
                     if (item->track() == durationChangeTrack) {
-                        durationSideEffects.insert(obj);
+                        claimed.insert(obj);
                     }
                 }
             }
         }
     }
 
-    // ── Pre-scan: detect structural voice changes ────────────────────────
+    // ── 1g. Structural voice changes ─────────────────────────────────
     // changeSelectedElementsVoice() removes a chord from one voice and
-    // creates a copy of its note(s) at another voice.  The undo entries are
-    // structural (AddElement/RemoveElement), not ChangeProperty, so Pass 12
-    // won't fire.  Detect this pattern to emit SetVoice instead of
-    // decomposed InsertNote + DeleteNote — the decomposed ops don't
-    // replicate the fill rests changeSelectedElementsVoice creates.
+    // creates a copy of its note(s) at another voice.  The undo entries
+    // are structural (AddElement/RemoveElement), not ChangeProperty, so
+    // the property-based SetVoice handler won't fire.  Detect this
+    // pattern to emit SetVoice instead of decomposed InsertNote +
+    // DeleteNote — the decomposed ops don't replicate the fill rests
+    // changeSelectedElementsVoice creates.
     struct StructuralVoiceChange {
         Note* newNote;
         Chord* oldChord;
@@ -438,7 +659,6 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         QString partUuid;
     };
     QVector<StructuralVoiceChange> structuralVoiceChanges;
-    QSet<EngravingObject*> voiceChangeSideEffects;
     {
         QVector<Chord*> removedChords;
         for (const auto& [obj, cmds] : changedObjects) {
@@ -482,81 +702,32 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 structuralVoiceChanges.append(
                     {newNote, oldChord, oldVoice, partUuid});
 
-                // Suppress all related elements from other passes.
-                voiceChangeSideEffects.insert(newNote);
-                voiceChangeSideEffects.insert(newChord);
-                voiceChangeSideEffects.insert(oldChord);
+                // Claim all related elements from Phase 2.
+                claimed.insert(newNote);
+                claimed.insert(newChord);
+                claimed.insert(oldChord);
                 for (Note* n : oldChord->notes()) {
-                    voiceChangeSideEffects.insert(n);
+                    claimed.insert(n);
                 }
                 for (const auto& [robj, rcmds] : changedObjects) {
                     if (!robj || robj->type() != ElementType::REST) continue;
                     auto* rest = static_cast<Rest*>(robj);
                     if (rest->staffIdx() != oldChord->staffIdx()) continue;
-                    voiceChangeSideEffects.insert(robj);
+                    claimed.insert(robj);
                 }
                 break;
             }
         }
     }
 
-    // ── Pass 2: InsertNote ─────────────────────────────────────────────────
-    // Emit one InsertNote per note. Multi-note chords produce multiple
-    // InsertNote ops at the same (beat, voice, staff) with different pitches;
-    // the server creates the chord implicitly.
-    QSet<EngravingObject*> handledNotes;
-    for (const auto& [chord, notes] : newChordNotes.asKeyValueRange()) {
-        // Skip side-effect elements from voice or duration changes.
-        if (durationSideEffects.contains(chord)
-            || voiceChangeSideEffects.contains(chord)) {
-            continue;
-        }
-        // Skip elements with unsupported duration types (e.g. V_MEASURE for
-        // measure rests created during MuseScore's internal initialisation).
-        if (durationTypeName(chord->durationType().type()) == QLatin1String("unknown")) {
-            continue;
-        }
-        Part* chordPart = chord->staff() ? chord->staff()->part() : nullptr;
-        const QString chordPartUuid = resolvePartUuid(chordPart, lazyAddPartOps);
-        if (chordPartUuid.isEmpty()) {
-            continue; // no part available — skip
-        }
-        for (Note* n : notes) {
-            ops.append(buildInsertNote(n, chordPartUuid));
-            handledNotes.insert(n);
-        }
-    }
+    // ── 1h. Tuplet operations ────────────────────────────────────────
+    // Detect fully-removed and newly-created tuplets.  These feed the
+    // Stream tier (RemoveTuplet, AddTuplet, InsertRest suppression,
+    // DeleteNote suppression).
 
-    // Also emit InsertNote for notes added to existing chords (was Pass 4).
-    for (EngravingObject* obj : notesAddedToExistingChords) {
-        if (handledNotes.contains(obj) || voiceChangeSideEffects.contains(obj)) {
-            continue;
-        }
-        Note* note   = static_cast<Note*>(obj);
-        Chord* chord = note->chord();
-        if (!chord) {
-            continue;
-        }
-        Part* notePart = chord->staff() ? chord->staff()->part() : nullptr;
-        const QString notePartUuid = resolvePartUuid(notePart, lazyAddPartOps);
-        if (notePartUuid.isEmpty()) {
-            LOGD() << "[editude] translateAll: InsertNote (existing chord): "
-                      "part UUID unknown, skipping";
-            continue;
-        }
-        ops.append(buildInsertNote(note, notePartUuid));
-        handledNotes.insert(obj);
-    }
-
-    // ── Pre-scan: identify tuplets being fully removed ──────────────────
-    // cmdDeleteTuplet removes all member ChordRests (via removeChordRest),
-    // which empties the Tuplet's elements() list.  The Tuplet object itself
-    // does NOT get a RemoveElement entry — it's implicitly orphaned.
-    // Detect full removal by finding removed ChordRests whose tuplet()
-    // pointer references a now-empty Tuplet.  This feeds:
-    //   - Pass 3: emit RemoveTuplet op,
-    //   - Pass 4: suppress the replacement rest (created by setRest()),
-    //   - Pass 8: skip individual DeleteNote ops for members.
+    // Fully removed tuplets: cmdDeleteTuplet removes all member
+    // ChordRests, emptying the Tuplet's elements() list.  The Tuplet
+    // object itself does NOT get a RemoveElement entry.
     QSet<Tuplet*> fullyRemovedTuplets;
     QHash<Tuplet*, QVector<EngravingObject*>> removedTupletMembers;
     {
@@ -564,7 +735,8 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             if (!obj || !cmds.count(CommandType::RemoveElement)) {
                 continue;
             }
-            if (obj->type() != ElementType::REST && obj->type() != ElementType::CHORD) {
+            if (obj->type() != ElementType::REST
+                && obj->type() != ElementType::CHORD) {
                 continue;
             }
             auto* cr = static_cast<ChordRest*>(obj);
@@ -574,8 +746,6 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             }
             removedTupletMembers[tup].append(const_cast<EngravingObject*>(obj));
         }
-        // A tuplet whose elements() list is empty after the command has had
-        // all members removed — this is a full tuplet deletion.
         for (auto it = removedTupletMembers.cbegin();
              it != removedTupletMembers.cend(); ++it) {
             if (it.key()->elements().empty()) {
@@ -584,13 +754,8 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pre-scan: identify newly-created tuplets ──────────────────────
-    // cmdCreateTuplet adds the Tuplet object via undoAddElement, producing
-    // an AddElement entry with ElementType::TUPLET.  We need this before
-    // Pass 4 so the fill rest created when the original ChordRest is split
-    // can be suppressed — applyAddTuplet on the peer recreates it via its
-    // own cmdCreateTuplet call.  Also used by Pass 22 (Path A) for reliable
-    // tuplet detection (the member-pointer heuristic can fail after reflow).
+    // Newly created tuplets: cmdCreateTuplet adds the Tuplet object via
+    // undoAddElement, producing an AddElement entry with TUPLET type.
     QSet<Tuplet*> newlyCreatedTuplets;
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || !cmds.count(CommandType::AddElement)) {
@@ -601,76 +766,16 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 static_cast<Tuplet*>(const_cast<EngravingObject*>(obj)));
         }
     }
-    // Diagnostic: log all changed objects with their types and commands
-    // to understand tuplet creation flow.
-    {
-        int restAdd = 0, restRem = 0, chordAdd = 0, tupAdd = 0;
-        int restWithTup = 0;
-        for (const auto& [obj, cmds] : changedObjects) {
-            if (!obj) continue;
-            if (obj->type() == ElementType::REST) {
-                if (cmds.count(CommandType::AddElement)) restAdd++;
-                if (cmds.count(CommandType::RemoveElement)) restRem++;
-                auto* cr = static_cast<ChordRest*>(obj);
-                if (cr->tuplet()) restWithTup++;
-            }
-            if (obj->type() == ElementType::CHORD) {
-                if (cmds.count(CommandType::AddElement)) chordAdd++;
-            }
-            if (obj->type() == ElementType::TUPLET) {
-                if (cmds.count(CommandType::AddElement)) tupAdd++;
-            }
-        }
-        if (restAdd > 0 || restRem > 0 || tupAdd > 0) {
-            LOGD() << "[editude] translateAll pre-scan:"
-                   << "restAdd=" << restAdd << "restRem=" << restRem
-                   << "restWithTup=" << restWithTup
-                   << "chordAdd=" << chordAdd << "tupAdd=" << tupAdd
-                   << "newlyCreatedTuplets=" << newlyCreatedTuplets.size();
-        }
-    }
 
-    // ── Pass 3: RemoveTuplet ───────────────────────────────────────────
-    // RemoveTuplet MUST precede InsertRest (Pass 4) in the op_batch so the
-    // peer applies them in the right order: first delete the tuplet, then
-    // overwrite the resulting V_MEASURE rest with the correct replacement
-    // rest.  Without this, InsertRest fires while the tuplet still exists
-    // on the peer and silently fails.
-    for (Tuplet* tup : fullyRemovedTuplets) {
-        Part* tupPart = static_cast<EngravingItem*>(tup)->part();
-        if (!tupPart) {
-            tupPart = resolvePartFromTrack(
-                tup->track(), m_knownPartUuids);
-        }
-        if (!tupPart) continue;
-        const QString tupPartUuid =
-            resolvePartUuid(tupPart, lazyAddPartOps);
-        if (tupPartUuid.isEmpty()) continue;
-
-        const int voice = voiceFromTrack(tupPart, tup->track());
-        const int staff = staffFromTrack(tupPart, tup->track());
-        ops.append(buildRemoveTuplet(tupPartUuid, tup->tick(),
-                                     voice, staff));
-    }
-
-    // ── Pass 4: InsertRest (with fill-rest suppression) ──────────────────
-    //
-    // setNoteRest() creates the target element AND "fill rests" to pad the
-    // remaining measure duration.  On the peer, applying the primary op
-    // (InsertNote/InsertRest) via setNoteRest produces its own fills, so
-    // emitting InsertRest for fills would double-apply and corrupt the score.
-    //
-    // Suppression rules:
-    //   (a) Pass 2 emitted InsertNote → ALL rests are fills.
-    //   (b) Batch removes Notes (chord deletion creates fill rests) →
-    //       suppress all rests.
-    //   (c) Pure InsertRest: emit only the single rest at the earliest tick;
-    //       the remainder are fills from setNoteRest.
+    // ── 1i. Undo-of-InsertRest heuristic ─────────────────────────────
+    // When more rests are removed than added (with no note involvement),
+    // the user is undoing an InsertRest.  setNoteRest() always creates
+    // fewer elements than it replaces, so the undo reversal produces
+    // more removals than additions.  Suppress InsertRest here; the
+    // Stream tier will emit DeleteRest instead.
     bool isUndoOfInsertRest = false;
     {
         const bool hasNewChords = !newChordNotes.isEmpty();
-
-        // Pre-scan: does this batch remove any Notes or Rests?
         bool hasNoteRemovals = false;
         int removedRestCount = 0;
         int addedRestCount   = 0;
@@ -693,23 +798,165 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 }
             }
         }
-
-        // Undo-of-InsertRest heuristic: when more rests are removed than
-        // added (with no note involvement), the user is undoing an
-        // InsertRest.  setNoteRest() always creates fewer elements than it
-        // replaces, so the undo reversal produces more removals than
-        // additions.  Suppress InsertRest here; Pass 8 will emit
-        // DeleteRest instead.
-        // Don't treat tuplet removal as undo-of-InsertRest: cmdDeleteTuplet
-        // removes N member rests and adds 1 replacement, which matches the
-        // removedRestCount > addedRestCount pattern but is not an undo.
+        // Don't treat tuplet removal as undo-of-InsertRest:
+        // cmdDeleteTuplet removes N member rests and adds 1 replacement,
+        // which matches the removedRestCount > addedRestCount pattern
+        // but is not an undo.
         isUndoOfInsertRest = !hasNewChords && !hasNoteRemovals
             && removedRestCount > 0 && addedRestCount > 0
             && removedRestCount > addedRestCount
             && fullyRemovedTuplets.isEmpty();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // PHASE 2: Per-tier emission on unclaimed objects
+    //
+    // Each tier iterates changedObjects once, skipping objects in the
+    // `claimed` set.  Tiers are processed in dependency order: Parts
+    // first (so server knows about parts before element ops), then
+    // Stream, Decoration, Spanner, Navigation.
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── Parts tier ───────────────────────────────────────────────────
+    // Part management beyond AddPart/RemovePart (handled in Phase 1).
+
+    // SetPartName / SetPartInstrument
+    if (changedPropertyIdSet.count(Pid::STAFF_LONG_NAME)) {
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || obj->type() != ElementType::PART) {
+                continue;
+            }
+            if (!cmds.count(CommandType::ChangeProperty)) {
+                continue;
+            }
+            Part* part = static_cast<Part*>(obj);
+            const QString uuid = m_knownPartUuids.value(part);
+            if (uuid.isEmpty()) {
+                continue;
+            }
+            ops.append(buildSetPartName(uuid, part->partName().toQString()));
+            ops.append(buildSetPartInstrument(uuid, part));
+        }
+    }
+
+    // SetStaffCount (InsertStaff / RemoveStaff)
+    {
+        QSet<Part*> staffChangedParts;
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || obj->type() != ElementType::STAFF) {
+                continue;
+            }
+            if (!cmds.count(CommandType::InsertStaff)
+                && !cmds.count(CommandType::RemoveStaff)) {
+                continue;
+            }
+            auto* staff = static_cast<Staff*>(obj);
+            Part* part = staff->part();
+            if (part && !staffChangedParts.contains(part)
+                && !newlyAddedParts.contains(part)) {
+                staffChangedParts.insert(part);
+                const QString uuid = m_knownPartUuids.value(part);
+                if (!uuid.isEmpty()) {
+                    ops.append(buildSetStaffCount(
+                        uuid, static_cast<int>(part->nstaves())));
+                }
+            }
+        }
+    }
+
+    // ── Stream tier ──────────────────────────────────────────────────
+    // Note/rest content changes on the beat grid.
+
+    // InsertNote
+    QSet<EngravingObject*> handledNotes;
+    for (const auto& [chord, notes] : newChordNotes.asKeyValueRange()) {
+        if (claimed.contains(chord)) {
+            continue;
+        }
+        if (durationTypeName(chord->durationType().type()) == QLatin1String("unknown")) {
+            continue;
+        }
+        Part* chordPart = chord->staff() ? chord->staff()->part() : nullptr;
+        const QString chordPartUuid = resolvePartUuid(chordPart, lazyAddPartOps);
+        if (chordPartUuid.isEmpty()) {
+            continue;
+        }
+        for (Note* n : notes) {
+            ops.append(buildInsertNote(n, chordPartUuid));
+            handledNotes.insert(n);
+        }
+    }
+
+    // InsertNote for notes added to existing chords
+    for (EngravingObject* obj : notesAddedToExistingChords) {
+        if (handledNotes.contains(obj) || claimed.contains(obj)) {
+            continue;
+        }
+        Note* note   = static_cast<Note*>(obj);
+        Chord* chord = note->chord();
+        if (!chord) {
+            continue;
+        }
+        Part* notePart = chord->staff() ? chord->staff()->part() : nullptr;
+        const QString notePartUuid = resolvePartUuid(notePart, lazyAddPartOps);
+        if (notePartUuid.isEmpty()) {
+            LOGD() << "[editude] translateAll: InsertNote (existing chord): "
+                      "part UUID unknown, skipping";
+            continue;
+        }
+        ops.append(buildInsertNote(note, notePartUuid));
+        handledNotes.insert(obj);
+    }
+
+    // RemoveTuplet — MUST precede InsertRest so the peer applies them
+    // in the right order: delete tuplet first, then overwrite the
+    // resulting V_MEASURE rest with the correct replacement rest.
+    for (Tuplet* tup : fullyRemovedTuplets) {
+        Part* tupPart = static_cast<EngravingItem*>(tup)->part();
+        if (!tupPart) {
+            tupPart = resolvePartFromTrack(
+                tup->track(), m_knownPartUuids);
+        }
+        if (!tupPart) continue;
+        const QString tupPartUuid =
+            resolvePartUuid(tupPart, lazyAddPartOps);
+        if (tupPartUuid.isEmpty()) continue;
+
+        const int voice = voiceFromTrack(tupPart, tup->track());
+        const int staff = staffFromTrack(tupPart, tup->track());
+        ops.append(buildRemoveTuplet(tupPartUuid, tup->tick(),
+                                     voice, staff));
+    }
+
+    // InsertRest (with fill-rest suppression)
+    //
+    // setNoteRest() creates the target element AND "fill rests" to pad
+    // the remaining measure duration.  On the peer, applying the primary
+    // op (InsertNote/InsertRest) via setNoteRest produces its own fills,
+    // so emitting InsertRest for fills would double-apply.
+    //
+    // Suppression rules:
+    //   (a) Pass 1a grouped new notes → ALL rests are fills.
+    //   (b) Batch removes Notes (chord deletion creates fill rests) →
+    //       suppress all rests.
+    //   (c) Pure InsertRest: emit only the single rest at the earliest
+    //       tick; the remainder are fills from setNoteRest.
+    {
+        const bool hasNewChords = !newChordNotes.isEmpty();
+
+        bool hasNoteRemovals = false;
+        if (!hasNewChords) {
+            for (const auto& [obj, cmds] : changedObjects) {
+                if (!obj) continue;
+                if (obj->type() == ElementType::NOTE
+                    && cmds.count(CommandType::RemoveElement)) {
+                    hasNoteRemovals = true;
+                    break;
+                }
+            }
+        }
 
         if (!hasNewChords && !hasNoteRemovals && !isUndoOfInsertRest) {
-            // Collect valid InsertRest candidates.
             struct RestCandidate {
                 Rest* rest;
                 Fraction tick;
@@ -724,9 +971,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 if (obj->type() != ElementType::REST) {
                     continue;
                 }
-                // Skip side-effect rests from voice or duration changes.
-                if (durationSideEffects.contains(obj)
-                    || voiceChangeSideEffects.contains(obj)) {
+                if (claimed.contains(obj)) {
                     continue;
                 }
                 Rest* rest = static_cast<Rest*>(obj);
@@ -734,19 +979,11 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                     == QLatin1String("unknown")) {
                     continue;
                 }
-                // Skip rests inside tuplets — Pass 22 handles them.
+                // Skip rests inside tuplets — AddTuplet handles them.
                 if (rest->tuplet()) {
                     continue;
                 }
-                // Emit replacement rests created by cmdDeleteTuplet as
-                // explicit InsertRest ops.  The peer's applyRemoveTuplet
-                // creates a V_MEASURE rest (via cleanup); this InsertRest
-                // overwrites it with the correct specific-duration rest.
                 // Skip fill rests that are side effects of tuplet creation.
-                // cmdCreateTuplet splits the target ChordRest; the portion
-                // not consumed by the tuplet becomes a new rest.  The peer's
-                // applyAddTuplet creates this rest implicitly via its own
-                // cmdCreateTuplet call.
                 if (!newlyCreatedTuplets.isEmpty()) {
                     bool isTupletFillRest = false;
                     for (Tuplet* tup : newlyCreatedTuplets) {
@@ -779,179 +1016,72 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 ops.append(buildInsertRest(c.rest, c.partUuid));
             }
         }
-        // else: hasNewChords || hasNoteRemovals — all rests are fill rests
-        // created as side effects; skip the entire pass.
     }
 
-    // ── Pass 5: ELIMINATED ──────────────────────────────────────────────
-    // Notes added to existing chords are now emitted as InsertNote in Pass 2.
-
-    // ── Pass 6: AddPart / RemovePart ────────────────────────────────────
-    // Must run BEFORE the emittedTimeSig early return (Pass 7) because
-    // adding a part creates staves whose TimeSig/KeySig/Clef elements
-    // appear in the same batch.  Without this, the TimeSig early return
-    // would suppress the AddPart op entirely.
-    //
-    // Track newly-added Parts: Pass 14 must skip SetStaffCount for these
-    // because AddPart already carries the staff_count field.
-    QSet<Part*> newlyAddedParts;
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::PART) {
-            continue;
-        }
-        Part* part = static_cast<Part*>(obj);
-        if (cmds.count(CommandType::AddElement)
-            || cmds.count(CommandType::InsertPart)) {
-            const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-            m_knownPartUuids[part] = uuid;
-            ops.append(buildAddPart(part, uuid));
-            newlyAddedParts.insert(part);
-        } else if (cmds.count(CommandType::RemoveElement)
-                   || cmds.count(CommandType::RemovePart)) {
-            const QString uuid = m_knownPartUuids.value(part);
-            if (!uuid.isEmpty()) {
-                m_knownPartUuids.remove(part);
-                ops.append(buildRemovePart(uuid));
-            }
-        }
-    }
-
-    // ── Pass 7: SetTimeSignature & SetTempo ──────────────────────────────
-    // A TimeSig may appear with AddElement (new time sig added) OR
-    // ChangeProperty (existing time sig modified by cmdAddTimeSig).
-    //
-    // Important: when a staff is added (InsertStaff/InsertPart), MuseScore's
-    // cmdAddStaves replicates the existing TimeSig to the new staff via
-    // undoAddElement(timesig).  This is a REPLICATION, not a genuine time
-    // signature change.  We must NOT emit SetTimeSignature or trigger the
-    // compound-op early return for these replications.
-    bool batchHasStaffInsert = false;
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj) {
-            continue;
-        }
-        if (obj->type() == ElementType::STAFF
-            && (cmds.count(CommandType::InsertStaff)
-                || cmds.count(CommandType::RemoveStaff))) {
-            batchHasStaffInsert = true;
-            break;
-        }
-        if (obj->type() == ElementType::PART
-            && (cmds.count(CommandType::InsertPart)
-                || cmds.count(CommandType::AddElement))) {
-            batchHasStaffInsert = true;
-            break;
-        }
-    }
-
-    bool emittedTimeSig = false;
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj) {
-            continue;
-        }
-        if (obj->type() == ElementType::TIMESIG) {
-            const bool isGenuine =
-                cmds.count(CommandType::ChangeProperty)
-                || (cmds.count(CommandType::AddElement) && !batchHasStaffInsert);
-            if (isGenuine) {
-                auto* ts = toTimeSig(static_cast<EngravingItem*>(obj));
-                if (ts) {
-                    ops.append(buildSetTimeSignature(ts));
-                    emittedTimeSig = true;
-                }
-            }
-        }
-        if (obj->type() == ElementType::TEMPO_TEXT
-            && cmds.count(CommandType::AddElement)) {
-            ops.append(buildSetTempo(static_cast<TempoText*>(obj)));
-        }
-    }
-
-    // SetTimeSignature is a compound op: cmdAddTimeSig on the receiver
-    // calls rewriteMeasures which restructures measure boundaries, creates/
-    // removes rests, etc.  All other changes in this batch are side effects
-    // and must NOT be emitted.
-    if (emittedTimeSig) {
-        if (!lazyAddPartOps.isEmpty()) {
-            QVector<QJsonObject> result = lazyAddPartOps;
-            result.append(ops);
-            return result;
-        }
-        return ops;
-    }
-
-    // ── Pass 8: DeleteNote ──────────────────────────────────────────────
-    // Identify which chords/rests are being fully removed in this transaction.
-
-    // [editude] Diagnostic: dump all changedObjects for delete debugging.
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj) continue;
-        QStringList cmdNames;
-        for (auto c : cmds) {
-            cmdNames.append(QString::number(static_cast<int>(c)));
-        }
-        LOGW() << "[editude] Pass8 changedObj: type="
-               << static_cast<int>(obj->type())
-               << " cmds=[" << cmdNames.join(",") << "]";
-    }
-
-    QSet<EngravingObject*> removedChordsAndRests;
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || !cmds.count(CommandType::RemoveElement)) {
-            continue;
-        }
-        // Skip side-effect removals from voice or duration changes.
-        if (durationSideEffects.contains(obj)
-            || voiceChangeSideEffects.contains(obj)) {
-            continue;
-        }
-        if (obj->type() == ElementType::CHORD) {
-            // Skip grace chords — they are handled by Pass 34 (RemoveGraceNote).
-            if (static_cast<Chord*>(obj)->isGrace()) {
+    // DeleteNote / DeleteRest
+    {
+        QSet<EngravingObject*> removedChordsAndRests;
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::RemoveElement)) {
                 continue;
             }
-            removedChordsAndRests.insert(obj);
-        } else if (obj->type() == ElementType::REST) {
-            removedChordsAndRests.insert(obj);
-        }
-    }
-
-    LOGW() << "[editude] Pass8: removedChordsAndRests=" << removedChordsAndRests.size();
-
-    QSet<EngravingObject*> emittedRemovals; // guard against double-emitting
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || !cmds.count(CommandType::RemoveElement)) {
-            continue;
-        }
-
-        if (obj->type() == ElementType::NOTE) {
-            Note* note   = static_cast<Note*>(obj);
-            Chord* chord = note->chord();
-
-            // Skip side-effect note removals from voice or duration changes.
-            if (durationSideEffects.contains(obj)
-                || voiceChangeSideEffects.contains(obj)
-                || (chord && (durationSideEffects.contains(chord)
-                              || voiceChangeSideEffects.contains(chord)))) {
+            if (claimed.contains(obj)) {
                 continue;
             }
-
-            // Skip notes belonging to grace chords — handled by Pass 34.
-            if (chord && chord->isGrace()) {
-                continue;
-            }
-
-            if (chord && removedChordsAndRests.contains(chord)) {
-                // Skip chords that are members of a fully-removed tuplet —
-                // RemoveTuplet (Pass 3) handles them atomically.
-                if (chord->tuplet()
-                    && fullyRemovedTuplets.contains(chord->tuplet())) {
+            if (obj->type() == ElementType::CHORD) {
+                if (static_cast<Chord*>(obj)->isGrace()) {
                     continue;
                 }
-                // The whole chord is being removed. Emit one DeleteNote
-                // per note in the chord.
-                if (!emittedRemovals.contains(chord)) {
-                    emittedRemovals.insert(chord);
+                removedChordsAndRests.insert(obj);
+            } else if (obj->type() == ElementType::REST) {
+                removedChordsAndRests.insert(obj);
+            }
+        }
+
+        QSet<EngravingObject*> emittedRemovals;
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::RemoveElement)) {
+                continue;
+            }
+
+            if (obj->type() == ElementType::NOTE) {
+                Note* note   = static_cast<Note*>(obj);
+                Chord* chord = note->chord();
+
+                if (claimed.contains(obj)
+                    || (chord && claimed.contains(chord))) {
+                    continue;
+                }
+                if (chord && chord->isGrace()) {
+                    continue;
+                }
+
+                if (chord && removedChordsAndRests.contains(chord)) {
+                    if (chord->tuplet()
+                        && fullyRemovedTuplets.contains(chord->tuplet())) {
+                        continue;
+                    }
+                    if (!emittedRemovals.contains(chord)) {
+                        emittedRemovals.insert(chord);
+                        Part* notePart = chord->staff()
+                                         ? chord->staff()->part() : nullptr;
+                        if (!notePart) {
+                            notePart = resolvePartFromTrack(
+                                chord->track(), m_knownPartUuids);
+                        }
+                        if (!notePart) {
+                            continue;
+                        }
+                        const QString partUuid =
+                            resolvePartUuid(notePart, lazyAddPartOps);
+                        if (partUuid.isEmpty()) {
+                            continue;
+                        }
+                        for (Note* n : chord->notes()) {
+                            ops.append(buildDeleteNote(n, partUuid));
+                        }
+                    }
+                } else if (chord) {
                     Part* notePart = chord->staff()
                                      ? chord->staff()->part() : nullptr;
                     if (!notePart) {
@@ -963,16 +1093,27 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                     }
                     const QString partUuid =
                         resolvePartUuid(notePart, lazyAddPartOps);
-                    if (partUuid.isEmpty()) {
-                        continue;
-                    }
-                    // Emit DeleteNote for each note in the chord.
-                    for (Note* n : chord->notes()) {
-                        ops.append(buildDeleteNote(n, partUuid));
+                    if (!partUuid.isEmpty()) {
+                        ops.append(buildDeleteNote(note, partUuid));
                     }
                 }
-            } else if (chord) {
-                // Note removed from a still-alive chord → also DeleteNote.
+            }
+
+            // Handle chords that have RemoveElement but whose individual
+            // notes do NOT have their own RemoveElement entries.
+            if (obj->type() == ElementType::CHORD
+                && removedChordsAndRests.contains(obj)
+                && !emittedRemovals.contains(obj)
+                && !claimed.contains(obj)) {
+                Chord* chord = static_cast<Chord*>(obj);
+                if (chord->isGrace()) {
+                    continue;
+                }
+                if (chord->tuplet()
+                    && fullyRemovedTuplets.contains(chord->tuplet())) {
+                    continue;
+                }
+                emittedRemovals.insert(obj);
                 Part* notePart = chord->staff()
                                  ? chord->staff()->part() : nullptr;
                 if (!notePart) {
@@ -985,92 +1126,45 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 const QString partUuid =
                     resolvePartUuid(notePart, lazyAddPartOps);
                 if (!partUuid.isEmpty()) {
-                    ops.append(buildDeleteNote(note, partUuid));
+                    for (Note* n : chord->notes()) {
+                        ops.append(buildDeleteNote(n, partUuid));
+                    }
                 }
             }
         }
 
-        // Handle chords that have RemoveElement but whose individual notes
-        // do NOT have their own RemoveElement entries in changedObjects.
-        // This happens when cmdDeleteSelection() calls removeChordRest()
-        // on a single-note chord — only the chord gets the undo command.
-        if (obj->type() == ElementType::CHORD
-            && removedChordsAndRests.contains(obj)
-            && !emittedRemovals.contains(obj)
-            && !voiceChangeSideEffects.contains(obj)) {
-            Chord* chord = static_cast<Chord*>(obj);
-            LOGW() << "[editude] Pass8 CHORD handler: chord=" << (void*)chord
-                   << " notes=" << chord->notes().size()
-                   << " isGrace=" << chord->isGrace();
-            if (chord->isGrace()) {
-                continue;
+        // Undo-of-InsertRest: emit a single DeleteRest for the removed
+        // rest at the earliest tick.
+        if (isUndoOfInsertRest) {
+            Rest* earliest = nullptr;
+            Fraction earliestTick = Fraction(INT_MAX, 1);
+            for (EngravingObject* removedObj : removedChordsAndRests) {
+                if (removedObj->type() != ElementType::REST) {
+                    continue;
+                }
+                Rest* r = static_cast<Rest*>(removedObj);
+                if (r->tick() < earliestTick) {
+                    earliestTick = r->tick();
+                    earliest = r;
+                }
             }
-            if (chord->tuplet()
-                && fullyRemovedTuplets.contains(chord->tuplet())) {
-                LOGW() << "[editude] Pass8 CHORD handler: skipped (in removed tuplet)";
-                continue;
-            }
-            emittedRemovals.insert(obj);
-            Part* notePart = chord->staff()
-                             ? chord->staff()->part() : nullptr;
-            if (!notePart) {
-                notePart = resolvePartFromTrack(
-                    chord->track(), m_knownPartUuids);
-            }
-            if (!notePart) {
-                LOGW() << "[editude] Pass8 CHORD handler: no part found";
-                continue;
-            }
-            const QString partUuid =
-                resolvePartUuid(notePart, lazyAddPartOps);
-            LOGW() << "[editude] Pass8 CHORD handler: partUuid="
-                   << partUuid << " emitting " << chord->notes().size() << " DeleteNote ops";
-            if (!partUuid.isEmpty()) {
-                for (Note* n : chord->notes()) {
-                    ops.append(buildDeleteNote(n, partUuid));
+            if (earliest) {
+                Part* restPart = earliest->staff()
+                                 ? earliest->staff()->part() : nullptr;
+                if (!restPart) {
+                    restPart = resolvePartFromTrack(
+                        earliest->track(), m_knownPartUuids);
+                }
+                const QString partUuid =
+                    resolvePartUuid(restPart, lazyAddPartOps);
+                if (!partUuid.isEmpty()) {
+                    ops.append(buildDeleteRest(earliest, partUuid));
                 }
             }
         }
-
     }
 
-    // Rests: normally skip (they are implicit fill rests).  But when
-    // Pass 4 detected an undo-of-InsertRest, emit a single DeleteRest for
-    // the removed rest at the earliest tick (the primary rest that was
-    // originally inserted).  This block runs OUTSIDE the per-element loop
-    // so it only emits once.
-    if (isUndoOfInsertRest) {
-        Rest* earliest = nullptr;
-        Fraction earliestTick = Fraction(INT_MAX, 1);
-        for (EngravingObject* removedObj : removedChordsAndRests) {
-            if (removedObj->type() != ElementType::REST) {
-                continue;
-            }
-            Rest* r = static_cast<Rest*>(removedObj);
-            if (r->tick() < earliestTick) {
-                earliestTick = r->tick();
-                earliest = r;
-            }
-        }
-        if (earliest) {
-            Part* restPart = earliest->staff()
-                             ? earliest->staff()->part() : nullptr;
-            if (!restPart) {
-                restPart = resolvePartFromTrack(
-                    earliest->track(), m_knownPartUuids);
-            }
-            const QString partUuid =
-                resolvePartUuid(restPart, lazyAddPartOps);
-            if (!partUuid.isEmpty()) {
-                ops.append(buildDeleteRest(earliest, partUuid));
-            }
-        }
-    }
-
-    // ── Pass 9: ChangePitch → SetPitch ─────────────────────────────────────
-    // Accept both CommandType::ChangePitch (interactive pitch change via
-    // Score::changePitch) and CommandType::ChangeProperty with Pid::PITCH
-    // (programmatic pitch change via undoChangeProperty).
+    // SetPitch
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::NOTE) {
             continue;
@@ -1093,20 +1187,17 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         if (partUuid.isEmpty()) {
             continue;
         }
-        // Build old pitch JSON from the undo stack.
         const int oldMidi = findOldMidiPitch(note);
         QJsonObject oldPitch;
         if (oldMidi >= 0) {
             oldPitch = pitchJsonFromMidi(oldMidi);
         } else {
-            // Fallback: use current pitch (will produce a no-op on the server).
-            // TODO: improve old pitch extraction during testing.
             oldPitch = pitchJsonFromNote(note);
         }
         ops.append(buildSetPitch(note, partUuid, oldPitch));
     }
 
-    // ── Pass 10: ChangeProperty + Pid::FRET/STRING → SetTabNote ─────────
+    // SetTabNote
     if (changedPropertyIdSet.count(Pid::FRET)
         || changedPropertyIdSet.count(Pid::STRING)) {
         for (const auto& [obj, cmds] : changedObjects) {
@@ -1134,7 +1225,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 11: ChangeProperty + Pid::HEAD_GROUP → SetNoteHead ─────────
+    // SetNoteHead
     if (changedPropertyIdSet.count(Pid::HEAD_GROUP)) {
         for (const auto& [obj, cmds] : changedObjects) {
             if (!obj || obj->type() != ElementType::NOTE) {
@@ -1161,9 +1252,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 12: ChangeProperty + Pid::VOICE or Pid::TRACK → SetVoice ───
-    // The inspector path uses Pid::VOICE; the programmatic path (and test
-    // driver) uses Pid::TRACK.  Both represent a voice change.
+    // SetVoice (property-based: Pid::VOICE or Pid::TRACK)
     if (changedPropertyIdSet.count(Pid::VOICE)
         || changedPropertyIdSet.count(Pid::TRACK)) {
         for (const auto& [obj, cmds] : changedObjects) {
@@ -1191,63 +1280,18 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             }
             const int oldVoice = findOldVoice(item, itemPart);
             if (oldVoice < 0) {
-                continue; // cannot determine old voice — skip
+                continue;
             }
             ops.append(buildSetVoice(item, partUuid, oldVoice));
         }
     }
 
-    // Structural voice changes (from changeSelectedElementsVoice) detected
-    // by the pre-scan — emit SetVoice for each.
+    // SetVoice (structural voice changes from Phase 1g)
     for (const auto& vc : structuralVoiceChanges) {
         ops.append(buildSetVoice(vc.newNote, vc.partUuid, vc.oldVoice));
     }
 
-    // ── Pass 13: SetPartName / SetPartInstrument ────────────────────────
-    if (changedPropertyIdSet.count(Pid::STAFF_LONG_NAME)) {
-        for (const auto& [obj, cmds] : changedObjects) {
-            if (!obj || obj->type() != ElementType::PART) {
-                continue;
-            }
-            if (!cmds.count(CommandType::ChangeProperty)) {
-                continue;
-            }
-            Part* part = static_cast<Part*>(obj);
-            const QString uuid = m_knownPartUuids.value(part);
-            if (uuid.isEmpty()) {
-                continue;
-            }
-            ops.append(buildSetPartName(uuid, part->partName().toQString()));
-            ops.append(buildSetPartInstrument(uuid, part));
-        }
-    }
-
-    // ── Pass 14: SetStaffCount (InsertStaff / RemoveStaff) ────────────────
-    {
-        QSet<Part*> staffChangedParts;
-        for (const auto& [obj, cmds] : changedObjects) {
-            if (!obj || obj->type() != ElementType::STAFF) {
-                continue;
-            }
-            if (!cmds.count(CommandType::InsertStaff)
-                && !cmds.count(CommandType::RemoveStaff)) {
-                continue;
-            }
-            auto* staff = static_cast<Staff*>(obj);
-            Part* part = staff->part();
-            if (part && !staffChangedParts.contains(part)
-                && !newlyAddedParts.contains(part)) {
-                staffChangedParts.insert(part);
-                const QString uuid = m_knownPartUuids.value(part);
-                if (!uuid.isEmpty()) {
-                    ops.append(buildSetStaffCount(
-                        uuid, static_cast<int>(part->nstaves())));
-                }
-            }
-        }
-    }
-
-    // ── Pass 15: SetTie ───────────────────────────────────────────────────
+    // SetTie
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::TIE) {
             continue;
@@ -1273,7 +1317,147 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 16: ChordSymbol ──────────────────────────────────────────────
+    // AddTuplet (RemoveTuplet already emitted above)
+    {
+        QSet<Tuplet*> handledTuplets;
+
+        // Path A: Detect new tuplets directly via AddElement on Tuplet.
+        for (Tuplet* tup : newlyCreatedTuplets) {
+            if (handledTuplets.contains(tup)) {
+                continue;
+            }
+            handledTuplets.insert(tup);
+
+            Part* tupPart = static_cast<EngravingItem*>(tup)->part();
+            if (!tupPart) continue;
+            const QString tupPartUuid =
+                resolvePartUuid(tupPart, lazyAddPartOps);
+            if (tupPartUuid.isEmpty()) continue;
+
+            ops.append(buildAddTuplet(tup, tupPartUuid,
+                                      tup->ratio().numerator(),
+                                      tup->ratio().denominator()));
+        }
+
+        // Path B (fallback): Detect new tuplets via their members.
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::AddElement)) {
+                continue;
+            }
+            if (obj->type() != ElementType::REST
+                && obj->type() != ElementType::CHORD) {
+                continue;
+            }
+            auto* cr = static_cast<ChordRest*>(obj);
+            Tuplet* tup = cr->tuplet();
+            if (!tup || handledTuplets.contains(tup)) {
+                continue;
+            }
+            bool allMembersTracked = true;
+            int membersWithAdd = 0;
+            for (DurationElement* elem : tup->elements()) {
+                auto memberIt = changedObjects.find(elem);
+                if (memberIt == changedObjects.end()) {
+                    allMembersTracked = false;
+                    break;
+                }
+                if (memberIt->second.count(CommandType::AddElement)) {
+                    membersWithAdd++;
+                }
+            }
+            if (!allMembersTracked || membersWithAdd == 0) {
+                continue;
+            }
+            handledTuplets.insert(tup);
+
+            Part* tupPart = static_cast<EngravingItem*>(tup)->part();
+            if (!tupPart) continue;
+            const QString tupPartUuid =
+                resolvePartUuid(tupPart, lazyAddPartOps);
+            if (tupPartUuid.isEmpty()) continue;
+
+            ops.append(buildAddTuplet(tup, tupPartUuid,
+                                      tup->ratio().numerator(),
+                                      tup->ratio().denominator()));
+        }
+    }
+
+    // AddGraceNote / RemoveGraceNote
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::CHORD) {
+            continue;
+        }
+        auto* chord = static_cast<Chord*>(obj);
+        if (!chord->isGrace()) {
+            continue;
+        }
+        if (cmds.count(CommandType::AddElement)) {
+            Chord* parentChord = toChord(chord->explicitParent());
+            if (!parentChord) continue;
+            Part* gnPart = chord->staff() ? chord->staff()->part() : nullptr;
+            if (!gnPart) {
+                gnPart = resolvePartFromTrack(
+                    chord->track(), m_knownPartUuids);
+            }
+            if (!gnPart) continue;
+            const QString gnPartUuid =
+                resolvePartUuid(gnPart, lazyAddPartOps);
+            if (gnPartUuid.isEmpty()) continue;
+            ops.append(buildAddGraceNote(chord, gnPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            Part* gnPart = chord->staff() ? chord->staff()->part() : nullptr;
+            if (!gnPart) {
+                gnPart = resolvePartFromTrack(
+                    chord->track(), m_knownPartUuids);
+            }
+            if (!gnPart) continue;
+            const QString gnPartUuid =
+                resolvePartUuid(gnPart, lazyAddPartOps);
+            if (gnPartUuid.isEmpty()) continue;
+            const int voice = voiceFromTrack(gnPart, chord->track());
+            const int staff = staffFromTrack(gnPart, chord->track());
+            ops.append(buildRemoveGraceNote(gnPartUuid, chord->tick(),
+                                            voice, staff,
+                                            static_cast<int>(chord->graceIndex())));
+        }
+    }
+
+    // SetDuration
+    if (changedPropertyIdSet.count(Pid::DURATION_TYPE_WITH_DOTS)
+        && !hasMeasureLenChange) {
+        for (const auto& [obj, cmds] : changedObjects) {
+            if (!obj || !cmds.count(CommandType::ChangeProperty)) {
+                continue;
+            }
+            if (obj->type() != ElementType::CHORD
+                && obj->type() != ElementType::REST) {
+                continue;
+            }
+            ChordRest* cr = static_cast<ChordRest*>(obj);
+            const DurationTypeWithDots oldDur = findOldDuration(cr);
+            if (oldDur.type == DurationType::V_INVALID) {
+                continue;
+            }
+            Part* crPart = cr->staff() ? cr->staff()->part() : nullptr;
+            if (!crPart) {
+                crPart = resolvePartFromTrack(cr->track(), m_knownPartUuids);
+            }
+            if (!crPart) {
+                continue;
+            }
+            const QString partUuid =
+                resolvePartUuid(crPart, lazyAddPartOps);
+            if (partUuid.isEmpty()) {
+                continue;
+            }
+            ops.append(buildSetDuration(cr, partUuid));
+        }
+    }
+
+    // ── Decoration tier ──────────────────────────────────────────────
+    // Annotations on existing events and score-level directives.
+
+    // ChordSymbol
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::HARMONY) {
             continue;
@@ -1294,7 +1478,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 17: SetKeySignature & SetClef ───────────────────────────────
+    // SetKeySignature / SetClef
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj) {
             continue;
@@ -1349,7 +1533,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 18: Articulations ───────────────────────────────────────────
+    // Articulations
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::ARTICULATION) {
             continue;
@@ -1367,8 +1551,6 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             const QString artPartUuid =
                 resolvePartUuid(artPart, lazyAddPartOps);
             if (artPartUuid.isEmpty()) continue;
-            // For note-anchored articulations, find the first note in the
-            // chord to use as the coordinate anchor.
             Note* anchorNote = nullptr;
             if (cr->isChord()) {
                 Chord* ch = toChord(static_cast<EngravingItem*>(cr));
@@ -1400,7 +1582,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 19: Dynamics ────────────────────────────────────────────────
+    // Dynamics
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::DYNAMIC) {
             continue;
@@ -1425,154 +1607,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 20: Slurs ───────────────────────────────────────────────────
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::SLUR) {
-            continue;
-        }
-        auto* slur = static_cast<Slur*>(obj);
-        if (cmds.count(CommandType::AddElement)) {
-            Part* slurPart = static_cast<EngravingItem*>(slur)->part();
-            if (!slurPart) {
-                slurPart = resolvePartFromTrack(
-                    slur->track(), m_knownPartUuids);
-            }
-            if (!slurPart) continue;
-            const QString slurPartUuid =
-                resolvePartUuid(slurPart, lazyAddPartOps);
-            if (slurPartUuid.isEmpty()) continue;
-            ops.append(buildAddSlur(slur, slurPartUuid));
-        } else if (cmds.count(CommandType::RemoveElement)) {
-            Part* slurPart = static_cast<EngravingItem*>(slur)->part();
-            if (!slurPart) {
-                slurPart = resolvePartFromTrack(
-                    slur->track(), m_knownPartUuids);
-            }
-            if (!slurPart) continue;
-            const QString slurPartUuid =
-                resolvePartUuid(slurPart, lazyAddPartOps);
-            if (slurPartUuid.isEmpty()) continue;
-            ops.append(buildRemoveSlur(slur, slurPartUuid));
-        }
-    }
-
-    // ── Pass 21: Hairpins ────────────────────────────────────────────────
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::HAIRPIN) {
-            continue;
-        }
-        auto* hp = static_cast<Hairpin*>(obj);
-        Part* hpPart = static_cast<EngravingItem*>(hp)->part();
-        if (!hpPart) {
-            hpPart = resolvePartFromTrack(hp->track(), m_knownPartUuids);
-        }
-        if (!hpPart) continue;
-        const QString hpPartUuid = resolvePartUuid(hpPart, lazyAddPartOps);
-        if (hpPartUuid.isEmpty()) continue;
-
-        if (cmds.count(CommandType::AddElement)) {
-            ops.append(buildAddHairpin(hp, hpPartUuid,
-                                       hp->tick(), hp->tick2(),
-                                       hp->isCrescendo()));
-        } else if (cmds.count(CommandType::RemoveElement)) {
-            ops.append(buildRemoveHairpin(hpPartUuid,
-                                          hp->tick(), hp->tick2(),
-                                          hp->isCrescendo()
-                                              ? QStringLiteral("crescendo")
-                                              : QStringLiteral("diminuendo")));
-        }
-    }
-
-    // ── Pass 22: AddTuplet ────────────────────────────────────────────────
-    // RemoveTuplet is emitted earlier (Pass 3) so it precedes InsertRest.
-    {
-        QSet<Tuplet*> handledTuplets;
-
-        // Path A: Detect new tuplets directly via AddElement on the Tuplet.
-        // cmdCreateTuplet calls undoAddElement(tuplet), producing an entry
-        // with ElementType::TUPLET.  This is more reliable than the member-
-        // based heuristic (Path B) because member pointers in
-        // tup->elements() may differ from those originally stored in
-        // changedObjects after layout reflow.
-        for (Tuplet* tup : newlyCreatedTuplets) {
-            if (handledTuplets.contains(tup)) {
-                continue;
-            }
-            handledTuplets.insert(tup);
-
-            Part* tupPart = static_cast<EngravingItem*>(tup)->part();
-            if (!tupPart) continue;
-            const QString tupPartUuid =
-                resolvePartUuid(tupPart, lazyAddPartOps);
-            if (tupPartUuid.isEmpty()) continue;
-
-            ops.append(buildAddTuplet(tup, tupPartUuid,
-                                      tup->ratio().numerator(),
-                                      tup->ratio().denominator()));
-        }
-
-        // Path B (fallback): Detect new tuplets via their members.
-        // Handles edge cases where the Tuplet object itself does not appear
-        // in changedObjects with AddElement.
-        for (const auto& [obj, cmds] : changedObjects) {
-            if (!obj || !cmds.count(CommandType::AddElement)) {
-                continue;
-            }
-            if (obj->type() != ElementType::REST
-                && obj->type() != ElementType::CHORD) {
-                continue;
-            }
-            auto* cr = static_cast<ChordRest*>(obj);
-            Tuplet* tup = cr->tuplet();
-            if (!tup || handledTuplets.contains(tup)) {
-                continue;
-            }
-            // Check if this tuplet is genuinely new: all members should
-            // be present in changedObjects (with any command type — the
-            // first member may be the modified original ChordRest, which
-            // has ChangeProperty instead of AddElement).  At least one
-            // member must have AddElement.
-            bool allMembersTracked = true;
-            int membersWithAdd = 0;
-            int totalMembers = 0;
-            for (DurationElement* elem : tup->elements()) {
-                totalMembers++;
-                auto memberIt = changedObjects.find(elem);
-                if (memberIt == changedObjects.end()) {
-                    allMembersTracked = false;
-                    LOGD() << "[editude] Pass22B: member" << totalMembers
-                           << "not in changedObjects, ptr="
-                           << static_cast<void*>(elem)
-                           << "type=" << static_cast<int>(elem->type());
-                    break;
-                }
-                if (memberIt->second.count(CommandType::AddElement)) {
-                    membersWithAdd++;
-                }
-            }
-            LOGD() << "[editude] Pass22B: tup at"
-                   << tup->tick().toString()
-                   << "totalMembers=" << totalMembers
-                   << "withAdd=" << membersWithAdd
-                   << "allTracked=" << allMembersTracked;
-            if (!allMembersTracked || membersWithAdd == 0) {
-                continue;
-            }
-            handledTuplets.insert(tup);
-
-            Part* tupPart = static_cast<EngravingItem*>(tup)->part();
-            if (!tupPart) continue;
-            const QString tupPartUuid =
-                resolvePartUuid(tupPart, lazyAddPartOps);
-            if (tupPartUuid.isEmpty()) continue;
-
-            ops.append(buildAddTuplet(tup, tupPartUuid,
-                                      tup->ratio().numerator(),
-                                      tup->ratio().denominator()));
-        }
-    }
-
-    // ── Pass 23: Lyrics ──────────────────────────────────────────────────
+    // Lyrics
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::LYRICS) {
             continue;
@@ -1633,7 +1668,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 24: Staff Text (part-scoped) ──────────────────────────────
+    // Staff Text (part-scoped)
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::STAFF_TEXT) {
             continue;
@@ -1661,7 +1696,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 25: System Text (score-global) ─────────────────────────────
+    // System Text (score-global)
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::SYSTEM_TEXT) {
             continue;
@@ -1679,7 +1714,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 26: Rehearsal Mark (score-global) ──────────────────────────
+    // Rehearsal Mark (score-global)
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::REHEARSAL_MARK) {
             continue;
@@ -1697,152 +1732,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 27: Octave Lines (part-scoped, beat-range) ────────────────
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::OTTAVA) {
-            continue;
-        }
-        auto* ottava = static_cast<Ottava*>(obj);
-        Part* ottavaPart = static_cast<EngravingItem*>(ottava)->part();
-        if (!ottavaPart) {
-            ottavaPart = resolvePartFromTrack(
-                ottava->track(), m_knownPartUuids);
-        }
-        if (!ottavaPart) continue;
-        const QString ottavaPartUuid =
-            resolvePartUuid(ottavaPart, lazyAddPartOps);
-        if (ottavaPartUuid.isEmpty()) continue;
-
-        if (cmds.count(CommandType::AddElement)) {
-            ops.append(buildAddOctaveLine(ottava, ottavaPartUuid));
-        } else if (cmds.count(CommandType::RemoveElement)) {
-            QString ottavaKind;
-            switch (ottava->ottavaType()) {
-            case OttavaType::OTTAVA_8VA:  ottavaKind = QStringLiteral("8va");  break;
-            case OttavaType::OTTAVA_8VB:  ottavaKind = QStringLiteral("8vb");  break;
-            case OttavaType::OTTAVA_15MA: ottavaKind = QStringLiteral("15ma"); break;
-            case OttavaType::OTTAVA_15MB: ottavaKind = QStringLiteral("15mb"); break;
-            case OttavaType::OTTAVA_22MA: ottavaKind = QStringLiteral("22ma"); break;
-            case OttavaType::OTTAVA_22MB: ottavaKind = QStringLiteral("22mb"); break;
-            default:                      ottavaKind = QStringLiteral("8va");  break;
-            }
-            ops.append(buildRemoveOctaveLine(ottavaPartUuid,
-                                             ottava->tick(), ottava->tick2(),
-                                             ottavaKind));
-        }
-    }
-
-    // ── Pass 28: Glissandos (dual-coordinate) ───────────────────────────
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::GLISSANDO) {
-            continue;
-        }
-        auto* gliss = static_cast<Glissando*>(obj);
-        if (cmds.count(CommandType::AddElement)) {
-            Part* glissPart = static_cast<EngravingItem*>(gliss)->part();
-            if (!glissPart) {
-                glissPart = resolvePartFromTrack(
-                    gliss->track(), m_knownPartUuids);
-            }
-            if (!glissPart) continue;
-            const QString glissPartUuid =
-                resolvePartUuid(glissPart, lazyAddPartOps);
-            if (glissPartUuid.isEmpty()) continue;
-            ops.append(buildAddGlissando(gliss, glissPartUuid));
-        } else if (cmds.count(CommandType::RemoveElement)) {
-            Part* glissPart = static_cast<EngravingItem*>(gliss)->part();
-            if (!glissPart) {
-                glissPart = resolvePartFromTrack(
-                    gliss->track(), m_knownPartUuids);
-            }
-            if (!glissPart) continue;
-            const QString glissPartUuid =
-                resolvePartUuid(glissPart, lazyAddPartOps);
-            if (glissPartUuid.isEmpty()) continue;
-            ops.append(buildRemoveGlissando(gliss, glissPartUuid));
-        }
-    }
-
-    // ── Pass 29: Guitar Bends (dual-coordinate, note-anchored) ─────────
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::GUITAR_BEND) {
-            continue;
-        }
-        auto* bend = static_cast<GuitarBend*>(obj);
-        if (cmds.count(CommandType::AddElement)) {
-            Part* bendPart = static_cast<EngravingItem*>(bend)->part();
-            if (!bendPart) {
-                bendPart = resolvePartFromTrack(
-                    bend->track(), m_knownPartUuids);
-            }
-            if (!bendPart) continue;
-            const QString bendPartUuid =
-                resolvePartUuid(bendPart, lazyAddPartOps);
-            if (bendPartUuid.isEmpty()) continue;
-            ops.append(buildAddGuitarBend(bend, bendPartUuid));
-        } else if (cmds.count(CommandType::RemoveElement)) {
-            Part* bendPart = static_cast<EngravingItem*>(bend)->part();
-            if (!bendPart) {
-                bendPart = resolvePartFromTrack(
-                    bend->track(), m_knownPartUuids);
-            }
-            if (!bendPart) continue;
-            const QString bendPartUuid =
-                resolvePartUuid(bendPart, lazyAddPartOps);
-            if (bendPartUuid.isEmpty()) continue;
-            ops.append(buildRemoveGuitarBend(bend, bendPartUuid));
-        }
-    }
-
-    // ── Pass 30: Pedal Lines (part-scoped, beat-range) ───────────────────
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::PEDAL) {
-            continue;
-        }
-        auto* pedal = static_cast<Pedal*>(obj);
-        Part* pedalPart = static_cast<EngravingItem*>(pedal)->part();
-        if (!pedalPart) {
-            pedalPart = resolvePartFromTrack(
-                pedal->track(), m_knownPartUuids);
-        }
-        if (!pedalPart) continue;
-        const QString pedalPartUuid =
-            resolvePartUuid(pedalPart, lazyAddPartOps);
-        if (pedalPartUuid.isEmpty()) continue;
-
-        if (cmds.count(CommandType::AddElement)) {
-            ops.append(buildAddPedalLine(pedal, pedalPartUuid));
-        } else if (cmds.count(CommandType::RemoveElement)) {
-            ops.append(buildRemovePedalLine(pedalPartUuid,
-                                            pedal->tick(), pedal->tick2()));
-        }
-    }
-
-    // ── Pass 31: Trill Lines (part-scoped, beat-range) ──────────────────
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::TRILL) {
-            continue;
-        }
-        auto* trill = static_cast<Trill*>(obj);
-        Part* trillPart = static_cast<EngravingItem*>(trill)->part();
-        if (!trillPart) {
-            trillPart = resolvePartFromTrack(
-                trill->track(), m_knownPartUuids);
-        }
-        if (!trillPart) continue;
-        const QString trillPartUuid =
-            resolvePartUuid(trillPart, lazyAddPartOps);
-        if (trillPartUuid.isEmpty()) continue;
-
-        if (cmds.count(CommandType::AddElement)) {
-            ops.append(buildAddTrillLine(trill, trillPartUuid));
-        } else if (cmds.count(CommandType::RemoveElement)) {
-            ops.append(buildRemoveTrillLine(trillPartUuid,
-                                            trill->tick(), trill->tick2()));
-        }
-    }
-
-    // ── Pass 32: Arpeggios (coordinate-addressed) ───────────────────────
+    // Arpeggios
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::ARPEGGIO) {
             continue;
@@ -1880,7 +1770,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 33: Single-note tremolos (coordinate-addressed) ────────────
+    // Single-note Tremolos
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::TREMOLO_SINGLECHORD) {
             continue;
@@ -1918,7 +1808,249 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 34: Two-note tremolos (dual-anchor) ─────────────────────────
+    // Breath Marks / Caesuras
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::BREATH) {
+            continue;
+        }
+        auto* breath = static_cast<Breath*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            Segment* seg = breath->segment();
+            if (!seg) continue;
+            Part* bPart = breath->part();
+            if (!bPart) {
+                bPart = resolvePartFromTrack(
+                    breath->track(), m_knownPartUuids);
+            }
+            const QString bPartUuid =
+                resolvePartUuid(bPart, lazyAddPartOps);
+            if (bPartUuid.isEmpty()) continue;
+            ops.append(buildAddBreathMark(breath, bPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            Part* bPart = breath->part();
+            if (!bPart) {
+                bPart = resolvePartFromTrack(
+                    breath->track(), m_knownPartUuids);
+            }
+            if (!bPart) continue;
+            const QString bPartUuid =
+                resolvePartUuid(bPart, lazyAddPartOps);
+            if (bPartUuid.isEmpty()) continue;
+            ops.append(buildRemoveBreathMark(bPartUuid,
+                                             breath->segment()
+                                             ? breath->segment()->tick()
+                                             : breath->tick(),
+                                             breathTypeToString(breath->symId())));
+        }
+    }
+
+    // ── Spanner tier ─────────────────────────────────────────────────
+    // Connections between two beat positions.
+
+    // Slurs
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::SLUR) {
+            continue;
+        }
+        auto* slur = static_cast<Slur*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            Part* slurPart = static_cast<EngravingItem*>(slur)->part();
+            if (!slurPart) {
+                slurPart = resolvePartFromTrack(
+                    slur->track(), m_knownPartUuids);
+            }
+            if (!slurPart) continue;
+            const QString slurPartUuid =
+                resolvePartUuid(slurPart, lazyAddPartOps);
+            if (slurPartUuid.isEmpty()) continue;
+            ops.append(buildAddSlur(slur, slurPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            Part* slurPart = static_cast<EngravingItem*>(slur)->part();
+            if (!slurPart) {
+                slurPart = resolvePartFromTrack(
+                    slur->track(), m_knownPartUuids);
+            }
+            if (!slurPart) continue;
+            const QString slurPartUuid =
+                resolvePartUuid(slurPart, lazyAddPartOps);
+            if (slurPartUuid.isEmpty()) continue;
+            ops.append(buildRemoveSlur(slur, slurPartUuid));
+        }
+    }
+
+    // Hairpins
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::HAIRPIN) {
+            continue;
+        }
+        auto* hp = static_cast<Hairpin*>(obj);
+        Part* hpPart = static_cast<EngravingItem*>(hp)->part();
+        if (!hpPart) {
+            hpPart = resolvePartFromTrack(hp->track(), m_knownPartUuids);
+        }
+        if (!hpPart) continue;
+        const QString hpPartUuid = resolvePartUuid(hpPart, lazyAddPartOps);
+        if (hpPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            ops.append(buildAddHairpin(hp, hpPartUuid,
+                                       hp->tick(), hp->tick2(),
+                                       hp->isCrescendo()));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            ops.append(buildRemoveHairpin(hpPartUuid,
+                                          hp->tick(), hp->tick2(),
+                                          hp->isCrescendo()
+                                              ? QStringLiteral("crescendo")
+                                              : QStringLiteral("diminuendo")));
+        }
+    }
+
+    // Octave Lines
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::OTTAVA) {
+            continue;
+        }
+        auto* ottava = static_cast<Ottava*>(obj);
+        Part* ottavaPart = static_cast<EngravingItem*>(ottava)->part();
+        if (!ottavaPart) {
+            ottavaPart = resolvePartFromTrack(
+                ottava->track(), m_knownPartUuids);
+        }
+        if (!ottavaPart) continue;
+        const QString ottavaPartUuid =
+            resolvePartUuid(ottavaPart, lazyAddPartOps);
+        if (ottavaPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            ops.append(buildAddOctaveLine(ottava, ottavaPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            QString ottavaKind;
+            switch (ottava->ottavaType()) {
+            case OttavaType::OTTAVA_8VA:  ottavaKind = QStringLiteral("8va");  break;
+            case OttavaType::OTTAVA_8VB:  ottavaKind = QStringLiteral("8vb");  break;
+            case OttavaType::OTTAVA_15MA: ottavaKind = QStringLiteral("15ma"); break;
+            case OttavaType::OTTAVA_15MB: ottavaKind = QStringLiteral("15mb"); break;
+            case OttavaType::OTTAVA_22MA: ottavaKind = QStringLiteral("22ma"); break;
+            case OttavaType::OTTAVA_22MB: ottavaKind = QStringLiteral("22mb"); break;
+            default:                      ottavaKind = QStringLiteral("8va");  break;
+            }
+            ops.append(buildRemoveOctaveLine(ottavaPartUuid,
+                                             ottava->tick(), ottava->tick2(),
+                                             ottavaKind));
+        }
+    }
+
+    // Glissandos
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::GLISSANDO) {
+            continue;
+        }
+        auto* gliss = static_cast<Glissando*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            Part* glissPart = static_cast<EngravingItem*>(gliss)->part();
+            if (!glissPart) {
+                glissPart = resolvePartFromTrack(
+                    gliss->track(), m_knownPartUuids);
+            }
+            if (!glissPart) continue;
+            const QString glissPartUuid =
+                resolvePartUuid(glissPart, lazyAddPartOps);
+            if (glissPartUuid.isEmpty()) continue;
+            ops.append(buildAddGlissando(gliss, glissPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            Part* glissPart = static_cast<EngravingItem*>(gliss)->part();
+            if (!glissPart) {
+                glissPart = resolvePartFromTrack(
+                    gliss->track(), m_knownPartUuids);
+            }
+            if (!glissPart) continue;
+            const QString glissPartUuid =
+                resolvePartUuid(glissPart, lazyAddPartOps);
+            if (glissPartUuid.isEmpty()) continue;
+            ops.append(buildRemoveGlissando(gliss, glissPartUuid));
+        }
+    }
+
+    // Guitar Bends
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::GUITAR_BEND) {
+            continue;
+        }
+        auto* bend = static_cast<GuitarBend*>(obj);
+        if (cmds.count(CommandType::AddElement)) {
+            Part* bendPart = static_cast<EngravingItem*>(bend)->part();
+            if (!bendPart) {
+                bendPart = resolvePartFromTrack(
+                    bend->track(), m_knownPartUuids);
+            }
+            if (!bendPart) continue;
+            const QString bendPartUuid =
+                resolvePartUuid(bendPart, lazyAddPartOps);
+            if (bendPartUuid.isEmpty()) continue;
+            ops.append(buildAddGuitarBend(bend, bendPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            Part* bendPart = static_cast<EngravingItem*>(bend)->part();
+            if (!bendPart) {
+                bendPart = resolvePartFromTrack(
+                    bend->track(), m_knownPartUuids);
+            }
+            if (!bendPart) continue;
+            const QString bendPartUuid =
+                resolvePartUuid(bendPart, lazyAddPartOps);
+            if (bendPartUuid.isEmpty()) continue;
+            ops.append(buildRemoveGuitarBend(bend, bendPartUuid));
+        }
+    }
+
+    // Pedal Lines
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::PEDAL) {
+            continue;
+        }
+        auto* pedal = static_cast<Pedal*>(obj);
+        Part* pedalPart = static_cast<EngravingItem*>(pedal)->part();
+        if (!pedalPart) {
+            pedalPart = resolvePartFromTrack(
+                pedal->track(), m_knownPartUuids);
+        }
+        if (!pedalPart) continue;
+        const QString pedalPartUuid =
+            resolvePartUuid(pedalPart, lazyAddPartOps);
+        if (pedalPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            ops.append(buildAddPedalLine(pedal, pedalPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            ops.append(buildRemovePedalLine(pedalPartUuid,
+                                            pedal->tick(), pedal->tick2()));
+        }
+    }
+
+    // Trill Lines
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::TRILL) {
+            continue;
+        }
+        auto* trill = static_cast<Trill*>(obj);
+        Part* trillPart = static_cast<EngravingItem*>(trill)->part();
+        if (!trillPart) {
+            trillPart = resolvePartFromTrack(
+                trill->track(), m_knownPartUuids);
+        }
+        if (!trillPart) continue;
+        const QString trillPartUuid =
+            resolvePartUuid(trillPart, lazyAddPartOps);
+        if (trillPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            ops.append(buildAddTrillLine(trill, trillPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            ops.append(buildRemoveTrillLine(trillPartUuid,
+                                            trill->tick(), trill->tick2()));
+        }
+    }
+
+    // Two-Note Tremolos
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::TREMOLO_TWOCHORD) {
             continue;
@@ -1956,134 +2088,10 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 35: Grace notes (coordinate-addressed) ─────────────────────
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::CHORD) {
-            continue;
-        }
-        auto* chord = static_cast<Chord*>(obj);
-        if (!chord->isGrace()) {
-            continue;
-        }
-        if (cmds.count(CommandType::AddElement)) {
-            Chord* parentChord = toChord(chord->explicitParent());
-            if (!parentChord) continue;
-            Part* gnPart = chord->staff() ? chord->staff()->part() : nullptr;
-            if (!gnPart) {
-                gnPart = resolvePartFromTrack(
-                    chord->track(), m_knownPartUuids);
-            }
-            if (!gnPart) continue;
-            const QString gnPartUuid =
-                resolvePartUuid(gnPart, lazyAddPartOps);
-            if (gnPartUuid.isEmpty()) continue;
-            ops.append(buildAddGraceNote(chord, gnPartUuid));
-        } else if (cmds.count(CommandType::RemoveElement)) {
-            Part* gnPart = chord->staff() ? chord->staff()->part() : nullptr;
-            if (!gnPart) {
-                gnPart = resolvePartFromTrack(
-                    chord->track(), m_knownPartUuids);
-            }
-            if (!gnPart) continue;
-            const QString gnPartUuid =
-                resolvePartUuid(gnPart, lazyAddPartOps);
-            if (gnPartUuid.isEmpty()) continue;
-            const int voice = voiceFromTrack(gnPart, chord->track());
-            const int staff = staffFromTrack(gnPart, chord->track());
-            ops.append(buildRemoveGraceNote(gnPartUuid, chord->tick(),
-                                            voice, staff,
-                                            static_cast<int>(chord->graceIndex())));
-        }
-    }
+    // ── Navigation tier ──────────────────────────────────────────────
+    // Playback structure and metadata.
 
-    // ── Pass 36: Breath marks / caesuras (beat-anchored) ──────────────────
-    for (const auto& [obj, cmds] : changedObjects) {
-        if (!obj || obj->type() != ElementType::BREATH) {
-            continue;
-        }
-        auto* breath = static_cast<Breath*>(obj);
-        if (cmds.count(CommandType::AddElement)) {
-            Segment* seg = breath->segment();
-            if (!seg) continue;
-            Part* bPart = breath->part();
-            if (!bPart) {
-                bPart = resolvePartFromTrack(
-                    breath->track(), m_knownPartUuids);
-            }
-            const QString bPartUuid =
-                resolvePartUuid(bPart, lazyAddPartOps);
-            if (bPartUuid.isEmpty()) continue;
-            ops.append(buildAddBreathMark(breath, bPartUuid));
-        } else if (cmds.count(CommandType::RemoveElement)) {
-            Part* bPart = breath->part();
-            if (!bPart) {
-                bPart = resolvePartFromTrack(
-                    breath->track(), m_knownPartUuids);
-            }
-            if (!bPart) continue;
-            const QString bPartUuid =
-                resolvePartUuid(bPart, lazyAddPartOps);
-            if (bPartUuid.isEmpty()) continue;
-            ops.append(buildRemoveBreathMark(bPartUuid,
-                                             breath->segment()
-                                             ? breath->segment()->tick()
-                                             : breath->tick(),
-                                             breathTypeToString(breath->symId())));
-        }
-    }
-
-    // ── Pass 37: InsertBeats / DeleteBeats ───────────────────────────────
-    {
-        QVector<Measure*> insertedMeasures;
-        QVector<Measure*> removedMeasures;
-        for (const auto& [obj, cmds] : changedObjects) {
-            if (!obj || obj->type() != ElementType::MEASURE) {
-                continue;
-            }
-            auto* m = static_cast<Measure*>(obj);
-            if (cmds.count(CommandType::InsertMeasures)) {
-                insertedMeasures.append(m);
-            } else if (cmds.count(CommandType::RemoveMeasures)) {
-                removedMeasures.append(m);
-            }
-        }
-
-        auto sortByTick = [](Measure* a, Measure* b) {
-            return a->tick() < b->tick();
-        };
-
-        if (!insertedMeasures.isEmpty()) {
-            std::sort(insertedMeasures.begin(), insertedMeasures.end(),
-                      sortByTick);
-            const Fraction atBeat = insertedMeasures.first()->tick();
-            Fraction totalDur;
-            for (Measure* m : insertedMeasures) {
-                totalDur += m->ticks();
-            }
-            QJsonObject op;
-            op["type"]     = QStringLiteral("InsertBeats");
-            op["at_beat"]  = beatJson(atBeat);
-            op["duration"] = beatJson(totalDur);
-            ops.append(op);
-        }
-
-        if (!removedMeasures.isEmpty()) {
-            std::sort(removedMeasures.begin(), removedMeasures.end(),
-                      sortByTick);
-            const Fraction atBeat = removedMeasures.first()->tick();
-            Fraction totalDur;
-            for (Measure* m : removedMeasures) {
-                totalDur += m->ticks();
-            }
-            QJsonObject op;
-            op["type"]     = QStringLiteral("DeleteBeats");
-            op["at_beat"]  = beatJson(atBeat);
-            op["duration"] = beatJson(totalDur);
-            ops.append(op);
-        }
-    }
-
-    // ── Pass 38: InsertVolta / RemoveVolta / SetVoltaNumbers ─────────────
+    // Voltas
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::VOLTA) {
             continue;
@@ -2100,7 +2108,6 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                                         voltaNumbers));
         } else if (cmds.count(CommandType::ChangeProperty)
                    && changedPropertyIdSet.count(Pid::VOLTA_ENDING)) {
-            // Retrieve old endings from the undo stack.
             QJsonArray oldNumbers;
             const UndoStack* us = volta->score()->undoStack();
             if (us) {
@@ -2125,7 +2132,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 39: InsertMarker / RemoveMarker ─────────────────────────────
+    // Markers
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::MARKER) {
             continue;
@@ -2141,7 +2148,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 40: InsertJump / RemoveJump ─────────────────────────────────
+    // Jumps
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::JUMP) {
             continue;
@@ -2154,7 +2161,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 41: SetStartRepeat / SetEndRepeat ─────────────────────────────
+    // Repeats (SetStartRepeat / SetEndRepeat)
     if (changedPropertyIdSet.count(Pid::REPEAT_START)
         || changedPropertyIdSet.count(Pid::REPEAT_END)
         || changedPropertyIdSet.count(Pid::REPEAT_COUNT)) {
@@ -2177,7 +2184,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 42: SetScoreMetadata ─────────────────────────────────────────
+    // SetScoreMetadata
     if (!changedMetaTags.isEmpty()) {
         static const QHash<QString, QString> s_reverseFieldMap = {
             { "workTitle",       "title"           },
@@ -2202,7 +2209,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         }
     }
 
-    // ── Pass 43: SetMeasureLen (pickup / anacrusis measures) ────────────
+    // SetMeasureLen (pickup / anacrusis measures)
     for (const auto& [obj, cmds] : changedObjects) {
         if (!obj || obj->type() != ElementType::MEASURE) {
             continue;
@@ -2222,41 +2229,9 @@ QVector<QJsonObject> OperationTranslator::translateAll(
         ops.append(op);
     }
 
-    // ── Pass 43: ChangeProperty + Pid::DURATION_TYPE_WITH_DOTS → SetDuration
-    // Suppressed when a ChangeMeasureLen is present (see pre-scan comment).
-    if (changedPropertyIdSet.count(Pid::DURATION_TYPE_WITH_DOTS)
-        && !hasMeasureLenChange) {
-        for (const auto& [obj, cmds] : changedObjects) {
-            if (!obj || !cmds.count(CommandType::ChangeProperty)) {
-                continue;
-            }
-            if (obj->type() != ElementType::CHORD
-                && obj->type() != ElementType::REST) {
-                continue;
-            }
-            ChordRest* cr = static_cast<ChordRest*>(obj);
-            const DurationTypeWithDots oldDur = findOldDuration(cr);
-            if (oldDur.type == DurationType::V_INVALID) {
-                continue;
-            }
-            Part* crPart = cr->staff() ? cr->staff()->part() : nullptr;
-            if (!crPart) {
-                crPart = resolvePartFromTrack(cr->track(), m_knownPartUuids);
-            }
-            if (!crPart) {
-                continue;
-            }
-            const QString partUuid =
-                resolvePartUuid(crPart, lazyAddPartOps);
-            if (partUuid.isEmpty()) {
-                continue;
-            }
-            ops.append(buildSetDuration(cr, partUuid));
-        }
-    }
-
-    // Prepend any lazily-generated AddPart ops so the server registers parts
-    // before processing the element ops that reference them.
+    // ── Finalize ─────────────────────────────────────────────────────
+    // Prepend any lazily-generated AddPart ops so the server registers
+    // parts before processing the element ops that reference them.
     if (!lazyAddPartOps.isEmpty()) {
         QVector<QJsonObject> result = lazyAddPartOps;
         result.append(ops);
@@ -2264,6 +2239,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
     }
     return ops;
 }
+
 
 // ---------------------------------------------------------------------------
 // Insert builders — coordinate-addressed

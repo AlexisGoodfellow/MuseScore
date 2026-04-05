@@ -3817,7 +3817,30 @@ bool ScoreApplicator::applyInsertBeats(Score* score, const QJsonObject& op)
 
         Score::InsertMeasureOptions opts;
         opts.needDeselectAll = false;
-        score->insertMeasure(ElementType::MEASURE, m, opts);
+        MeasureBase* newMb = score->insertMeasure(ElementType::MEASURE, m, opts);
+
+        // Ensure the newly created measure has rest segments.
+        // Score::insertMeasure delegates to MasterScore::insertMeasure which
+        // should create measure rests, but in practice the new measure can
+        // end up empty (no ChordRest segments).  Without rests, subsequent
+        // InsertNote ops targeting this measure fail because tick2segment
+        // returns nullptr.
+        if (newMb && newMb->isMeasure()) {
+            Measure* newM = toMeasure(newMb);
+            if (!newM->first(SegmentType::ChordRest)) {
+                const Fraction newTick = newM->tick();
+                for (size_t staffIdx = 0; staffIdx < score->nstaves(); ++staffIdx) {
+                    track_idx_t track = staffIdx * VOICES;
+                    Rest* rest = Factory::createRest(
+                        score->dummy()->segment(),
+                        TDuration(DurationType::V_MEASURE));
+                    rest->setTicks(newM->ticks());
+                    rest->setTrack(track);
+                    score->undoAddCR(rest, newM, newTick);
+                }
+            }
+        }
+
         remaining -= measureLen;
     }
 
