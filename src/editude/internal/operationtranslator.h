@@ -45,6 +45,7 @@ class Clef;
 class KeySig;
 class Part;
 class Rest;
+class Spanner;
 class TempoText;
 class Tie;
 class TimeSig;
@@ -310,5 +311,9 @@ private:
 
     // Known parts map — used to detect Add/Remove by diffing against score->parts().
     QHash<mu::engraving::Part*, QString> m_knownPartUuids;
+
+    // Spanners whose note anchors became rests (orphaned by note deletion).
+    // Tracked across batches so Phase 3 can detect undo-restoration.
+    QSet<mu::engraving::Spanner*> m_orphanedSpanners;
 };
 } // namespace mu::editude::internal

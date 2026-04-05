@@ -284,6 +284,7 @@ void OperationTranslator::registerKnownPart(Part* part, const QString& uuid)
 void OperationTranslator::reset()
 {
     m_knownPartUuids.clear();
+    m_orphanedSpanners.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -2456,6 +2457,92 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             op["actual_len"] = QJsonValue(QJsonValue::Null);
         }
         ops.append(op);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // PHASE 3: Spanner anchor health check
+    //
+    // MuseScore does not always remove spanners when their anchor notes
+    // are deleted — the chord becomes a rest, but the spanner remains
+    // in score->spanner() with a dangling (rest) anchor.  This phase
+    // scans all slurs and detects two transitions:
+    //
+    //   healthy → orphaned:  emit RemoveSlur  (note deletion)
+    //   orphaned → healthy:  emit AddSlur     (undo restores the note)
+    //
+    // Glissandos, guitar bends, and two-note tremolos are note-anchored
+    // and stored on the Note object, so they naturally vanish from
+    // iteration when the note is deleted.  Only slurs (stored in
+    // score->spanner()) need this treatment.
+    // ═══════════════════════════════════════════════════════════════════
+    {
+        Score* score = nullptr;
+        for (const auto& [obj, cmds_] : changedObjects) {
+            Q_UNUSED(cmds_);
+            if (obj && obj->score()) {
+                score = static_cast<Score*>(obj->score());
+                break;
+            }
+        }
+
+        if (score) {
+            // Track which slurs are still present so we can prune
+            // m_orphanedSpanners of slurs that were truly removed (e.g.
+            // by MuseScore's own undo cleanup).
+            QSet<Spanner*> currentSlurs;
+
+            for (auto& [tick, sp] : score->spanner()) {
+                if (!sp->isSlur()) {
+                    continue;
+                }
+                currentSlurs.insert(sp);
+
+                ChordRest* startCr = dynamic_cast<ChordRest*>(sp->startElement());
+                ChordRest* endCr   = dynamic_cast<ChordRest*>(sp->endElement());
+                bool healthy = startCr && endCr
+                               && startCr->isChord() && endCr->isChord()
+                               && !toChord(startCr)->notes().empty()
+                               && !toChord(endCr)->notes().empty();
+
+                bool wasOrphaned = m_orphanedSpanners.contains(sp);
+
+                if (!healthy && !wasOrphaned) {
+                    // Newly orphaned — emit removal.
+                    m_orphanedSpanners.insert(sp);
+                    Part* part = static_cast<EngravingItem*>(sp)->part();
+                    if (!part) {
+                        part = resolvePartFromTrack(sp->track(), m_knownPartUuids);
+                    }
+                    if (!part) continue;
+                    QString partId = resolvePartUuid(part, lazyAddPartOps);
+                    if (partId.isEmpty()) continue;
+                    ops.append(buildRemoveSlur(sp, partId));
+
+                } else if (healthy && wasOrphaned) {
+                    // Restored (undo) — emit addition.
+                    m_orphanedSpanners.remove(sp);
+                    Part* part = static_cast<EngravingItem*>(sp)->part();
+                    if (!part) {
+                        part = resolvePartFromTrack(sp->track(), m_knownPartUuids);
+                    }
+                    if (!part) continue;
+                    QString partId = resolvePartUuid(part, lazyAddPartOps);
+                    if (partId.isEmpty()) continue;
+                    ops.append(buildAddSlur(sp, partId));
+                }
+            }
+
+            // Prune any tracked spanner that is no longer in the score
+            // (e.g. MuseScore truly removed it via undo cleanup).
+            auto it = m_orphanedSpanners.begin();
+            while (it != m_orphanedSpanners.end()) {
+                if (!currentSlurs.contains(*it)) {
+                    it = m_orphanedSpanners.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
     }
 
     // ── Finalize ─────────────────────────────────────────────────────

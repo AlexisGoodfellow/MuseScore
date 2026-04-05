@@ -1413,7 +1413,7 @@ QJsonObject EditudeTestActions::serializePartTwoNoteTremolos(Part* part)
                     continue;
                 }
                 // Serialize only when chord == trem->chord1() to avoid double-counting.
-                if (chord != trem->chord1()) {
+                if (chord != trem->chord1() || !trem->chord2()) {
                     continue;
                 }
                 const int startVoice = voiceFromTrack(part, trem->chord1()->track());
@@ -1484,27 +1484,25 @@ QJsonObject EditudeTestActions::serializePartSlurs(Part* part)
         ChordRest* startCR = dynamic_cast<ChordRest*>(sp->startElement());
         ChordRest* endCR   = dynamic_cast<ChordRest*>(sp->endElement());
 
+        // Skip slurs with orphaned anchors (note deleted → chord became rest).
+        if (!startCR || !startCR->isChord() || !endCR || !endCR->isChord()) {
+            continue;
+        }
+        Chord* sc = toChord(startCR);
+        Chord* ec = toChord(endCR);
+        if (sc->notes().empty() || ec->notes().empty()) {
+            continue;
+        }
+
         QJsonObject entry;
-        if (startCR) {
-            entry["start_beat"]  = beatJson(startCR->tick());
-            entry["start_voice"] = voiceFromTrack(part, startCR->track());
-            entry["start_staff"] = staffFromTrack(part, startCR->track());
-            if (startCR->isChord()) {
-                Chord* sc = toChord(startCR);
-                if (!sc->notes().empty())
-                    entry["start_pitch"] = pitchJson(sc->notes().front());
-            }
-        }
-        if (endCR) {
-            entry["end_beat"]  = beatJson(endCR->tick());
-            entry["end_voice"] = voiceFromTrack(part, endCR->track());
-            entry["end_staff"] = staffFromTrack(part, endCR->track());
-            if (endCR->isChord()) {
-                Chord* ec = toChord(endCR);
-                if (!ec->notes().empty())
-                    entry["end_pitch"] = pitchJson(ec->notes().front());
-            }
-        }
+        entry["start_beat"]  = beatJson(startCR->tick());
+        entry["start_voice"] = voiceFromTrack(part, startCR->track());
+        entry["start_staff"] = staffFromTrack(part, startCR->track());
+        entry["start_pitch"] = pitchJson(sc->notes().front());
+        entry["end_beat"]  = beatJson(endCR->tick());
+        entry["end_voice"] = voiceFromTrack(part, endCR->track());
+        entry["end_staff"] = staffFromTrack(part, endCR->track());
+        entry["end_pitch"] = pitchJson(ec->notes().front());
         const QString key = QString::number(slurIndex++);
         result[key] = entry;
     }
