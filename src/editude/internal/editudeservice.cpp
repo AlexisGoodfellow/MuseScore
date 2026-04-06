@@ -761,6 +761,7 @@ void EditudeService::onServerMessage(const QString& text)
                     QJsonArray opsArr;
                     opsArr.append(payload);
                     QJsonObject batch;
+                    batch["type"]     = QStringLiteral("op_batch");
                     batch["ops"]      = opsArr;
                     batch["revision"] = revision;
                     RemoteApplyGuard guard(this);
