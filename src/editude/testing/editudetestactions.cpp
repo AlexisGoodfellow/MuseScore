@@ -533,17 +533,13 @@ EditudeTestActions::Reply EditudeTestActions::actionSetDuration(const QJsonObjec
 
 EditudeTestActions::Reply EditudeTestActions::actionUndo()
 {
-    Score* score = m_svc->scoreForTest();
-    if (!score) {
-        return errorResponse(503, "score not ready");
+    if (!m_svc->hasUndoableOps()) {
+        return errorResponse(400, "no ops to undo");
     }
-    // Use Score::undoRedo instead of bare undoStack()->undo().
-    // undoRedo calls update() (layout refresh), updateSelection(),
-    // and changesChannel().send() (OT op translation).  Without
-    // these the score DOM is left stale, causing SIGSEGV when the
-    // accessibility system or scene graph accesses it later.
-    EditData ed;
-    score->undoRedo(true, &ed);
+    // Server-mediated undo: ask the server to compute the inverse op and
+    // broadcast it.  The inverse arrives as a normal op_batch which the
+    // ScoreApplicator applies, keeping all clients in sync.
+    m_svc->sendUndoRequest();
     return okResponse();
 }
 

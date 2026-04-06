@@ -746,6 +746,55 @@ void EditudeService::onServerMessage(const QString& text)
         LOGW() << "[editude] op_batch_ack batch_id=" << msg.value("batch_id").toString()
                << "revision=" << revision;
 
+        if (msg.contains("payload") && m_score) {
+            // Undo ack: the server computed the inverse and included it as
+            // "payload".  Apply it locally via ScoreApplicator (same path as
+            // remote ops from peers).  Do NOT track op_ids for undo acks —
+            // the inverse op's ID must not be pushed onto m_ownOpIds,
+            // otherwise multi-step undo would alternate forward/reverse.
+            const QJsonObject payload = msg.value("payload").toObject();
+            LOGW() << "[editude] op_batch_ack contains undo payload — applying locally";
+            auto applyUndoPayload = [this, payload, revision]() {
+                if (!m_score) return;
+                {
+                    // Wrap as an op_batch with a single op for ScoreApplicator.
+                    QJsonArray opsArr;
+                    opsArr.append(payload);
+                    QJsonObject batch;
+                    batch["ops"]      = opsArr;
+                    batch["revision"] = revision;
+                    RemoteApplyGuard guard(this);
+                    m_applicator.apply(m_score, batch);
+                    m_score->undoStack()->clearAll();
+                }
+                markScoreSaved();
+                for (auto it = m_applicator.partUuidToPart().cbegin();
+                     it != m_applicator.partUuidToPart().cend(); ++it) {
+                    m_translator.registerKnownPart(it.value(), it.key());
+                }
+                refreshAnnotationOverlay();
+                refreshPresenceModel();
+                if (m_currentNotation) {
+                    m_currentNotation->notationChanged().send(muse::RectF());
+                }
+                if (m_presenceModel) {
+                    m_presenceModel->kickSceneGraph();
+                }
+            };
+#ifdef MUE_BUILD_EDITUDE_TEST_DRIVER
+            QTimer::singleShot(0, this, applyUndoPayload);
+#else
+            applyUndoPayload();
+#endif
+        } else {
+            // Normal (non-undo) ack: track op_ids so sendUndoRequest() can
+            // pop them for future undo requests.
+            const QJsonArray opIds = msg.value("op_ids").toArray();
+            for (const QJsonValue& v : opIds) {
+                m_ownOpIds.append(v.toString());
+            }
+        }
+
         // Deferred initial snapshot upload: the bootstrap AddPart batch has
         // been acked, so m_serverRevision now includes the parts.  Upload
         // the snapshot at this revision so session_bootstrap won't return
@@ -1901,6 +1950,25 @@ QString EditudeService::stateForTest() const
     case State::Reconnecting:   return QStringLiteral("reconnecting");
     default:                    return QStringLiteral("unknown");
     }
+}
+
+void EditudeService::sendUndoRequest()
+{
+    if (m_ownOpIds.isEmpty()) {
+        LOGW() << "[editude] sendUndoRequest: no ops to undo";
+        return;
+    }
+    if (m_state != State::Live || !m_socket) {
+        LOGW() << "[editude] sendUndoRequest: not connected";
+        return;
+    }
+    const QString opId = m_ownOpIds.takeLast();
+
+    QJsonObject msg;
+    msg["type"]  = QStringLiteral("undo_request");
+    msg["op_id"] = opId;
+    LOGW() << "[editude] sendUndoRequest: op_id=" << opId;
+    m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
 }
 
 #endif // MUE_BUILD_EDITUDE_TEST_DRIVER || Q_OS_WASM
