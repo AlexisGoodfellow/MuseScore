@@ -757,9 +757,19 @@ void EditudeService::onServerMessage(const QString& text)
             auto applyUndoPayload = [this, payload, revision]() {
                 if (!m_score) return;
                 {
-                    // Wrap as an op_batch with a single op for ScoreApplicator.
+                    // Decompose removed_elements (e.g. InsertVolta,
+                    // InsertMarker) into separate ops so the C++
+                    // ScoreApplicator dispatches each one individually.
                     QJsonArray opsArr;
-                    opsArr.append(payload);
+                    QJsonObject mainOp = payload;
+                    QJsonArray removed;
+                    if (mainOp.contains(QStringLiteral("removed_elements"))) {
+                        removed = mainOp.take(QStringLiteral("removed_elements")).toArray();
+                    }
+                    opsArr.append(mainOp);
+                    for (const QJsonValue& elem : removed) {
+                        opsArr.append(elem);
+                    }
                     QJsonObject batch;
                     batch["type"]     = QStringLiteral("op_batch");
                     batch["ops"]      = opsArr;
