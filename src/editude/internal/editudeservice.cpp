@@ -1075,15 +1075,34 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
         changes.changedPropertyIdSet,
         changedMetaTags);
 
-    // Sync locally-created parts into the ScoreApplicator's UUID map.
+    // Sync the ScoreApplicator's part UUID map with the translator's.
     // translateAll() assigns UUIDs to newly-detected parts, but the
     // applicator only learns about parts via applyAddPart (remote ops).
     // Without this sync, undo/remote ops referencing a locally-created
     // part fail with "unknown part_id".
-    for (auto it = m_translator.knownPartUuids().cbegin();
-         it != m_translator.knownPartUuids().cend(); ++it) {
+    //
+    // We also remove stale entries: when a part is removed locally, the
+    // translator drops it from knownPartUuids, but the applicator would
+    // retain a dangling Part* — causing undefined behavior if a later
+    // AddPart (e.g. from undo) tries to adopt it.
+    const auto& translatorParts = m_translator.knownPartUuids();
+
+    // Add new parts
+    for (auto it = translatorParts.cbegin(); it != translatorParts.cend(); ++it) {
         if (!m_applicator.partUuidToPart().contains(it.value())) {
             m_applicator.registerPart(it.key(), it.value());
+        }
+    }
+
+    // Remove stale parts
+    const auto applicatorUuids = m_applicator.partUuidToPart().keys();
+    QSet<QString> translatorUuidSet;
+    for (auto it = translatorParts.cbegin(); it != translatorParts.cend(); ++it) {
+        translatorUuidSet.insert(it.value());
+    }
+    for (const QString& uuid : applicatorUuids) {
+        if (!translatorUuidSet.contains(uuid)) {
+            m_applicator.unregisterPart(uuid);
         }
     }
 

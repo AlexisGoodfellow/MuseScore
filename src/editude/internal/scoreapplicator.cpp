@@ -657,6 +657,11 @@ void ScoreApplicator::registerPart(Part* part, const QString& uuid)
     m_partUuidToPart[uuid] = part;
 }
 
+void ScoreApplicator::unregisterPart(const QString& uuid)
+{
+    m_partUuidToPart.remove(uuid);
+}
+
 bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
 {
     Part* part = resolvePart(op);

@@ -57,6 +57,10 @@ public:
     // loaded from an MSCX file (rather than created via AddPart from the server).
     void registerPart(mu::engraving::Part* part, const QString& uuid);
 
+    // Remove a part UUID from the map. Called when a part is removed locally
+    // so the applicator doesn't hold a dangling Part* pointer.
+    void unregisterPart(const QString& uuid);
+
     // Shared static helpers — also used by EditudeTestDriver.
     static int pitchToMidi(const QString& step, int octave, const QString& accidental);
     static mu::engraving::DurationType parseDurationType(const QString& name);
