@@ -10,6 +10,7 @@
 #include <QEventLoop>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QTimer>
 
 #include "global/log.h"
 #include "internal/editudeservice.h"
@@ -95,11 +96,22 @@ const char* editudeTestAction(const char* jsonStr)
 {
     if (!s_actions) return "{}";
     QJsonObject body = QJsonDocument::fromJson(QByteArray(jsonStr)).object();
-    auto reply = s_actions->dispatchAction(body);
-    // The WASM test bridge calls Score::startCmd/endCmd directly, bypassing
-    // NotationInteraction.  The paint view only redraws in response to
-    // notationChanged() — fire it explicitly (matches native test driver).
-    s_actions->notifyPaintView();
+    // Defer score mutation to the next event-loop iteration, matching the
+    // native test driver's QTimer::singleShot pattern.  Without this, a
+    // second action (e.g. set_key_signature) can run before the translator
+    // has processed the previous action's changesChannel notification
+    // (e.g. add_part), so m_knownPartUuids is stale.
+    EditudeTestActions::Reply reply;
+    QEventLoop loop;
+    QTimer::singleShot(0, [&]() {
+        reply = s_actions->dispatchAction(body);
+        // The WASM test bridge calls Score::startCmd/endCmd directly, bypassing
+        // NotationInteraction.  The paint view only redraws in response to
+        // notationChanged() — fire it explicitly (matches native test driver).
+        s_actions->notifyPaintView();
+        loop.quit();
+    });
+    loop.exec();
     // Process events so that WebSocket data from changesChannel is flushed.
     QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
     static QByteArray buf;
