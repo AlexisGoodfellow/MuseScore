@@ -1075,6 +1075,18 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
         changes.changedPropertyIdSet,
         changedMetaTags);
 
+    // Sync locally-created parts into the ScoreApplicator's UUID map.
+    // translateAll() assigns UUIDs to newly-detected parts, but the
+    // applicator only learns about parts via applyAddPart (remote ops).
+    // Without this sync, undo/remote ops referencing a locally-created
+    // part fail with "unknown part_id".
+    for (auto it = m_translator.knownPartUuids().cbegin();
+         it != m_translator.knownPartUuids().cend(); ++it) {
+        if (!m_applicator.partUuidToPart().contains(it.value())) {
+            m_applicator.registerPart(it.key(), it.value());
+        }
+    }
+
     QVector<QJsonObject> allOps = ops;
 
     if (allOps.isEmpty()) {
