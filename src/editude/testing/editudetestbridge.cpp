@@ -7,10 +7,8 @@
 
 #include <emscripten.h>
 #include <QCoreApplication>
-#include <QEventLoop>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QTimer>
 
 #include "global/log.h"
 #include "internal/editudeservice.h"
@@ -96,23 +94,15 @@ const char* editudeTestAction(const char* jsonStr)
 {
     if (!s_actions) return "{}";
     QJsonObject body = QJsonDocument::fromJson(QByteArray(jsonStr)).object();
-    // Defer score mutation to the next event-loop iteration, matching the
-    // native test driver's QTimer::singleShot pattern.  Without this, a
-    // second action (e.g. set_key_signature) can run before the translator
-    // has processed the previous action's changesChannel notification
-    // (e.g. add_part), so m_knownPartUuids is stale.
-    mu::editude::internal::EditudeTestActions::Reply reply;
-    QEventLoop loop;
-    QTimer::singleShot(0, [&]() {
-        reply = s_actions->dispatchAction(body);
-        // The WASM test bridge calls Score::startCmd/endCmd directly, bypassing
-        // NotationInteraction.  The paint view only redraws in response to
-        // notationChanged() — fire it explicitly (matches native test driver).
-        s_actions->notifyPaintView();
-        loop.quit();
-    });
-    loop.exec();
-    // Process events so that WebSocket data from changesChannel is flushed.
+    // Flush pending events from previous actions (e.g. changesChannel
+    // notifications that update m_knownPartUuids).  WASM runs single-
+    // threaded without asyncify, so QEventLoop::exec() is not available —
+    // processEvents() is the only way to drain queued signals/timers.
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    auto reply = s_actions->dispatchAction(body);
+    s_actions->notifyPaintView();
+    // Flush WebSocket data from changesChannel so it reaches the server
+    // before the next action arrives.
     QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
     static QByteArray buf;
     buf = reply.body;
