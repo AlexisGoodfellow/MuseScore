@@ -101,7 +101,7 @@ const char* editudeTestAction(const char* jsonStr)
     // second action (e.g. set_key_signature) can run before the translator
     // has processed the previous action's changesChannel notification
     // (e.g. add_part), so m_knownPartUuids is stale.
-    EditudeTestActions::Reply reply;
+    mu::editude::internal::EditudeTestActions::Reply reply;
     QEventLoop loop;
     QTimer::singleShot(0, [&]() {
         reply = s_actions->dispatchAction(body);
