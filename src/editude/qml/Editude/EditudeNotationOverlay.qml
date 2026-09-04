@@ -129,6 +129,30 @@ Item {
                 color: model.rectColor
             }
 
+            // Talkback speaking indicator — a pulsing halo in the speaker's
+            // own presence colour, so "who is talking" reads at the same
+            // glance as "who is editing there".
+            Rectangle {
+                id: speakingHalo
+                visible: model.isSpeaking
+                anchors.fill: parent
+                anchors.margins: -3
+                color: "transparent"
+                radius: 2
+                border.width: 2
+                border.color: Qt.rgba(model.rectColor.r, model.rectColor.g,
+                                      model.rectColor.b, 1.0)
+
+                SequentialAnimation on opacity {
+                    running: speakingHalo.visible
+                    loops: Animation.Infinite
+                    NumberAnimation { from: 0.35; to: 1.0; duration: 600
+                                      easing.type: Easing.InOutQuad }
+                    NumberAnimation { from: 1.0; to: 0.35; duration: 600
+                                      easing.type: Easing.InOutQuad }
+                }
+            }
+
             // Name label — shown only on the first rect of each contributor.
             Rectangle {
                 visible: model.displayName !== ""

@@ -35,6 +35,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QKeyEvent>
 #include <QHttpMultiPart>
 #include <QWindow>
 #include <QNetworkReply>
@@ -55,6 +56,7 @@
 #include "log.h"
 #include "internal/platform/macos/appnap.h"
 #include "annotationoverlay.h"
+#include "voicekeys.h"
 #include "qml/Editude/editudeannotationmodel.h"
 #include "qml/Editude/editudeannotationoverlaymodel.h"
 #include "qml/Editude/editudepresencemodel.h"
@@ -73,10 +75,20 @@ private:
     EditudeService* m_svc;
 };
 
+// Single live service per application; the WASM voice-state export needs a
+// way back to it from C linkage.
+static EditudeService* s_serviceInstance = nullptr;
+
+EditudeService* EditudeService::instance()
+{
+    return s_serviceInstance;
+}
+
 EditudeService::EditudeService(const muse::modularity::ContextPtr& iocCtx, QObject* parent)
     : QObject(parent)
     , Contextable(iocCtx)
 {
+    s_serviceInstance = this;
 }
 
 void EditudeService::setPresenceModel(EditudePresenceModel* model)
@@ -404,6 +416,13 @@ void EditudeService::start()
 
 bool EditudeService::eventFilter(QObject* watched, QEvent* event)
 {
+    // Voice shortcuts are handled before anything else: while focus is inside
+    // the notation canvas the shell's own DOM key listener never sees these
+    // keys, so the editor has to relay them.
+    if (handleVoiceKeyEvent(event)) {
+        return true;
+    }
+
     if (event->type() == QEvent::Close || event->type() == QEvent::Quit) {
         // Mark the score as saved so the "Save changes?" dialog is suppressed.
         // This runs before ApplicationActionController's event filter (which
@@ -413,6 +432,173 @@ bool EditudeService::eventFilter(QObject* watched, QEvent* event)
         markScoreSaved();
     }
     return QObject::eventFilter(watched, event);
+}
+
+// ---------------------------------------------------------------------------
+// Talkback voice integration
+//
+// The voice session itself lives entirely in the app shell (LiveKit JS SDK in
+// the browser, LiveKit Swift SDK on Apple).  The editor participates in only
+// two ways, both of which the shell cannot do for itself:
+//
+//   1. Relaying voice shortcuts.  While focus is inside the notation canvas,
+//      the shell's DOM/AppKit key handlers never see the keystroke, and only
+//      the editor knows whether a text field (lyrics, rehearsal mark, tempo
+//      text) is currently accepting input.
+//   2. Reporting playback transitions, which drive studio-mode ducking.
+//
+// See adr/2026-04-07-talkback-mic.md.
+// ---------------------------------------------------------------------------
+
+#ifdef Q_OS_WASM
+namespace {
+// Posts to a webkit message handler. In the SwiftUI shell these are real
+// WKScriptMessageHandlers; the React shell installs a Proxy that forwards them
+// to the parent frame via postMessage.
+void postShellMessage(const char* handlerName, const std::string& body)
+{
+    emscripten::val webkit = emscripten::val::global("window")["webkit"];
+    if (webkit.isUndefined() || webkit.isNull()) {
+        return;
+    }
+    emscripten::val handlers = webkit["messageHandlers"];
+    if (handlers.isUndefined() || handlers.isNull()) {
+        return;
+    }
+    emscripten::val handler = handlers[handlerName];
+    if (handler.isUndefined() || handler.isNull()) {
+        return;
+    }
+    handler.call<void>("postMessage", body);
+}
+}  // namespace
+#endif
+
+bool EditudeService::isTextEntryActive() const
+{
+    if (!m_currentNotation) {
+        return false;
+    }
+    const auto interaction = m_currentNotation->interaction();
+    return interaction && interaction->isTextEditingStarted();
+}
+
+bool EditudeService::handleVoiceKeyEvent(QEvent* event)
+{
+    const QEvent::Type type = event->type();
+    if (type != QEvent::KeyPress && type != QEvent::KeyRelease) {
+        return false;
+    }
+
+    auto* key = static_cast<QKeyEvent*>(event);
+    const VoiceKeyDecision decision = decideVoiceKey(
+        key->key(), key->modifiers(),
+        /*isPress=*/type == QEvent::KeyPress,
+        key->isAutoRepeat(),
+        m_voiceActive,
+        isTextEntryActive());
+
+    if (!decision.action.isEmpty()) {
+#ifdef Q_OS_WASM
+        const QJsonObject payload{
+            { QStringLiteral("action"), decision.action },
+            { QStringLiteral("pressed"), decision.pressed },
+        };
+        postShellMessage("voiceKey",
+                         QJsonDocument(payload).toJson(QJsonDocument::Compact).toStdString());
+#endif
+    }
+
+    return decision.consume;
+}
+
+void EditudeService::notifyShellPlaybackState(bool playing)
+{
+#ifdef Q_OS_WASM
+    postShellMessage("playback", playing ? "playing" : "stopped");
+#else
+    Q_UNUSED(playing);
+#endif
+}
+
+void EditudeService::setVoiceActive(bool active)
+{
+    if (m_voiceActive == active) {
+        return;
+    }
+    m_voiceActive = active;
+    if (!active && !m_speakingContributors.isEmpty()) {
+        m_speakingContributors.clear();
+        refreshPresenceModel();
+    }
+}
+
+void EditudeService::setSpeakingContributors(const QSet<QString>& contributorIds)
+{
+    if (m_speakingContributors == contributorIds) {
+        return;
+    }
+    m_speakingContributors = contributorIds;
+    refreshPresenceModel();
+}
+
+// How far music drops while the talkback key is held.
+static constexpr float k_talkbackDuckDb = -6.f;
+
+void EditudeService::applyVoiceStateJson(const QJsonObject& obj)
+{
+    const bool active = obj.value("active").toBool();
+    setVoiceActive(active);
+    setPlaybackDimmed(obj.value("dimPlayback").toBool());
+
+    // With no voice session nobody is speaking, whatever the payload says — a
+    // presence cursor left glowing after its owner has gone is a lie about who
+    // is talking.
+    QSet<QString> speaking;
+    if (active) {
+        for (const QJsonValue& v : obj.value("speaking").toArray()) {
+            const QString id = v.toString();
+            if (!id.isEmpty()) {
+                speaking.insert(id);
+            }
+        }
+    }
+    setSpeakingContributors(speaking);
+}
+
+void EditudeService::setPlaybackDimmed(bool dimmed)
+{
+    if (m_playbackDimmed == dimmed) {
+        return;
+    }
+    // Track the request even without an audio engine, so the state is
+    // observable and the e2e contract test does not depend on audio.
+    m_playbackDimmed = dimmed;
+    if (!m_audioPlayback()) {
+        return;
+    }
+
+    if (!dimmed) {
+        if (m_playbackBaselineCaptured) {
+            m_audioPlayback()->setMasterOutputParams(m_playbackBaseline);
+        }
+        return;
+    }
+
+    m_audioPlayback()->masterOutputParams()
+        .onResolve(this, [this](const muse::audio::AudioOutputParams& params) {
+            // Talkback may have ended while the promise was in flight.
+            if (!m_playbackDimmed) {
+                return;
+            }
+            if (!m_playbackBaselineCaptured) {
+                m_playbackBaseline = params;
+                m_playbackBaselineCaptured = true;
+            }
+            muse::audio::AudioOutputParams ducked = m_playbackBaseline;
+            ducked.volume = m_playbackBaseline.volume + k_talkbackDuckDb;
+            m_audioPlayback()->setMasterOutputParams(ducked);
+        });
 }
 
 void EditudeService::openScoreForSession()
@@ -1452,6 +1638,11 @@ void EditudeService::onPlaybackStateChanged()
         return;
     }
     const bool playing = m_playbackController()->isPlaying();
+
+    // Drives studio mode in the shell: voice ducks while this client plays and
+    // the initiator's mic auto-mutes so their speakers aren't rebroadcast.
+    notifyShellPlaybackState(playing);
+
     if (playing) {
         m_playbackActive = true;
         LOGD() << "[editude] playback started; pausing remote op application at revision"
@@ -2021,7 +2212,7 @@ void EditudeService::refreshPresenceModel()
         return;
     }
 
-    QVector<std::tuple<QColor, QString, QVector<muse::RectF>>> data;
+    QVector<EditudePresenceModel::CanvasEntry> data;
 
     for (const auto& cursor : m_presenceOverlay.cursors()) {
         if (cursor.state == "none" || cursor.state.isEmpty()) {
@@ -2051,7 +2242,9 @@ void EditudeService::refreshPresenceModel()
         }
 
         if (!rects.isEmpty()) {
-            data.append(std::make_tuple(cursor.color, cursor.displayName, rects));
+            data.append(std::make_tuple(
+                cursor.color, cursor.displayName, rects,
+                m_speakingContributors.contains(cursor.contributorId)));
         }
     }
 
@@ -2155,5 +2348,34 @@ double editudeGetAudioOutputLatency()
 {
     return s_audioOutputLatencySec;
 }
+
+// ---------------------------------------------------------------------------
+// [editude] Talkback voice state bridge (shell → editor)
+//
+// One export carries both flags the editor needs from the voice session:
+//
+//   {"active": true,
+//    "speaking": ["<contributor-uuid>", ...],
+//    "dimPlayback": false}
+//
+// `active` gates keyboard capture so voice shortcuts never steal keys from
+// MuseScore outside a voice session; `speaking` highlights those
+// contributors' presence cursors on the canvas; `dimPlayback` ducks music
+// while the talkback key is held.
+// ---------------------------------------------------------------------------
+
+extern "C" {
+
+EMSCRIPTEN_KEEPALIVE
+void editudeSetVoiceState(const char* json)
+{
+    EditudeService* service = EditudeService::instance();
+    if (!service || !json) {
+        return;
+    }
+    service->applyVoiceStateJson(QJsonDocument::fromJson(QByteArray(json)).object());
+}
+
+}  // extern "C"
 
 #endif  // Q_OS_WASM

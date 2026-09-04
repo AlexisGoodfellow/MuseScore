@@ -106,6 +106,26 @@ SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only
           ui.style.display = (ui === spinner) ? 'flex' : 'block';
       }
 
+      // [editude] Talkback voice state bridge (shell → editor).
+      //
+      // The app shell calls this whenever the voice session changes: `active`
+      // gates the editor's keyboard capture of voice shortcuts, `speaking`
+      // highlights those contributors' presence cursors on the canvas.
+      // Safe to call before the WASM module finishes loading — it no-ops and
+      // the shell re-pushes state on the next change.
+      window.editudeSetVoiceState = function(state) {
+        try {
+          var mod = window.muapi && window.muapi.Module;
+          if (!mod || !mod.ccall) return false;
+          mod.ccall('editudeSetVoiceState', null, ['string'],
+                    [JSON.stringify(state)]);
+          return true;
+        } catch (e) {
+          console.warn('[viewer] editudeSetVoiceState failed:', e);
+          return false;
+        }
+      };
+
       try {
 
         showUi(spinner);

@@ -117,6 +117,26 @@ EditudeTestActions::Reply EditudeTestActions::waitRevision(int minRevision, int 
     }).toJson(QJsonDocument::Compact) };
 }
 
+EditudeTestActions::Reply EditudeTestActions::actionVoiceState(const QJsonObject& body)
+{
+    // Apply through the same parser the WASM export uses, then read back what
+    // the editor actually observed.
+    m_svc->applyVoiceStateJson(body.value("state").toObject());
+
+    QJsonArray speaking;
+    QStringList ids = m_svc->speakingContributorsForTest().values();
+    ids.sort();  // deterministic for assertions
+    for (const QString& id : ids) {
+        speaking.append(id);
+    }
+
+    return { 200, QJsonDocument(QJsonObject{
+        { "active", m_svc->voiceActiveForTest() },
+        { "speaking", speaking },
+        { "dimPlayback", m_svc->playbackDimmedForTest() },
+    }).toJson(QJsonDocument::Compact) };
+}
+
 EditudeTestActions::Reply EditudeTestActions::dispatchAction(const QJsonObject& body)
 {
     const QString action = body.value("action").toString();
@@ -133,6 +153,7 @@ EditudeTestActions::Reply EditudeTestActions::dispatchAction(const QJsonObject& 
     if (action == QLatin1String("set_tie"))       return actionSetTie(body);
     if (action == QLatin1String("set_voice"))     return actionSetVoice(body);
     if (action == QLatin1String("undo"))          return actionUndo();
+    if (action == QLatin1String("voice_state"))   return actionVoiceState(body);
     if (action == QLatin1String("set_time_signature")) return actionSetTimeSignature(body);
     if (action == QLatin1String("set_tempo"))          return actionSetTempo(body);
     if (action == QLatin1String("set_key_signature"))  return actionSetKeySignature(body);

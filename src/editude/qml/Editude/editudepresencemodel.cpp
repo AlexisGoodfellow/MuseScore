@@ -40,12 +40,11 @@ EditudePresenceModel* EditudePresenceModel::instance()
     return s_instance;
 }
 
-void EditudePresenceModel::setCanvasData(
-    const QVector<std::tuple<QColor, QString, QVector<muse::RectF>>>& canvasData)
+void EditudePresenceModel::setCanvasData(const QVector<CanvasEntry>& canvasData)
 {
     // Count incoming rows before modifying anything.
     int newCount = 0;
-    for (const auto& [color, name, rects] : canvasData) {
+    for (const auto& [color, name, rects, speaking] : canvasData) {
         newCount += rects.size();
     }
 
@@ -128,7 +127,7 @@ void EditudePresenceModel::setNotationViewMatrix(const QVariant& matrix)
 void EditudePresenceModel::remapRows()
 {
     m_rows.clear();
-    for (const auto& [color, name, rects] : m_canvasData) {
+    for (const auto& [color, name, rects, speaking] : m_canvasData) {
         bool first = true;
         for (const muse::RectF& r : rects) {
             QRectF qr(r.x(), r.y(), r.width(), r.height());
@@ -136,6 +135,7 @@ void EditudePresenceModel::remapRows()
             row.screenRect = m_matrix.mapRect(qr);
             row.color      = color;
             row.name       = first ? name : QString();
+            row.speaking   = speaking;
             first = false;
             m_rows.append(row);
         }
@@ -157,18 +157,20 @@ QVariant EditudePresenceModel::data(const QModelIndex& index, int role) const
     }
     const Row& row = m_rows.at(index.row());
     switch (role) {
-    case RectRole:  return row.screenRect;
-    case ColorRole: return row.color;
-    case NameRole:  return row.name;
-    default:        return {};
+    case RectRole:     return row.screenRect;
+    case ColorRole:    return row.color;
+    case NameRole:     return row.name;
+    case SpeakingRole: return row.speaking;
+    default:           return {};
     }
 }
 
 QHash<int, QByteArray> EditudePresenceModel::roleNames() const
 {
     return {
-        { RectRole,  "screenRect"  },
-        { ColorRole, "rectColor"   },
-        { NameRole,  "displayName" },
+        { RectRole,     "screenRect"  },
+        { ColorRole,    "rectColor"   },
+        { NameRole,     "displayName" },
+        { SpeakingRole, "isSpeaking"  },
     };
 }

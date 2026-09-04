@@ -46,9 +46,10 @@ namespace mu::editude::internal {
  * multiple rows if its selection spans more than one system).
  *
  * Roles:
- *   RectRole  (Qt::UserRole+1) → QRectF   — screen-space rectangle
- *   ColorRole (Qt::UserRole+2) → QColor   — contributor's assigned colour
- *   NameRole  (Qt::UserRole+3) → QString  — display name (non-empty on first rect only)
+ *   RectRole     (Qt::UserRole+1) → QRectF   — screen-space rectangle
+ *   ColorRole    (Qt::UserRole+2) → QColor   — contributor's assigned colour
+ *   NameRole     (Qt::UserRole+3) → QString  — display name (non-empty on first rect only)
+ *   SpeakingRole (Qt::UserRole+4) → bool     — contributor is talking in voice chat
  */
 class EditudePresenceModel : public QAbstractListModel
 {
@@ -59,9 +60,10 @@ class EditudePresenceModel : public QAbstractListModel
 
 public:
     enum Roles {
-        RectRole  = Qt::UserRole + 1,
-        ColorRole = Qt::UserRole + 2,
-        NameRole  = Qt::UserRole + 3,
+        RectRole     = Qt::UserRole + 1,
+        ColorRole    = Qt::UserRole + 2,
+        NameRole     = Qt::UserRole + 3,
+        SpeakingRole = Qt::UserRole + 4,
     };
 
     explicit EditudePresenceModel(QObject* parent = nullptr);
@@ -70,8 +72,10 @@ public:
     static EditudePresenceModel* instance();
 
     // Called by EditudeService when presence data changes.
-    // canvasData: list of (colour, name, list-of-canvas-rects) per contributor cursor.
-    void setCanvasData(const QVector<std::tuple<QColor, QString, QVector<muse::RectF>>>& canvasData);
+    // canvasData: list of (colour, name, list-of-canvas-rects, is-speaking)
+    // per contributor cursor.
+    using CanvasEntry = std::tuple<QColor, QString, QVector<muse::RectF>, bool>;
+    void setCanvasData(const QVector<CanvasEntry>& canvasData);
 
     // Shows a transient toast notification; auto-clears after 4 s.
     void showToast(const QString& text);
@@ -118,9 +122,10 @@ private:
         QRectF screenRect;
         QColor color;
         QString name;  // non-empty only on the first rect of each contributor
+        bool speaking = false;
     };
 
-    QVector<std::tuple<QColor, QString, QVector<muse::RectF>>> m_canvasData;
+    QVector<CanvasEntry> m_canvasData;
     QTransform m_matrix;
     QVector<Row> m_rows;
 

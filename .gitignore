@@ -13,6 +13,11 @@ build
 build.release
 build.debug
 build.e2e  # [editude]
+# [editude] WASM build output. Needs its own pattern: the bare `build` rule
+# above matches only a path component named exactly "build". Note that git
+# does not support trailing comments in .gitignore, so the pattern goes on
+# its own line.
+build.wasm*
 build.install
 build.tooldata
 build.qtc

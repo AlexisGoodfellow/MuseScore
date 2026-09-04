@@ -47,6 +47,10 @@ private:
     Reply actionSetPitch(const QJsonObject& body);
     Reply actionSetDuration(const QJsonObject& body);
     Reply actionUndo();
+    // Round-trips a shell voice-state payload through the editor's parser so
+    // a renamed field or handler fails CI rather than silently killing the
+    // talkback feature. See adr/2026-04-07-talkback-mic.md.
+    Reply actionVoiceState(const QJsonObject& body);
 
     // Tier 1 — extended ops
     Reply actionSetTie(const QJsonObject& body);
