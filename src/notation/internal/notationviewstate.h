@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -19,19 +19,22 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+
 #pragma once
 
 #include "../inotationviewstate.h"
 #include "async/asyncable.h"
 
+#include "draw/types/transform.h"
+
 #include "modularity/ioc.h"
-#include "../inotationconfiguration.h"
+#include "../inotationcontextconfiguration.h"
 
 namespace mu::notation {
 class Notation;
 class NotationViewState : public INotationViewState, public muse::async::Asyncable, public muse::Contextable
 {
-    muse::GlobalInject<INotationConfiguration> configuration;
+    muse::ContextInject<INotationContextConfiguration> configuration = { this };
 
 public:
     explicit NotationViewState(Notation* notation, const muse::modularity::ContextPtr& ctx);

@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -33,12 +33,15 @@
 #include "io/buffer.h"
 #include "translation.h"
 
+#include "iengravingconfiguration.h"
+#include "iengravingcontextconfiguration.h"
 #include "iengravingfont.h"
 
 #include "rw/rwregister.h"
 
 #include "types/typesconv.h"
 
+#include "rendering/iscorerenderer.h"
 #include "rendering/score/autoplace.h"
 #include "rendering/score/chordlayout.h"
 #include "rendering/score/tlayout.h"
@@ -52,6 +55,7 @@
 #include "../editing/editdata.h"
 #include "../editing/editproperty.h"
 #include "../editing/elementeditdata.h"
+#include "../editing/navigation.h"
 
 #include "chord.h"
 #include "factory.h"
@@ -108,7 +112,7 @@ EngravingItem::EngravingItem(const EngravingItem& e, bool link)
 
     if (e.m_leftParenthesis) {
         m_leftParenthesis = e.m_leftParenthesis->clone();
-        m_leftParenthesis->setParent(this);
+        m_leftParenthesis->setOwnershipParent(this);
         m_leftParenthesis->setTrack(track());
         if (link) {
             score()->undo(new Link(m_leftParenthesis, e.m_leftParenthesis));
@@ -116,7 +120,7 @@ EngravingItem::EngravingItem(const EngravingItem& e, bool link)
     }
     if (e.m_rightParenthesis) {
         m_rightParenthesis = e.m_rightParenthesis->clone();
-        m_rightParenthesis->setParent(this);
+        m_rightParenthesis->setOwnershipParent(this);
         m_rightParenthesis->setTrack(track());
         if (link) {
             score()->undo(new Link(m_rightParenthesis, e.m_rightParenthesis));
@@ -162,14 +166,40 @@ void EngravingItem::setAccessibleEnabled(bool enabled)
     m_accessibleEnabled = enabled;
 }
 
-EngravingItem* EngravingItem::parentItem(bool explicitParent) const
+EngravingItem* EngravingItem::accessibleParentItem() const
 {
-    EngravingObject* p = explicitParent ? this->explicitParent() : parent();
+    EngravingItem* p = layoutParent();
+    if (p) {
+        return p;
+    }
+
+    // fall back to the raw parent, so that e.g. palette items reach the dummy
+    EngravingObject* raw = parent();
+    if (raw && raw->isEngravingItem()) {
+        return toEngravingItem(raw);
+    }
+
+    return nullptr;
+}
+
+EngravingItemList EngravingItem::accessibleChildren() const
+{
+    return childrenItems();
+}
+
+EngravingItem* EngravingItem::ownershipParentItem() const
+{
+    EngravingObject* p = ownershipParent();
     if (p && p->isEngravingItem()) {
         return toEngravingItem(p);
     }
 
     return nullptr;
+}
+
+EngravingItem* EngravingItem::layoutParent() const
+{
+    return ownershipParentItem();
 }
 
 static void collectChildrenItems(const EngravingObject* item, EngravingItemList& list, bool all)
@@ -192,14 +222,19 @@ EngravingItemList EngravingItem::childrenItems(bool all) const
     return list;
 }
 
+const std::shared_ptr<IEngravingConfiguration>& EngravingItem::configuration() const
+{
+    return score()->configuration.get();
+}
+
 const muse::modularity::ContextPtr& EngravingItem::iocContext() const
 {
     return score()->iocContext();
 }
 
-const std::shared_ptr<IEngravingConfiguration>& EngravingItem::configuration() const
+const std::shared_ptr<IEngravingContextConfiguration>& EngravingItem::contextConfiguration() const
 {
-    return score()->configuration.get();
+    return score()->contextConfiguration.get();
 }
 
 const std::shared_ptr<rendering::IScoreRenderer>& EngravingItem::renderer() const
@@ -256,7 +291,8 @@ void EngravingItem::localSpatiumChanged(double oldValue, double newValue)
 
 double EngravingItem::spatium() const
 {
-    if (systemFlag() || (explicitParent() && parentItem()->systemFlag())) {
+    EngravingItem* p = layoutParent();
+    if (systemFlag() || (p && p->systemFlag())) {
         return style().spatium();
     }
     Staff* s = staff();
@@ -284,6 +320,29 @@ bool EngravingItem::isInteractionAvailable() const
 bool EngravingItem::offsetIsSpatiumDependent() const
 {
     return sizeIsSpatiumDependent() || (m_flags & ElementFlag::ON_STAFF);
+}
+
+Sid EngravingItem::defaultPosSid() const
+{
+    return Sid::NOSTYLE;
+}
+
+PointF EngravingItem::defaultPos() const
+{
+    Sid styleId = defaultPosSid();
+
+    if (styleId == Sid::NOSTYLE) {
+        return PointF();
+    }
+
+    PointF offsetPos = style().value(styleId).value<PointF>();
+    if (offsetIsSpatiumDependent()) {
+        offsetPos *= spatium();
+    } else {
+        offsetPos *= DPMM;
+    }
+
+    return offsetPos;
 }
 
 PlacementV EngravingItem::placement() const
@@ -334,7 +393,7 @@ void EngravingItem::deleteLater()
     if (selected()) {
         score()->deselect(this);
     }
-    masterScore()->deleteLater(this);
+    masterScore()->cmdState().deleteLater(this);
 }
 
 //---------------------------------------------------------
@@ -364,12 +423,6 @@ bool EngravingItem::collectForDrawing() const
         return false;
     }
 
-    bool isAnnotation = parent() && parent()->isSegment() && toSegment(parent())->element(track()) != this;
-    if (isAnnotation) {
-        Segment* segment = toSegment(parent());
-        return systemFlag() || (segment->measure() && segment->measure()->visible(staffIdx()));
-    }
-
     return true;
 }
 
@@ -384,7 +437,6 @@ void EngravingItem::reset()
     undoResetProperty(Pid::MIN_DISTANCE);
     undoResetProperty(Pid::OFFSET);
     undoResetProperty(Pid::LEADING_SPACE);
-    setOffsetChanged(false);
     EngravingObject::reset();
 }
 
@@ -583,14 +635,13 @@ void EngravingItem::setVoice(voice_idx_t v)
 
 Fraction EngravingItem::tick() const
 {
-    const EngravingItem* e = this;
-    while (e->explicitParent()) {
-        if (e->explicitParent()->isSegment()) {
-            return toSegment(e->explicitParent())->tick();
-        } else if (e->explicitParent()->isMeasureBase()) {
-            return toMeasureBase(e->explicitParent())->tick();
+    // walks EngravingObject, because the chain leaves EngravingItem at the score
+    for (const EngravingObject* e = ownershipParent(); e; e = e->ownershipParent()) {
+        if (e->isSegment()) {
+            return toSegment(e)->tick();
+        } else if (e->isMeasureBase()) {
+            return toMeasureBase(e)->tick();
         }
-        e = e->parentItem();
     }
     return Fraction(0, 1);
 }
@@ -601,12 +652,10 @@ Fraction EngravingItem::tick() const
 
 Fraction EngravingItem::rtick() const
 {
-    const EngravingItem* e = this;
-    while (e->explicitParent()) {
-        if (e->explicitParent()->isSegment()) {
-            return toSegment(e->explicitParent())->rtick();
+    for (const EngravingObject* e = ownershipParent(); e; e = e->ownershipParent()) {
+        if (e->isSegment()) {
+            return toSegment(e)->rtick();
         }
-        e = e->parentItem();
     }
     return Fraction(0, 1);
 }
@@ -668,9 +717,9 @@ Color EngravingItem::curColor(bool isVisible, const rendering::PaintOptions& opt
 
 Color EngravingItem::curColor(bool isVisible, Color normalColor, const rendering::PaintOptions& opt) const
 {
-    // the default element color is always interpreted as black in printing
     if (opt.isPrinting) {
-        return (normalColor == configuration()->defaultColor()) ? Color::BLACK : normalColor;
+        // For printing, always use the actual color of the item (default black unless overridden by the user)
+        return normalColor;
     }
 
     if (flag(ElementFlag::DROP_TARGET)) {
@@ -705,13 +754,13 @@ Color EngravingItem::curColor(bool isVisible, Color normalColor, const rendering
         return configuration()->invisibleColor();
     }
 
-    if (opt.invertColors) {
-        if (normalColor == configuration()->defaultColor()) {
-            return maybeOverrideColor(configuration()->scoreInversionColor());
-        }
-        return maybeOverrideColor(normalColor.inverted());
+    if (!opt.ignoreDisplayedDefaultColor && normalColor == configuration()->defaultColor()) {
+        return maybeOverrideColor(configuration()->displayedDefaultColor(opt.invertColors));
     }
 
+    if (opt.invertColors) {
+        return maybeOverrideColor(normalColor.inverted());
+    }
     return maybeOverrideColor(normalColor);
 }
 
@@ -725,10 +774,10 @@ PointF EngravingItem::systemPos() const
     }
 
     PointF result = pos();
-    EngravingItem* ancestor = parentItem();
+    EngravingItem* ancestor = layoutParent();
     while (ancestor && !ancestor->isSystem()) {
         result += ancestor->pos();
-        ancestor = ancestor->parentItem();
+        ancestor = ancestor->layoutParent();
     }
 
     return result;
@@ -742,7 +791,8 @@ PointF EngravingItem::systemPos() const
 PointF EngravingItem::pagePos() const
 {
     PointF p(pos());
-    if (explicitParent() == nullptr) {
+    EngravingItem* parent = layoutParent();
+    if (parent == nullptr) {
         return p;
     }
 
@@ -777,7 +827,6 @@ PointF EngravingItem::pagePos() const
     if (m_flags & ElementFlag::ON_STAFF) {
         // Segments, measures and systems all contain multiple staves
         // Find the position of the stave that this item is on
-        EngravingItem* parent = parentItem();
         if (parent->isSegment()) {
             Segment* segment = toSegment(parent);
             Measure* measure = segment ? segment->measure() : nullptr;
@@ -795,8 +844,8 @@ PointF EngravingItem::pagePos() const
         }
         p.rx() = pageX();
     } else {
-        if (explicitParent()->explicitParent()) {
-            p += parentItem()->pagePos();
+        if (parent->layoutParent()) {
+            p += parent->pagePos();
         }
     }
     return p;
@@ -809,7 +858,8 @@ PointF EngravingItem::pagePos() const
 PointF EngravingItem::canvasPos() const
 {
     PointF p(pos());
-    if (explicitParent() == nullptr) {
+    EngravingItem* parent = layoutParent();
+    if (parent == nullptr) {
         return p;
     }
 
@@ -851,7 +901,6 @@ PointF EngravingItem::canvasPos() const
     if (m_flags & ElementFlag::ON_STAFF) {
         // Segments, measures and systems all contain multiple staves
         // Find the position of the stave that this item is on
-        EngravingItem* parent = parentItem();
         if (parent->isSegment()) {
             Segment* segment = toSegment(parent);
             Measure* measure = segment ? segment->measure() : nullptr;
@@ -859,7 +908,7 @@ PointF EngravingItem::canvasPos() const
             Page* page = system ? system->page() : nullptr;
             p.ry() += measureStaffY(measure, idx) + systemStaffY(system, idx) + pageY(page);
         } else if (parent->isMeasure()) {
-            Measure* measure = toMeasure(parent);
+            Measure* measure = toMeasure(parent)->coveringMMRestOrThis();
             System* system = measure->system();
             Page* page = system->page();
             p.ry() += measureStaffY(measure, idx) + systemStaffY(system, idx) + pageY(page);
@@ -871,7 +920,7 @@ PointF EngravingItem::canvasPos() const
         }
         p.rx() = canvasX();
     } else {
-        p += parentItem()->canvasPos();
+        p += parent->canvasPos();
     }
     return p;
 }
@@ -883,7 +932,7 @@ PointF EngravingItem::canvasPos() const
 double EngravingItem::pageX() const
 {
     double xp = x();
-    for (EngravingItem* e = parentItem(); e && e->parentItem(); e = e->parentItem()) {
+    for (EngravingItem* e = layoutParent(); e && e->layoutParent(); e = e->layoutParent()) {
         xp += e->x();
     }
     return xp;
@@ -896,7 +945,7 @@ double EngravingItem::pageX() const
 double EngravingItem::canvasX() const
 {
     double xp = x();
-    for (EngravingItem* e = parentItem(); e; e = e->parentItem()) {
+    for (EngravingItem* e = layoutParent(); e; e = e->layoutParent()) {
         xp += e->x();
     }
     return xp;
@@ -977,7 +1026,7 @@ void EngravingItem::dump() const
          typeName(), ldata->pos().x(), ldata->pos().y(),
          ldata->bbox().x(), ldata->bbox().y(), ldata->bbox().width(), ldata->bbox().height(),
          pageBoundingRect().x(), pageBoundingRect().y(), pageBoundingRect().width(), pageBoundingRect().height(),
-         explicitParent());
+         ownershipParent());
 }
 
 //---------------------------------------------------------
@@ -1184,8 +1233,8 @@ PropertyValue EngravingItem::getProperty(Pid propertyId) const
     case Pid::HAS_PARENTHESES:
         return parenthesesMode();
     default:
-        if (explicitParent()) {
-            return explicitParent()->getProperty(propertyId);
+        if (ownershipParent()) {
+            return ownershipParent()->getProperty(propertyId);
         }
 
         return PropertyValue();
@@ -1266,8 +1315,8 @@ bool EngravingItem::setProperty(Pid propertyId, const PropertyValue& v)
         setParenthesesMode(v.value<ParenthesesMode>());
         break;
     default:
-        if (explicitParent()) {
-            return explicitParent()->setProperty(propertyId, v);
+        if (ownershipParent()) {
+            return ownershipParent()->setProperty(propertyId, v);
         }
 
         LOG_PROP() << typeName() << " unknown <" << propertyName(propertyId) << ">(" << int(propertyId) << "), data: " << v.value<String>();
@@ -1295,6 +1344,65 @@ void EngravingItem::manageExclusionFromParts(bool exclude)
     } else {
         score()->undoAddElement(this, /*addToLinkedStaves*/ true, /*ctrlModifier*/ false, this);
     }
+}
+
+EngravingItem* EngravingItem::sharedItem() const
+{
+    return ldata()->m_sharedItem;
+}
+
+const std::vector<EngravingItem*>& EngravingItem::originItems() const
+{
+    return ldata()->m_originItems;
+}
+
+void EngravingItem::connectSharedItem(EngravingItem* sharedItem, EngravingItem* originItem)
+{
+    if (originItem->ldata()->m_sharedItem == sharedItem) {
+        return;
+    }
+
+    IF_ASSERT_FAILED(sharedItem->type() == originItem->type()) {
+        return;
+    }
+
+    IF_ASSERT_FAILED(!sharedItem->isChord() && !originItem->isChord()) {
+        // Notes are connected, not chords
+        return;
+    }
+
+    IF_ASSERT_FAILED(sharedItem->ldata()->m_sharedItem == nullptr && originItem->ldata()->m_originItems.empty()) {
+        return;
+    }
+
+    originItem->mutldata()->m_sharedItem = sharedItem;
+
+    std::vector<EngravingItem*>& curOriginItems = sharedItem->mutldata()->m_originItems;
+    auto it = std::lower_bound(curOriginItems.begin(), curOriginItems.end(), originItem, [](EngravingItem* item1, EngravingItem* item2) {
+        return item1->track() < item2->track();
+    });
+
+    curOriginItems.insert(it, originItem);
+}
+
+void EngravingItem::disconnectSharedItem(EngravingItem* sharedItem, EngravingItem* originItem)
+{
+    IF_ASSERT_FAILED(originItem->m_layoutData->m_sharedItem == sharedItem) {
+        return;
+    }
+
+    originItem->m_layoutData->m_sharedItem = nullptr;
+
+    DO_ASSERT(muse::remove(sharedItem->m_layoutData->m_originItems, originItem));
+}
+
+void EngravingItem::disconnectAllOriginItems(EngravingItem* sharedItem)
+{
+    for (EngravingItem* originItem : sharedItem->originItems()) {
+        originItem->m_layoutData->m_sharedItem = nullptr;
+    }
+
+    sharedItem->m_layoutData->m_originItems.clear();
 }
 
 bool EngravingItem::isBefore(const EngravingItem* item) const
@@ -1365,8 +1473,6 @@ bool EngravingItem::elementAppliesToTrack(const track_idx_t refTrack) const
 void EngravingItem::setPlacementBasedOnVoiceAssignment(DirectionV styledDirection)
 {
     PlacementV oldPlacement = placement();
-    bool offsetIsStyled = isStyled(Pid::OFFSET);
-
     PlacementV newPlacement = PlacementV::BELOW;
 
     DirectionV internalDirectionProperty = getProperty(Pid::DIRECTION).value<DirectionV>();
@@ -1397,7 +1503,7 @@ void EngravingItem::setPlacementBasedOnVoiceAssignment(DirectionV styledDirectio
                 if (segment && segment->isTimeTickType() && segment->measure() != measure) {
                     // Edge case: this is a TimeTick segment at the end of previous measure. Happens only
                     // when dynamic is anchorToEndOfPrevious. In this case look for preceding segment.
-                    segment = segment->prev1(Segment::CHORD_REST_OR_TIME_TICK_TYPE);
+                    segment = segment->prev1(SegmentType::Duration);
                     assert(segment);
                     measure = segment->measure();
                 }
@@ -1419,9 +1525,6 @@ void EngravingItem::setPlacementBasedOnVoiceAssignment(DirectionV styledDirectio
 
     if (newPlacement != oldPlacement) {
         setPlacement(newPlacement);
-        if (offsetIsStyled) {
-            resetProperty(Pid::OFFSET);
-        }
     }
 }
 
@@ -1557,6 +1660,14 @@ void EngravingItem::undoChangeProperty(Pid pid, const PropertyValue& val, Proper
     EngravingObject::undoChangeProperty(pid, val, ps);
 }
 
+void EngravingItem::undoResetProperty(Pid id)
+{
+    EngravingObject::undoResetProperty(id);
+    if (id == Pid::OFFSET) {
+        setOffsetChanged(false);
+    }
+}
+
 //---------------------------------------------------------
 //   propertyDefault
 //---------------------------------------------------------
@@ -1580,10 +1691,6 @@ PropertyValue EngravingItem::propertyDefault(Pid pid) const
     case Pid::SELECTED:
         return false;
     case Pid::OFFSET: {
-        PropertyValue v = EngravingObject::propertyDefault(pid);
-        if (v.isValid()) {        // if it's a styled property
-            return v;
-        }
         return PropertyValue::fromValue(PointF());
     }
     case Pid::MIN_DISTANCE: {
@@ -1614,8 +1721,8 @@ PropertyValue EngravingItem::propertyDefault(Pid pid) const
             return v;
         }
 
-        if (explicitParent()) {
-            return explicitParent()->propertyDefault(pid);
+        if (ownershipParent()) {
+            return ownershipParent()->propertyDefault(pid);
         }
 
         return PropertyValue();
@@ -1664,7 +1771,7 @@ bool EngravingItem::isPlayable() const
     case ElementType::CHORD:
         return true;
     case ElementType::HARMONY:
-        return explicitParent() && explicitParent()->isSegment();
+        return ownershipParent() && ownershipParent()->isSegment();
     default:
         return false;
     }
@@ -1683,7 +1790,7 @@ EngravingItem* EngravingItem::findAncestor(ElementType t)
 {
     EngravingItem* e = this;
     while (e && e->type() != t) {
-        e = e->parentItem();
+        e = e->layoutParent();
     }
     return e;
 }
@@ -1692,7 +1799,7 @@ const EngravingItem* EngravingItem::findAncestor(ElementType t) const
 {
     const EngravingItem* e = this;
     while (e && e->type() != t) {
-        e = e->parentItem();
+        e = e->layoutParent();
     }
     return e;
 }
@@ -1705,8 +1812,8 @@ Measure* EngravingItem::findMeasure()
 {
     if (isMeasure()) {
         return toMeasure(this);
-    } else if (explicitParent()) {
-        return parentItem()->findMeasure();
+    } else if (EngravingItem* p = layoutParent()) {
+        return p->findMeasure();
     } else {
         return 0;
     }
@@ -1730,8 +1837,8 @@ MeasureBase* EngravingItem::findMeasureBase()
 {
     if (isMeasureBase()) {
         return toMeasureBase(this);
-    } else if (explicitParent()) {
-        return parentItem()->findMeasureBase();
+    } else if (EngravingItem* p = layoutParent()) {
+        return p->findMeasureBase();
     } else {
         return 0;
     }
@@ -1890,7 +1997,7 @@ EngravingItem* EngravingItem::nextElement()
         case ElementType::BAR_LINE:
             return nextSegmentElement();
         default: {
-            return e->parentItem()->nextElement();
+            return e->layoutParent()->nextElement();
         }
         }
     }
@@ -1924,7 +2031,7 @@ EngravingItem* EngravingItem::prevElement()
         case ElementType::BAR_LINE:
             return prevSegmentElement();
         default: {
-            return e->parentItem()->prevElement();
+            return e->layoutParent()->prevElement();
         }
         }
     }
@@ -1974,9 +2081,9 @@ EngravingItem* EngravingItem::nextSegmentElement()
         default:
             break;
         }
-        p = p->parentItem();
+        p = p->layoutParent();
     }
-    return score()->firstElement();
+    return Navigation::firstElement(score());
 }
 
 //------------------------------------------------------------------------------------------
@@ -2022,9 +2129,9 @@ EngravingItem* EngravingItem::prevSegmentElement()
         default:
             break;
         }
-        p = p->parentItem();
+        p = p->layoutParent();
     }
-    return score()->firstElement();
+    return Navigation::firstElement(score());
 }
 
 #ifndef ENGRAVING_NO_ACCESSIBILITY
@@ -2107,7 +2214,7 @@ bool EngravingItem::isUserModified() const
 
 void EngravingItem::triggerLayout() const
 {
-    if (explicitParent()) {
+    if (ownershipParent()) {
         score()->setLayout(tick(), staffIdx(), this);
     }
 }
@@ -2122,14 +2229,14 @@ void EngravingItem::triggerLayout() const
 
 void EngravingItem::triggerLayoutAll() const
 {
-    if (explicitParent()) {
+    if (ownershipParent()) {
         score()->setLayoutAll(staffIdx(), this);
     }
 }
 
 void EngravingItem::triggerLayoutToEnd() const
 {
-    if (explicitParent()) {
+    if (ownershipParent()) {
         score()->setLayout(tick(), score()->endTick(), staffIdx(), staffIdx(), this);
     }
 }
@@ -2207,7 +2314,7 @@ RectF EngravingItem::drag(EditData& ed)
                 p = toPage(e);
                 break;
             }
-            e = e->parentItem();
+            e = e->layoutParent();
         }
         if (p) {
             bool move = false;
@@ -2263,12 +2370,12 @@ void EngravingItem::endDrag(EditData& ed)
 std::vector<LineF> EngravingItem::genericDragAnchorLines() const
 {
     double xp = 0.0;
-    for (EngravingItem* e = parentItem(); e; e = e->parentItem()) {
+    for (EngravingItem* e = layoutParent(); e; e = e->layoutParent()) {
         xp += e->x();
     }
     double yp;
-    if (explicitParent()->isSegment() || explicitParent()->isMeasure()) {
-        Measure* meas = explicitParent()->isSegment() ? toSegment(explicitParent())->measure() : toMeasure(explicitParent());
+    if (ownershipParent()->isSegment() || ownershipParent()->isMeasure()) {
+        Measure* meas = ownershipParent()->isSegment() ? toSegment(ownershipParent())->measure() : toMeasure(ownershipParent());
         System* system = meas->system();
         const staff_idx_t stIdx = effectiveStaffIdx();
         if (stIdx == muse::nidx) {
@@ -2283,7 +2390,7 @@ std::vector<LineF> EngravingItem::genericDragAnchorLines() const
             yp += staff()->staffTypeForElement(this)->yoffset().val() * spatium();
         }
     } else {
-        yp = parentItem()->canvasPos().y();
+        yp = layoutParent()->canvasPos().y();
     }
     PointF p1(xp, yp);
     LineF anchorLine(p1, canvasPos());
@@ -2452,7 +2559,7 @@ void EngravingItem::setHasLeftParenthesis(bool v, bool addToLinked, bool generat
     if (v) {
         if (!m_leftParenthesis) {
             Parenthesis* paren = Factory::createParenthesis(this);
-            paren->setParent(this);
+            paren->setOwnershipParent(this);
             paren->setTrack(track());
             paren->setDirection(DirectionH::LEFT);
             paren->setGenerated(generated);
@@ -2481,7 +2588,7 @@ void EngravingItem::setHasRightParenthesis(bool v, bool addToLinked, bool genera
     if (v) {
         if (!m_rightParenthesis) {
             Parenthesis* paren = Factory::createParenthesis(this);
-            paren->setParent(this);
+            paren->setOwnershipParent(this);
             paren->setTrack(track());
             paren->setDirection(DirectionH::RIGHT);
             paren->setGenerated(generated);
@@ -2499,7 +2606,7 @@ EngravingItem::BarBeat EngravingItem::barbeat() const
     EngravingItem::BarBeat barBeat = { 0, 0, 0.0F };
     const EngravingItem* parent = this;
     while (parent && !parent->isSegment() && !parent->isMeasure()) {
-        parent = parent->parentItem();
+        parent = parent->layoutParent();
     }
 
     if (!parent) {
@@ -2598,7 +2705,7 @@ void EngravingItem::setVisible(bool f)
 #ifndef ENGRAVING_NO_ACCESSIBILITY
 void EngravingItem::initAccessibleIfNeed()
 {
-    if (!configuration()->isAccessibleEnabled()) {
+    if (!contextConfiguration() || !contextConfiguration()->isAccessibleEnabled()) {
         return;
     }
 
@@ -2612,10 +2719,10 @@ void EngravingItem::initAccessibleIfNeed()
 void EngravingItem::doInitAccessible()
 {
     EngravingItemList parents;
-    auto parent = parentItem(false /*not explicit*/);
+    EngravingItem* parent = accessibleParentItem();
     while (parent) {
         parents.push_back(parent);
-        parent = parent->parentItem(false /*not explicit*/);
+        parent = parent->accessibleParentItem();
     }
 
     for (auto it = parents.rbegin(); it != parents.rend(); ++it) {
@@ -2723,9 +2830,11 @@ bool EngravingItem::elementAppliesToTrack(const track_idx_t elementTrack, const 
         return false;
     }
 
-    if (voiceAssignment == VoiceAssignment::ALL_VOICE_IN_INSTRUMENT && (part->startTrack() <= refTrack
-                                                                        && part->endTrack() - 1 >= refTrack)) {
-        return true;
+    if (voiceAssignment == VoiceAssignment::ALL_VOICE_IN_INSTRUMENT) {
+        const TrackRange range = part->trackRange();
+        if (range.startTrack <= refTrack && range.endTrack - 1 >= refTrack) {
+            return true;
+        }
     }
     return false;
 }

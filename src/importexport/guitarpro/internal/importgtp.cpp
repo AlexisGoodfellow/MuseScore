@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -61,6 +61,7 @@
 #include "engraving/dom/stafftext.h"
 #include "engraving/dom/stafftype.h"
 #include "engraving/dom/stringdata.h"
+#include "engraving/dom/tapping.h"
 #include "engraving/dom/tempotext.h"
 #include "engraving/dom/text.h"
 #include "engraving/dom/textline.h"
@@ -69,8 +70,11 @@
 #include "engraving/dom/tuplet.h"
 #include "engraving/dom/volta.h"
 #include "engraving/dom/stringtunings.h"
+#include "engraving/dom/capo.h"
 #include "engraving/rw/xmlwriter.h"
 #include "engraving/types/symid.h"
+
+#include "engraving/editing/editchord.h"
 
 #include "log.h"
 
@@ -519,7 +523,9 @@ void GuitarPro::setTuplet(Tuplet* tuplet, int tuple)
 
 void GuitarPro::addDynamic(Note* note, int d)
 {
-    if (d < 0) {
+    // guitar pro only allows their users to go from ppp to fff
+    static const std::array<String, 9> map_dyn { u"f", u"ppp", u"pp", u"p", u"mp", u"mf", u"f", u"ff", u"fff" };
+    if (d < 0 || static_cast<size_t>(d) >= map_dyn.size()) {
         return;
     }
     if (!note->chord()) {
@@ -535,8 +541,6 @@ void GuitarPro::addDynamic(Note* note, int d)
     }
     if (!s->findAnnotation(ElementType::DYNAMIC, note->staffIdx() * VOICES, note->staffIdx() * VOICES + VOICES - 1)) {
         Dynamic* dyn = new Dynamic(s);
-        // guitar pro only allows their users to go from ppp to fff
-        const String map_dyn[] = { u"f", u"ppp", u"pp", u"p", u"mp", u"mf", u"f", u"ff", u"fff" };
         dyn->setDynamicType(map_dyn[d]);
         dyn->setTrack(note->track());
         s->add(dyn);
@@ -692,7 +696,6 @@ void GuitarPro::createSlide(int sl, ChordRest* cr, int staffIdx, Note* note)
         //s->setXmlText("");
         s->setGlissandoType(GlissandoType::STRAIGHT);
         cr->add(s);
-        s->setAnchor(Spanner::Anchor::NOTE);
         Segment* prevSeg = cr->segment()->prev1(SegmentType::ChordRest);
         EngravingItem* prevElem = prevSeg->element(staffIdx);
         if (prevElem) {
@@ -705,7 +708,7 @@ void GuitarPro::createSlide(int sl, ChordRest* cr, int staffIdx, Note* note)
                 s->setStartElement(prevChord->upNote());
                 s->setTick(prevSeg->tick());
                 s->setTrack(staffIdx);
-                s->setParent(prevChord->upNote());
+                s->setOwnershipParent(prevChord->upNote());
                 s->setText(u"");
                 s->setGlissandoType(GlissandoType::STRAIGHT);
                 s->setGlissandoShift(sl == SHIFT_SLIDE);
@@ -886,7 +889,7 @@ void GuitarPro::createMeasures()
     //      for (int i = 0; i < measures; ++i) {
     for (size_t i = 0; i < bars.size(); ++i) {     // ?? (ws)
         Fraction nts = bars[i].timesig;
-        Measure* m = Factory::createMeasure(score->dummy()->system());
+        Measure* m = Factory::createMeasure(score);
         m->setTick(tick);
         m->setTimesig(nts);
         m->setTicks(nts);
@@ -1065,7 +1068,7 @@ bool GuitarPro1::read(IODevice* io)
     Fraction tick = { 0, 1 };
     for (size_t i = 0; i < measures; ++i) {
         Fraction nts = bars[i].timesig;
-        Measure* m = Factory::createMeasure(score->dummy()->system());
+        Measure* m = Factory::createMeasure(score);
         m->setTick(tick);
         m->setTimesig(nts);
         m->setTicks(nts);
@@ -1247,7 +1250,6 @@ void GuitarPro::setTempo(int newTempo, Measure* measure)
         segment->add(tt);
         tempo = newTempo;
         last_tempo = newTempo;
-        score->setTempo(measure->tick(), BeatsPerSecond::fromBPM(newTempo));
     }
 }
 
@@ -1334,7 +1336,7 @@ void GuitarPro::createSlur(bool hasSlur, staff_idx_t staffIdx, ChordRest* cr)
 {
     if (hasSlur && (slurs[staffIdx] == 0)) {
         Slur* slur = Factory::createSlur(score->dummy());
-        slur->setParent(0);
+        slur->setOwnershipParent(0);
         slur->setTrack(cr->track());
         slur->setTrack2(cr->track());
         slur->setTick(cr->tick());
@@ -1460,7 +1462,7 @@ bool GuitarPro2::read(IODevice* io)
     Fraction tick = { 0, 1 };
     for (size_t i = 0; i < measures; ++i) {
         Fraction nts = bars[i].timesig;
-        Measure* m = Factory::createMeasure(score->dummy()->system());
+        Measure* m = Factory::createMeasure(score);
         m->setTick(tick);
         m->setTimesig(nts);
         m->setTicks(nts);
@@ -1501,6 +1503,10 @@ bool GuitarPro2::read(IODevice* io)
         }
         /*int midiPort     =*/ readInt();     //  - 1;
         int midiChannel  = readInt() - 1;
+        if (midiChannel < 0 || midiChannel >= static_cast<int>(channelDefaults.size())) {
+            LOGE() << "midiChannel " << midiChannel << " out of range 0-" << channelDefaults.size();
+            return false;
+        }
         /*int midiChannel2 =*/ readInt();     // - 1;
         int frets        = readInt();
         int capo         = readInt();
@@ -1517,7 +1523,6 @@ bool GuitarPro2::read(IODevice* io)
         Instrument* instr = part->instrument();
         instr->setStringData(stringData);
         instr->setSingleNoteDynamics(false);
-        part->setPartName(name);
         part->setPlainLongName(name);
 
         //
@@ -1564,11 +1569,19 @@ bool GuitarPro2::read(IODevice* io)
 
         if (capo > 0 && !engravingConfiguration()->guitarProImportExperimental()) {
             Segment* s = measure->getSegment(SegmentType::ChordRest, measure->tick());
-            StaffText* st = new StaffText(s);
-            //                  st->setTextStyleType(TextStyleType::STAFF);
-            st->setPlainText(String(u"Capo. fret ") + String::number(capo));
-            st->setTrack(i * VOICES);
-            s->add(st);
+            const size_t track = i * VOICES;
+
+            CapoParams params;
+            params.active = true;
+            params.transposeMode = CapoParams::TransposeMode::TAB_ONLY;
+            params.fretPosition = capo;
+
+            Capo* capoEl = Factory::createCapo(score->dummy()->segment());
+            capoEl->setTrack(track);
+            capoEl->setParams(params);
+            s->add(capoEl);
+
+            staff->insertCapoParams({ 0, 1 }, params, true);
         }
 
         InstrChannel* ch = instr->channel(0);
@@ -1683,7 +1696,7 @@ bool GuitarPro2::read(IODevice* io)
                         tuplet->setTrack(cr->track());
                         tuplets[staffIdx] = tuplet;
                         setTuplet(tuplet, tuple);
-                        tuplet->setParent(measure);
+                        tuplet->setOwnershipParent(measure);
                     }
                     tuplet->setTrack(track);
                     tuplet->setBaseLen(l);
@@ -1842,7 +1855,7 @@ GuitarPro::ReadNoteResult GuitarPro1::readNote(int string, Note* note)
             }
             gn->setFret(fret);
             gn->setString(string);
-            int grace_pitch = note->staff()->part()->instrument()->stringData()->getPitch(string, fret, nullptr);
+            int grace_pitch = note->staff()->part()->instrument()->stringData()->getPitch(string, fret, note->staff(), note->tick());
             gn->setPitch(grace_pitch);
             gn->setTpcFromPitch();
 
@@ -1874,11 +1887,10 @@ GuitarPro::ReadNoteResult GuitarPro1::readNote(int string, Note* note)
                 Glissando* glis = new Glissando(score->dummy());
                 glis->setGlissandoType(GlissandoType::STRAIGHT);
                 gn->chord()->add(glis);
-                glis->setAnchor(Spanner::Anchor::NOTE);
                 glis->setStartElement(gn);
                 glis->setTick(gn->chord()->tick());
                 glis->setTrack(gn->track());
-                glis->setParent(gn);
+                glis->setOwnershipParent(gn);
                 glis->setEndElement(note);
                 glis->setTick2(note->chord()->tick());
                 glis->setTrack2(note->track());
@@ -1966,7 +1978,7 @@ GuitarPro::ReadNoteResult GuitarPro1::readNote(int string, Note* note)
     if (fretNumber > 99 || fretNumber == -1) {
         fretNumber = 0;
     }
-    int pitch = staff->part()->instrument()->stringData()->getPitch(string, fretNumber, nullptr);
+    int pitch = staff->part()->instrument()->stringData()->getPitch(string, fretNumber, staff, note->tick());
 
     /* it's possible to specify extraordinarily high pitches by
     specifying fret numbers that don't exist. This is an issue that
@@ -2182,7 +2194,7 @@ bool GuitarPro3::read(IODevice* io)
     Fraction tick = { 0, 1 };
     for (size_t i = 0; i < measures; ++i) {
         Fraction nts = bars[i].timesig;
-        Measure* m = Factory::createMeasure(score->dummy()->system());
+        Measure* m = Factory::createMeasure(score);
         m->setTick(tick);
         m->setTimesig(nts);
         m->setTicks(nts);
@@ -2250,6 +2262,10 @@ bool GuitarPro3::read(IODevice* io)
         }
         int midiPort     = readInt() - 1;
         int midiChannel  = readInt() - 1;
+        if (midiChannel < 0 || midiChannel >= static_cast<int>(channelDefaults.size())) {
+            LOGE() << "midiChannel " << midiChannel << " out of range 0-" << channelDefaults.size();
+            return false;
+        }
         /*int midiChannel2 =*/ readInt();     // - 1;
         int frets        = readInt();
         int capo         = readInt();
@@ -2266,7 +2282,6 @@ bool GuitarPro3::read(IODevice* io)
         Instrument* instr = part->instrument();
         instr->setStringData(stringData);
         instr->setSingleNoteDynamics(false);
-        part->setPartName(name);
         part->setPlainLongName(name);
         //
         // determine clef
@@ -2312,11 +2327,19 @@ bool GuitarPro3::read(IODevice* io)
 
         if (capo > 0) {
             Segment* s = measure->getSegment(SegmentType::ChordRest, measure->tick());
-            StaffText* st = new StaffText(s);
-            //                  st->setTextStyleType(TextStyleType::STAFF);
-            st->setPlainText(String(u"Capo. fret ") + String::number(capo));
-            st->setTrack(i * VOICES);
-            s->add(st);
+            const size_t track = i * VOICES;
+
+            CapoParams params;
+            params.active = true;
+            params.transposeMode = CapoParams::TransposeMode::TAB_ONLY;
+            params.fretPosition = capo;
+
+            Capo* capoEl = Factory::createCapo(score->dummy()->segment());
+            capoEl->setTrack(track);
+            capoEl->setParams(params);
+            s->add(capoEl);
+
+            staff->insertCapoParams({ 0, 1 }, params, true);
         }
 
         InstrChannel* ch = instr->channel(0);
@@ -2461,7 +2484,7 @@ bool GuitarPro3::read(IODevice* io)
                         tuplet->setTrack(cr->track());
                         tuplets[staffIdx] = tuplet;
                         setTuplet(tuplet, tuple);
-                        tuplet->setParent(measure);
+                        tuplet->setOwnershipParent(measure);
                     }
                     tuplet->setTrack(track);
                     tuplet->setBaseLen(l);
@@ -2495,7 +2518,7 @@ bool GuitarPro3::read(IODevice* io)
                         if (dotted) {
                             NoteDot* dot = Factory::createNoteDot(note);
                             // there is at most one dotted note in this guitar pro version - set 0 index
-                            dot->setParent(note);
+                            dot->setOwnershipParent(note);
                             dot->setTrack(track);                // needed to know the staff it belongs to (and detect tablature)
                             dot->setVisible(true);
                             note->add(dot);
@@ -2528,7 +2551,7 @@ bool GuitarPro3::read(IODevice* io)
                         art->setSymId(SymId::guitarFadeOut);
                         art->setAnchor(ArticulationAnchor::TOP);
                         art->setPropertyFlags(Pid::ARTICULATION_ANCHOR, PropertyFlags::UNSTYLED);
-                        if (!score->toggleArticulation(cr, art)) {
+                        if (!EditChord::toggleArticulation(score, cr, art)) {
                             delete art;
                         }
                     }
@@ -2629,11 +2652,10 @@ bool GuitarPro3::read(IODevice* io)
                     if (nt->string() == n->string()) {
                         // auto mg = nt->magS();
                         Glissando* s = new Glissando(n);
-                        s->setAnchor(Spanner::Anchor::NOTE);
                         s->setStartElement(n);
                         s->setTick(n->chord()->segment()->tick());
                         s->setTrack(n->track());
-                        s->setParent(n);
+                        s->setOwnershipParent(n);
                         s->setGlissandoType(GlissandoType::STRAIGHT);
                         s->setEndElement(nt);
                         s->setTick2(cr->segment()->tick());
@@ -2648,7 +2670,7 @@ bool GuitarPro3::read(IODevice* io)
     }
 
     m_continiousElementsBuilder->addElementsToScore();
-    m_guitarBendImporter->applyBendsToChords();
+    m_guitarBendImporter->addElementsToScore();
     addTunings();
 
     return true;
@@ -2761,7 +2783,7 @@ void GuitarPro::addTunings()
             StringTunings* tun = Factory::createStringTunings(seg);
             tun->setStringData(sd);
             tun->setTrack(staff2track(s->idx()));
-            tun->setParent(seg);
+            tun->setOwnershipParent(seg);
             seg->add(tun);
             // Instrument string data should be set to the standard
             tuning = utils::standardTuningFor(p->instrument()->channel(0)->program(), (int)sd.strings());
@@ -2789,12 +2811,12 @@ static void addMetaInfo(MasterScore* score, GuitarPro* gp, bool experimental)
 
     MeasureBase* m = nullptr;
     if (!score->measures()->first()) {
-        m = Factory::createTitleVBox(score->dummy()->system());
+        m = Factory::createTitleVBox(score);
         score->measures()->append(m);
     } else {
         m = score->measures()->first();
         if (!m->isVBox()) {
-            MeasureBase* mb = Factory::createTitleVBox(score->dummy()->system());
+            MeasureBase* mb = Factory::createTitleVBox(score);
             score->addMeasure(mb, m);
             m = mb;
         }
@@ -2862,7 +2884,7 @@ Err importGTP(MasterScore* score, muse::io::IODevice* io, const muse::modularity
         return ptb.read();
     }
 
-    GuitarPro* gp;
+    GuitarPro* gp = nullptr;
     bool readResult = false;
     bool isVersionAbove6 = false;
     // check to see if we are dealing with a GP file via the extension
@@ -2894,6 +2916,7 @@ Err importGTP(MasterScore* score, muse::io::IODevice* io, const muse::modularity
             s = s.mid(21);
         } else {
             LOGD("unknown gtp format <%s>", ss);
+            delete gp;
             return Err::FileBadFormat;
         }
         int a = s.left(1).toInt();
@@ -2911,16 +2934,19 @@ Err importGTP(MasterScore* score, muse::io::IODevice* io, const muse::modularity
             gp = new GuitarPro5(score, version, iocCtx);
         } else {
             LOGD("unknown gtp format %d", version);
+            delete gp;
             return Err::FileBadFormat;
         }
         readResult = gp->read(io);
         gp->setTempo(0, 0);
     } else {
+        delete gp;
         return Err::FileBadFormat;
     }
     if (readResult == false) {
         LOGD("guitar pro import error====");
         // avoid another error message box
+        delete gp;
         return Err::NoError;
     }
 
@@ -2950,7 +2976,7 @@ Err importGTP(MasterScore* score, muse::io::IODevice* io, const muse::modularity
         }
     }
 
-    score->setUpTempoMap();
+    score->updateTicksAndTimeSigMap();
     for (Part* p : score->parts()) {
         p->updateHarmonyChannels(false);
     }

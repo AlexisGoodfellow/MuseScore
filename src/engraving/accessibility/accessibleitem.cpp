@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -95,7 +95,7 @@ AccessibleRoot* AccessibleItem::accessibleRoot() const
         return nullptr;
     }
 
-    RootItem* rootItem = m_element->explicitParent() ? score->rootItem() : score->dummy()->rootItem();
+    RootItem* rootItem = m_element->ownershipParent() ? score->rootItem() : score->dummy()->rootItem();
     return dynamic_cast<AccessibleRoot*>(rootItem->accessible().get());
 }
 
@@ -120,7 +120,7 @@ const IAccessible* AccessibleItem::accessibleParent() const
         return nullptr;
     }
 
-    EngravingItem* p = m_element->parentItem(false /*not explicit*/);
+    EngravingItem* p = m_element->accessibleParentItem();
     if (!p) {
         return nullptr;
     }
@@ -137,12 +137,10 @@ size_t AccessibleItem::accessibleChildCount() const
     }
 
     size_t count = 0;
-    for (const EngravingObject* obj : m_element->children()) {
-        if (obj->isEngravingItem()) {
-            AccessibleItemPtr access = toEngravingItem(obj)->accessible();
-            if (access && access->registered()) {
-                ++count;
-            }
+    for (const EngravingItem* item : m_element->accessibleChildren()) {
+        AccessibleItemPtr access = item->accessible();
+        if (access && access->registered()) {
+            ++count;
         }
     }
     return count;
@@ -157,15 +155,13 @@ IAccessible* AccessibleItem::accessibleChild(size_t i) const
     }
 
     size_t count = 0;
-    for (const EngravingObject* obj : m_element->children()) {
-        if (obj->isEngravingItem()) {
-            AccessibleItemPtr access = toEngravingItem(obj)->accessible();
-            if (access && access->registered()) {
-                if (count == i) {
-                    return access.get();
-                }
-                ++count;
+    for (const EngravingItem* item : m_element->accessibleChildren()) {
+        AccessibleItemPtr access = item->accessible();
+        if (access && access->registered()) {
+            if (count == i) {
+                return access.get();
             }
+            ++count;
         }
     }
     return nullptr;
@@ -203,8 +199,7 @@ QString AccessibleItem::accessibleName() const
                    .arg(m_element->screenReaderInfo().toQString())
                    .arg(m_element->visible() ? "" : " " + muse::qtrc("engraving", "invisible"))
                    .arg(!barsAndBeats.isEmpty() ? ("; " + barsAndBeats) : "")
-                   .arg(root->isRangeSelection() ? ("; " + muse::qtrc("engraving", "selected")) : "");
-
+                   .arg((root && root->isRangeSelection()) ? ("; " + muse::qtrc("engraving", "selected")) : "");
     return readable(name);
 }
 
@@ -215,7 +210,7 @@ QString AccessibleItem::accessibleDescription() const
     }
 
     AccessibleRoot* root = accessibleRoot();
-    if (root->isRangeSelection()) {
+    if (root && root->isRangeSelection()) {
         return readable(root->rangeSelectionInfo());
     }
 

@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -47,6 +47,12 @@
 #include "engraving/types/types.h"
 #include "engraving/types/typesconv.h"
 
+#include "notation/inotation.h"
+#include "notation/inotationelements.h" // IWYU pragma: keep
+#include "notation/inotationstyle.h" // IWYU pragma: keep
+#include "notation/inotationundostack.h" // IWYU pragma: keep
+#include "notation/inotationviewstate.h" // IWYU pragma: keep
+
 #include "ui/view/widgetstatestore.h"
 #include "ui/view/widgetutils.h"
 
@@ -66,6 +72,7 @@ static const QStringList ALL_PAGE_CODES {
     "measure-number",
     "system",
     "instrument-names",
+    "stave-sharing",
     "clefs-key-and-time-signatures",
     "accidentals",
     "barlines",
@@ -113,6 +120,7 @@ static const QStringList ALL_TEXT_STYLE_SUBPAGE_CODES {
     "instrument-name-long",
     "instrument-name-short",
     "instrument-change",
+    "group-bracket",
     "header",
     "footer",
     "copyright",
@@ -129,6 +137,7 @@ static const QStringList ALL_TEXT_STYLE_SUBPAGE_CODES {
     "rehearsal-mark",
     "system",
     "staff",
+    "staveSharing",
     "expression",
     "hairpin",
     "lyrics-odd-lines",
@@ -228,7 +237,11 @@ static void fillDynamicHairpinComboBox(QComboBox* comboBox)
 //---------------------------------------------------------
 
 EditStyle::EditStyle(QWidget* parent)
-    : QDialog(parent), muse::Contextable(muse::iocCtxForQWidget(this))
+    : muse::ui::WidgetDialog(parent)
+{
+}
+
+void EditStyle::classBegin()
 {
     //! NOTE: suppress all accessibility events causing a long delay when opening the dialog (massive spam from setupUi)
     accessibilityController()->setIgnoreQtAccessibilityEvents(true);
@@ -324,6 +337,24 @@ EditStyle::EditStyle(QWidget* parent)
     dividerRightAlignToSystemBarline->addButton(rightDividerAlignToSystemBarline, 1);
     dividerRightAlignToSystemBarline->addButton(rightDividerAlignToPageMargin, 0);
 
+    QButtonGroup* groupBracketTextAlign = new QButtonGroup(this);
+    groupBracketTextAlign->addButton(groupBracketTextLeft, 1);
+    groupBracketTextAlign->addButton(groupBracketTextCenter, 0);
+    groupBracketTextAlign->addButton(groupBracketTextRight, 2);
+
+    QButtonGroup* groupBracketOrientation = new QButtonGroup(this);
+    groupBracketOrientation->addButton(groupBracketTextVertical, 0);
+    groupBracketOrientation->addButton(groupBracketTextHorizontal, 1);
+
+    auto updateHangIntoMarginEnabled = [&]() {
+        bool rightAlign = groupBracketTextRight->isChecked();
+        bool vertical = groupBracketTextVertical->isChecked();
+        groupBracketHangIntoMargin->setEnabled(vertical && !rightAlign);
+    };
+
+    connect(groupBracketTextAlign, &QButtonGroup::buttonClicked, this, updateHangIntoMarginEnabled);
+    connect(groupBracketOrientation, &QButtonGroup::buttonClicked, this, updateHangIntoMarginEnabled);
+
     // ====================================================
     // Style widgets
     // ====================================================
@@ -400,6 +431,9 @@ EditStyle::EditStyle(QWidget* parent)
 
         { StyleId::barWidth,                false, barWidth,                resetBarWidth },
         { StyleId::endBarWidth,             false, endBarWidth,             resetEndBarWidth },
+        { StyleId::dashBarWidth,            false, dashBarWidth,            resetDashBarWidth },
+        { StyleId::dashBarDash,             false, dashBarDash,             resetDashBarDash },
+        { StyleId::dashBarGap,              false, dashBarGap,              resetDashBarGap },
         { StyleId::endBarDistance,          false, endBarDistance,          resetEndBarDistance },
         { StyleId::doubleBarWidth,          false, doubleBarWidth,          resetDoubleBarWidth },
         { StyleId::doubleBarDistance,       false, doubleBarDistance,       resetDoubleBarDistance },
@@ -482,6 +516,14 @@ EditStyle::EditStyle(QWidget* parent)
         { StyleId::bracketDistance,         false, bracketDistance,         resetBracketDistance },
         { StyleId::akkoladeWidth,           false, akkoladeWidth,           resetBraceThickness },
         { StyleId::akkoladeBarDistance,     false, akkoladeBarDistance,     resetBraceDistance },
+        { StyleId::groupBracketLineWidth,   false, groupBracketLineThick,   groupBracketLineThickReset },
+        { StyleId::groupBracketHookLen,     false, groupBracketHookLen,     groupBracketHookLenReset },
+        { StyleId::groupBracketTextAlign,   false, groupBracketTextAlign,   0 },
+        { StyleId::groupBracketHangTextIntoMargin, false, groupBracketHangIntoMargin, 0 },
+        { StyleId::groupBracketDistanceToNames, false, groupBracketDistanceToNames, groupBracketDistanceToNamesReset },
+        { StyleId::groupBracketDistanceToGroupBracket, false, groupBracketDistanceToBrackets, groupBracketDistanceToBracketsReset },
+        { StyleId::groupBracketTextOrientation, false, groupBracketOrientation },
+
         { StyleId::dividerLeft,             false, dividerLeft,             0 },
         { StyleId::dividerLeftX,            false, dividerLeftX,            dividerLeftXReset },
         { StyleId::dividerLeftY,            false, dividerLeftY,            dividerLeftYReset },
@@ -978,7 +1020,16 @@ EditStyle::EditStyle(QWidget* parent)
         QUrl(QString::fromUtf8("qrc:/qt/qml/MuseScore/NotationScene/styledialog/InstrumentNamesPage.qml")));
     instrNamesPage.widget->setMinimumSize(224, 400);
     pageInstrumentNames->layout()->addWidget(instrNamesPage.widget);
-    //connect(instrNamesPage.view->rootObject(), SIGNAL(goToTextStylePage(int)), this, SLOT(goToTextStylePage(int)));
+
+    // ====================================================
+    // Stave sharing page (QML)
+    // ====================================================
+
+    auto staveSharingPage = createQmlWidget(
+        PageStaveSharing,
+        QUrl(QString::fromUtf8("qrc:/qt/qml/MuseScore/NotationScene/styledialog/StaveSharingPage.qml")));
+    staveSharingPage.widget->setMinimumSize(224, 400);
+    PageStaveSharing->layout()->addWidget(staveSharingPage.widget);
 
     // ====================================================
     // Figured Bass
@@ -1017,8 +1068,8 @@ EditStyle::EditStyle(QWidget* parent)
     // Signal Mappers
     // ====================================================
 
-    QSignalMapper* setSignalMapper = new QSignalMapper(this); // value change signals
-    QSignalMapper* resetSignalMapper = new QSignalMapper(this); // reset style signals
+    QSignalMapper* setSignalMapper = new QSignalMapper(this);     // value change signals
+    QSignalMapper* resetSignalMapper = new QSignalMapper(this);     // reset style signals
 
     const auto mapFunction = QOverload<>::of(&QSignalMapper::map);
 
@@ -1093,13 +1144,13 @@ EditStyle::EditStyle(QWidget* parent)
 
     textStyleFrameType->clear();
     textStyleFrameType->addItem(muse::qtrc("notation/editstyle", "None", "no frame for text"), int(FrameType::NO_FRAME));
-    textStyleFrameType->addItem(muse::qtrc("notation/editstyle", "Rectangle"), int(FrameType::SQUARE));
+    textStyleFrameType->addItem(muse::qtrc("notation/editstyle", "Rectangle"), int(FrameType::RECTANGLE));
     textStyleFrameType->addItem(muse::qtrc("notation/editstyle", "Circle"), int(FrameType::CIRCLE));
 
-    connect(dynamicsAndHairpinPos, &QComboBox::currentIndexChanged, dynamicsAndHairpinPosDescription, [=]() {
+    connect(dynamicsAndHairpinPos, &QComboBox::currentIndexChanged, dynamicsAndHairpinPosDescription, [this]() {
         dynamicsAndHairpinPosDescription->setVisible(dynamicsAndHairpinPos->currentIndex() == int(DirectionV::AUTO));
     });
-    connect(dynamicsAndHairpinPos, &QComboBox::currentIndexChanged, dynamicsAndHairpinsAboveOnVocalStaves, [=]() {
+    connect(dynamicsAndHairpinPos, &QComboBox::currentIndexChanged, dynamicsAndHairpinsAboveOnVocalStaves, [this]() {
         dynamicsAndHairpinsAboveOnVocalStaves->setEnabled(dynamicsAndHairpinPos->currentIndex() != int(DirectionV::UP));
     });
 
@@ -1111,143 +1162,143 @@ EditStyle::EditStyle(QWidget* parent)
 
     // font face
     WidgetUtils::setWidgetIcon(resetTextStyleFontFace, IconCode::Code::UNDO);
-    connect(resetTextStyleFontFace, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleFontFace, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::FontFace);
     });
-    connect(textStyleFontFace, &QFontComboBox::currentFontChanged, this, [=]() {
+    connect(textStyleFontFace, &QFontComboBox::currentFontChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::FontFace, textStyleFontFace->currentFont().family());
     });
 
     // font size
     WidgetUtils::setWidgetIcon(resetTextStyleFontSize, IconCode::Code::UNDO);
-    connect(resetTextStyleFontSize, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleFontSize, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::FontSize);
     });
-    connect(textStyleFontSize, &QDoubleSpinBox::valueChanged, this, [=]() {
+    connect(textStyleFontSize, &QDoubleSpinBox::valueChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::FontSize, textStyleFontSize->value());
     });
 
     // musical symbols scale
     WidgetUtils::setWidgetIcon(resetTextStyleMusicalSymbolsScale, IconCode::Code::UNDO);
-    connect(resetTextStyleMusicalSymbolsScale, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleMusicalSymbolsScale, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::MusicalSymbolsScale);
     });
-    connect(textStyleMusicalSymbolsScale, &QDoubleSpinBox::valueChanged, this, [=]() {
+    connect(textStyleMusicalSymbolsScale, &QDoubleSpinBox::valueChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::MusicalSymbolsScale, textStyleMusicalSymbolsScale->value());
     });
 
     // musical symbols size
     WidgetUtils::setWidgetIcon(resetTextStyleMusicalSymbolsSize, IconCode::Code::UNDO);
-    connect(resetTextStyleMusicalSymbolsSize, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleMusicalSymbolsSize, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::MusicalSymbolsSize);
     });
-    connect(textStyleMusicalSymbolsSize, &QDoubleSpinBox::valueChanged, this, [=]() {
+    connect(textStyleMusicalSymbolsSize, &QDoubleSpinBox::valueChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::MusicalSymbolsSize, textStyleMusicalSymbolsSize->value());
     });
 
     // line spacing
     WidgetUtils::setWidgetIcon(resetTextStyleLineSpacing, IconCode::Code::UNDO);
-    connect(resetTextStyleLineSpacing, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleLineSpacing, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::LineSpacing);
     });
-    connect(textStyleLineSpacing, &QDoubleSpinBox::valueChanged, this, [=]() {
+    connect(textStyleLineSpacing, &QDoubleSpinBox::valueChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::LineSpacing, textStyleLineSpacing->value());
     });
 
     // font style
     WidgetUtils::setWidgetIcon(resetTextStyleFontStyle, IconCode::Code::UNDO);
-    connect(resetTextStyleFontStyle, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleFontStyle, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::FontStyle);
     });
-    connect(textStyleFontStyle, &FontStyleSelect::fontStyleChanged, this, [=]() {
+    connect(textStyleFontStyle, &FontStyleSelect::fontStyleChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::FontStyle, int(textStyleFontStyle->fontStyle()));
     });
 
     // align
     WidgetUtils::setWidgetIcon(resetTextStyleAlign, IconCode::Code::UNDO);
-    connect(resetTextStyleAlign, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleAlign, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::TextAlign);
         resetTextStyle(TextStylePropertyType::Position);
     });
-    connect(textStyleAlign, &AlignSelect::alignChanged, this, [=]() {
+    connect(textStyleAlign, &AlignSelect::alignChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::TextAlign, textStyleAlign->align());
     });
 
-    connect(textStyleAlign, &AlignSelect::positionChanged, this, [=]() {
+    connect(textStyleAlign, &AlignSelect::positionChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::Position, textStyleAlign->position());
     });
 
     // offset
     WidgetUtils::setWidgetIcon(resetTextStyleOffset, IconCode::Code::UNDO);
-    connect(resetTextStyleOffset, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleOffset, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::Offset);
     });
-    connect(textStyleOffset, &OffsetSelect::offsetChanged, this, [=]() {
+    connect(textStyleOffset, &OffsetSelect::offsetChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::Offset, textStyleOffset->offset());
     });
 
     // spatium dependent
     WidgetUtils::setWidgetIcon(resetTextStyleSpatiumDependent, IconCode::Code::UNDO);
-    connect(resetTextStyleSpatiumDependent, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleSpatiumDependent, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::SizeSpatiumDependent);
     });
-    connect(textStyleSpatiumDependent, &QCheckBox::toggled, this, [=]() {
+    connect(textStyleSpatiumDependent, &QCheckBox::toggled, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::SizeSpatiumDependent, textStyleSpatiumDependent->isChecked());
     });
 
     WidgetUtils::setWidgetIcon(resetTextStyleFrameType, IconCode::Code::UNDO);
-    connect(resetTextStyleFrameType, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleFrameType, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::FrameType);
     });
-    connect(textStyleFrameType, &QComboBox::currentIndexChanged, this, [=]() {
+    connect(textStyleFrameType, &QComboBox::currentIndexChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::FrameType, textStyleFrameType->currentIndex());
     });
 
     WidgetUtils::setWidgetIcon(resetTextStyleFramePadding, IconCode::Code::UNDO);
-    connect(resetTextStyleFramePadding, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleFramePadding, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::FramePadding);
     });
-    connect(textStyleFramePadding, &QDoubleSpinBox::valueChanged, this, [=]() {
+    connect(textStyleFramePadding, &QDoubleSpinBox::valueChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::FramePadding, textStyleFramePadding->value());
     });
 
     WidgetUtils::setWidgetIcon(resetTextStyleFrameBorder, IconCode::Code::UNDO);
-    connect(resetTextStyleFrameBorder, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleFrameBorder, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::FrameWidth);
     });
-    connect(textStyleFrameBorder, &QDoubleSpinBox::valueChanged, this, [=]() {
+    connect(textStyleFrameBorder, &QDoubleSpinBox::valueChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::FrameWidth, textStyleFrameBorder->value());
     });
 
     WidgetUtils::setWidgetIcon(resetTextStyleFrameBorderRadius, IconCode::Code::UNDO);
-    connect(resetTextStyleFrameBorderRadius, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleFrameBorderRadius, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::FrameRound);
     });
-    connect(textStyleFrameBorderRadius, &QDoubleSpinBox::valueChanged, this, [=]() {
+    connect(textStyleFrameBorderRadius, &QDoubleSpinBox::valueChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::FrameRound, textStyleFrameBorderRadius->value());
     });
 
     WidgetUtils::setWidgetIcon(resetTextStyleFrameForeground, IconCode::Code::UNDO);
-    connect(resetTextStyleFrameForeground, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleFrameForeground, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::FrameBorderColor);
     });
-    connect(textStyleFrameForeground, &Awl::ColorLabel::colorChanged, this, [=]() {
+    connect(textStyleFrameForeground, &Awl::ColorLabel::colorChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::FrameBorderColor, Color::fromQColor(textStyleFrameForeground->color()));
     });
 
     WidgetUtils::setWidgetIcon(resetTextStyleFrameBackground, IconCode::Code::UNDO);
-    connect(resetTextStyleFrameBackground, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleFrameBackground, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::FrameFillColor);
     });
-    connect(textStyleFrameBackground, &Awl::ColorLabel::colorChanged, this, [=]() {
+    connect(textStyleFrameBackground, &Awl::ColorLabel::colorChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::FrameFillColor, Color::fromQColor(textStyleFrameBackground->color()));
     });
 
     WidgetUtils::setWidgetIcon(resetTextStyleColor, IconCode::Code::UNDO);
-    connect(resetTextStyleColor, &QToolButton::clicked, this, [=]() {
+    connect(resetTextStyleColor, &QToolButton::clicked, this, [this]() {
         resetTextStyle(TextStylePropertyType::Color);
     });
-    connect(textStyleColor, &Awl::ColorLabel::colorChanged, this, [=]() {
+    connect(textStyleColor, &Awl::ColorLabel::colorChanged, this, [this]() {
         textStyleValueChanged(TextStylePropertyType::Color, Color::fromQColor(textStyleColor->color()));
     });
 
@@ -1259,16 +1310,24 @@ EditStyle::EditStyle(QWidget* parent)
     pageList->setCurrentRow(notation->viewState()->styleDialogLastPageIndex());
 
     editLyricsTextStyleButton->setChecked(false);
-    connect(editLyricsTextStyleButton, &QPushButton::clicked, pageList, [=](){
+    connect(editLyricsTextStyleButton, &QPushButton::clicked, pageList, [this](){
         pageList->setCurrentRow(ALL_PAGE_CODES.indexOf("text-styles"));
     });
-    connect(editLyricsTextStyleButton, &QPushButton::clicked, textStyles, [=](){
+    connect(editLyricsTextStyleButton, &QPushButton::clicked, textStyles, [this](){
         textStyles->setCurrentRow(ALL_TEXT_STYLE_SUBPAGE_CODES.indexOf("lyrics-odd-lines"));
     });
 
     connect(resetLyricsMaxDashCount, &QCheckBox::clicked, this, [this] () {
         resetStyleValue(int(StyleId::lyricsLimitDashCount));
         resetStyleValue(int(StyleId::lyricsMaxDashCount));
+    });
+
+    editGroupBracketTextStyleLink->setChecked(false);
+    connect(editGroupBracketTextStyleLink, &QPushButton::clicked, pageList, [this](){
+        pageList->setCurrentRow(ALL_PAGE_CODES.indexOf("text-styles"));
+    });
+    connect(editGroupBracketTextStyleLink, &QPushButton::clicked, textStyles, [this](){
+        textStyles->setCurrentRow(ALL_TEXT_STYLE_SUBPAGE_CODES.indexOf("group-bracket"));
     });
 
     adjustPagesStackSize(0);
@@ -1755,6 +1814,11 @@ PropertyValue EditStyle::getValue(StyleId idx)
         if (sw.showPercent) {
             value = value * 0.01;
         }
+        if (idx == StyleId::figuredBassYOffset) {
+            // Displayed: positive = up, negative = down
+            // Internal:  negative = up, positive = down
+            value = -value;
+        }
         return value;
     } break;
     case P_TYPE::BOOL: {
@@ -1779,6 +1843,8 @@ PropertyValue EditStyle::getValue(StyleId idx)
     } break;
     case P_TYPE::PLACEMENT_H:
     case P_TYPE::PLACEMENT_V:
+    case P_TYPE::DIRECTION_H:
+    case P_TYPE::ORIENTATION:
     case P_TYPE::LINE_TYPE:
     case P_TYPE::TIMESIG_PLACEMENT:
     case P_TYPE::TIMESIG_STYLE:
@@ -1812,12 +1878,16 @@ PropertyValue EditStyle::getValue(StyleId idx)
         }
     } break;
     case P_TYPE::POINT: {
+        // Displayed: positive = up, negative = down
+        // Internal:  negative = up, positive = down
         if (idx == StyleId::lyricsPosAbove || idx == StyleId::lyricsPosBelow) {
             QDoubleSpinBox* dsb = qobject_cast<QDoubleSpinBox*>(sw.widget);
-            return PointF(0.0, dsb->value());
+            return PointF(0.0, -dsb->value());
         }
         if (OffsetSelect* cb = qobject_cast<OffsetSelect*>(sw.widget)) {
-            return cb->offset();
+            PointF offset = cb->offset();
+            offset.setY(-offset.y());
+            return offset;
         } else {
             ASSERT_X("unhandled muse::PointF");
         }
@@ -1856,8 +1926,10 @@ void EditStyle::setValues()
         if (sw.widget) {
             sw.widget->blockSignals(true);
         }
+        // Displayed: positive = up, negative = down
+        // Internal:  negative = up, positive = down
         PropertyValue val = sw.idx == StyleId::lyricsPosAbove || sw.idx == StyleId::lyricsPosBelow
-                            ? Spatium(styleValue(sw.idx).value<PointF>().y())
+                            ? Spatium(-styleValue(sw.idx).value<PointF>().y())
                             : styleValue(sw.idx);
         if (sw.reset) {
             sw.reset->setEnabled(!hasDefaultStyleValue(sw.idx));
@@ -1876,6 +1948,11 @@ void EditStyle::setValues()
             qreal value = val.toReal();
             if (sw.showPercent) {
                 value = value * 100;
+            }
+            if (sw.idx == StyleId::figuredBassYOffset) {
+                // Displayed: positive = up, negative = down
+                // Internal:  negative = up, positive = down
+                value = -value;
             }
             if (!sw.widget->setProperty("value", value)) {
                 unhandledType(sw);
@@ -1898,6 +1975,8 @@ void EditStyle::setValues()
         } break;
         case P_TYPE::PLACEMENT_H:
         case P_TYPE::PLACEMENT_V:
+        case P_TYPE::DIRECTION_H:
+        case P_TYPE::ORIENTATION:
         case P_TYPE::BARLINE_TYPE:
         case P_TYPE::LINE_TYPE:
         case P_TYPE::HOOK_TYPE:
@@ -1961,7 +2040,11 @@ void EditStyle::setValues()
         case P_TYPE::POINT: {
             OffsetSelect* as = qobject_cast<OffsetSelect*>(sw.widget);
             if (as) {
-                as->setOffset(val.value<muse::PointF>());
+                // Displayed: positive = up, negative = down
+                // Internal:  negative = up, positive = down
+                muse::PointF offset = val.value<muse::PointF>();
+                offset.setY(-offset.y());
+                as->setOffset(offset);
             }
         } break;
         default: {
@@ -2003,7 +2086,9 @@ void EditStyle::setValues()
         }
     }
     doubleSpinFBSize->setValue(styleValue(StyleId::figuredBassFontSize).toDouble());
-    doubleSpinFBVertPos->setValue(styleValue(StyleId::figuredBassYOffset).toDouble());
+    // Displayed: positive = up, negative = down
+    // Internal:  negative = up, positive = down
+    doubleSpinFBVertPos->setValue(-styleValue(StyleId::figuredBassYOffset).toDouble());
     spinFBLineHeight->setValue(styleValue(StyleId::figuredBassLineHeight).toDouble() * 100.0);
 
     QString mfont(styleValue(StyleId::musicalSymbolFont).value<String>());
@@ -2045,6 +2130,11 @@ void EditStyle::setValues()
                                            != defaultStyleValue(StyleId::lyricsDashMaxDistance));
 
     updateParenthesisIndicatingTiesGroupState();
+
+    bool textBracketRight = styleValue(StyleId::groupBracketTextAlign).value<DirectionH>() == DirectionH::RIGHT;
+    bool vertical = styleValue(StyleId::groupBracketTextOrientation).value<mu::engraving::Orientation>()
+                    == mu::engraving::Orientation::VERTICAL;
+    groupBracketHangIntoMargin->setEnabled(vertical && !textBracketRight);
 }
 
 //---------------------------------------------------------
@@ -2401,11 +2491,6 @@ void EditStyle::textStyleChanged(int row)
             resetTextStyleAlign->setEnabled(styleValue(a.sid) != defaultStyleValue(a.sid));
             break;
 
-        case TextStylePropertyType::Offset:
-            textStyleOffset->setOffset(styleValue(a.sid).value<PointF>());
-            resetTextStyleOffset->setEnabled(styleValue(a.sid) != defaultStyleValue(a.sid));
-            break;
-
         case TextStylePropertyType::SizeSpatiumDependent: {
             PropertyValue val = styleValue(a.sid);
             textStyleSpatiumDependent->setChecked(val.toBool());
@@ -2455,6 +2540,13 @@ void EditStyle::textStyleChanged(int row)
         }
     }
 
+    // Displayed: positive = up, negative = down
+    // Internal:  negative = up, positive = down
+    PointF textStyleOffsetValue = styleValue(ts->offsetSids.above).value<PointF>();
+    textStyleOffsetValue.setY(-textStyleOffsetValue.y());
+    textStyleOffset->setOffset(textStyleOffsetValue);
+    resetTextStyleOffset->setEnabled(styleValue(ts->offsetSids.above) != defaultStyleValue(ts->offsetSids.above));
+
     INotationPtr notation = globalContext()->currentNotation();
     IF_ASSERT_FAILED(notation) {
         return;
@@ -2483,14 +2575,22 @@ void EditStyle::textStyleValueChanged(TextStylePropertyType type, const Property
     TextStyleType tid = TextStyleType(textStyles->currentItem()->data(Qt::UserRole).toInt());
     const TextStyle* ts = textStyle(tid);
 
-    for (const auto& a : *ts) {
-        if (a.type == type) {
-            if (type == TextStylePropertyType::MusicalSymbolsScale) {
-                setStyleValue(a.sid, value.toDouble() / 100);
-            } else {
-                setStyleValue(a.sid, value);
+    if (type == TextStylePropertyType::Offset) {
+        // Displayed: positive = up, negative = down
+        // Internal:  negative = up, positive = down
+        PointF offset = value.value<PointF>();
+        offset.setY(-offset.y());
+        setStyleValue(ts->offsetSids.above, offset);
+    } else {
+        for (const auto& a : *ts) {
+            if (a.type == type) {
+                if (type == TextStylePropertyType::MusicalSymbolsScale) {
+                    setStyleValue(a.sid, value.toDouble() / 100);
+                } else {
+                    setStyleValue(a.sid, value);
+                }
+                break;
             }
-            break;
         }
     }
     textStyleChanged(textStyles->currentRow()); // update GUI (reset buttons)
@@ -2505,12 +2605,17 @@ void EditStyle::resetTextStyle(TextStylePropertyType type)
     TextStyleType tid = TextStyleType(textStyles->currentItem()->data(Qt::UserRole).toInt());
     const TextStyle* ts = textStyle(tid);
 
-    for (const auto& a : *ts) {
-        if (a.type == type) {
-            setStyleValue(a.sid, defaultStyleValue(a.sid));
-            break;
+    if (type == TextStylePropertyType::Offset) {
+        setStyleValue(ts->offsetSids.above, defaultStyleValue(ts->offsetSids.above));
+    } else {
+        for (const auto& a : *ts) {
+            if (a.type == type) {
+                setStyleValue(a.sid, defaultStyleValue(a.sid));
+                break;
+            }
         }
     }
+
     textStyleChanged(textStyles->currentRow()); // update GUI
 }
 

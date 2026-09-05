@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2023 MuseScore Limited
+ * Copyright (C) 2023 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -71,6 +71,7 @@
 #include "dom/noteline.h"
 #include "dom/ornament.h"
 #include "dom/ottava.h"
+#include "dom/page.h"
 #include "dom/palmmute.h"
 #include "dom/pedal.h"
 #include "dom/playcounttext.h"
@@ -79,6 +80,7 @@
 #include "dom/slur.h"
 #include "dom/soundflag.h"
 #include "dom/spacer.h"
+#include "dom/staff.h"
 #include "dom/stafftext.h"
 #include "dom/stafftypechange.h"
 #include "dom/sticking.h"
@@ -215,6 +217,8 @@ void SingleLayout::layoutItem(EngravingItem* item)
     case ElementType::SPACER:       layout(toSpacer(item), ctx);
         break;
     case ElementType::STAFF_TEXT:   layout(toStaffText(item), ctx);
+        break;
+    case ElementType::STAVE_SHARING_LABEL: layout(toStaveSharingLabel(item), ctx);
         break;
     case ElementType::STAFFTYPE_CHANGE: layout(toStaffTypeChange(item), ctx);
         break;
@@ -514,7 +518,7 @@ void SingleLayout::layout(Articulation* item, const Context& ctx)
         Text* text = item->text();
         text->setXmlText(TConv::text(item->textType()));
         text->setTrack(item->track());
-        text->setParent(item);
+        text->setOwnershipParent(item);
 
         layoutTextBase(item->text(), ctx, item->text()->mutldata());
         bbox = text->ldata()->bbox();
@@ -639,6 +643,8 @@ void SingleLayout::layout(BarLine* item, const Context& ctx)
                 + ctx.style().styleAbsolute(Sid::endBarDistance);
             break;
         case BarLineType::BROKEN:
+            w = ctx.style().styleAbsolute(Sid::dashBarWidth);
+            break;
         case BarLineType::NORMAL:
         case BarLineType::DOTTED:
             w = ctx.style().styleAbsolute(Sid::barWidth);
@@ -780,7 +786,8 @@ void SingleLayout::layout(Bracket* item, const Context& ctx)
         ldata->bracketWidth = ctx.style().styleAbsolute(Sid::bracketWidth) + ctx.style().styleAbsolute(Sid::bracketDistance);
     }
     break;
-    case BracketType::SQUARE: {
+    case BracketType::SQUARE:
+    {
         double w = ctx.style().styleAbsolute(Sid::staffLineWidth) * .5;
         double x = -w;
         double y = -w;
@@ -805,11 +812,46 @@ void SingleLayout::layout(Bracket* item, const Context& ctx)
         ldata->bracketWidth = 0.67 * ctx.style().styleAbsolute(Sid::bracketWidth) + ctx.style().styleAbsolute(Sid::bracketDistance);
     }
     break;
+    case BracketType::GROUP:
+        layoutGroupBracket(item, ctx);
+        break;
     case BracketType::NO_BRACKET:
         break;
     }
 
     ldata->shape = shape;
+}
+
+void SingleLayout::layoutGroupBracket(Bracket* item, const Context& ctx)
+{
+    Bracket::LayoutData* ldata = item->mutldata();
+    ldata->bracketHeight = 12 * item->spatium();
+    double w = ctx.style().styleAbsolute(Sid::staffLineWidth) * 0.5;
+    double x = 0.0;
+    double y = -w;
+    double h = (ldata->bracketHeight * 0.5 + w) * 2;
+    double width = item->spatium();
+    ldata->setBbox(RectF(x, y, width, h));
+    ldata->shape.add(ldata->bbox());
+
+    ldata->bracketWidth = width;
+
+    if (!item->text()) {
+        const_cast<Bracket*>(item)->setText(new Text(const_cast<Bracket*>(item)));
+        item->text()->setOwnershipParent(const_cast<Bracket*>(item));
+    }
+
+    Text* text = item->text();
+    text->setAlign(Align(AlignH::HCENTER, AlignV::VCENTER));
+    text->setPosition(AlignH::HCENTER);
+    text->setTextAngle(-90);
+    text->setXmlText(item->bracketItem()->longName());
+    layout(text, ctx);
+    text->mutldata()->setPos(0.0, item->ldata()->bbox().height() / 2);
+
+    double textPadding = 0.5 * item->spatium();
+    RectF mask = text->ldata()->bbox().translated(text->pos()).padded(textPadding);
+    ldata->setMask(mask);
 }
 
 void SingleLayout::layout(Breath* item, const Context&)
@@ -988,7 +1030,7 @@ void SingleLayout::layout(Glissando* item, const Context& ctx)
     double spatium = item->spatium();
 
     if (item->spannerSegments().empty()) {
-        item->add(item->createLineSegment(ctx.dummyParent()->system()));
+        item->add(item->createLineSegment());
     }
     LineSegment* s = item->frontSegment();
     s->setPos(PointF(-spatium * Glissando::GLISS_PALETTE_WIDTH / 2, spatium * Glissando::GLISS_PALETTE_HEIGHT / 2));
@@ -1041,7 +1083,7 @@ void SingleLayout::layout(HammerOnPullOff* item, const Context& ctx)
     double spatium = item->spatium();
     HammerOnPullOffSegment* s = nullptr;
     if (item->spannerSegments().empty()) {
-        s = new HammerOnPullOffSegment(ctx.dummyParent()->system());
+        s = new HammerOnPullOffSegment(item);
         s->setTrack(item->track());
         item->add(s);
     } else {
@@ -1070,7 +1112,7 @@ void SingleLayout::layout(HammerOnPullOffSegment* item, const Context& ctx)
     }
 
     HammerOnPullOffText* hopoText = hopoTexts.front();
-    hopoText->setParent(item);
+    hopoText->setOwnershipParent(item);
     hopoText->setXmlText("H/P");
 
     Align align;
@@ -1487,12 +1529,12 @@ void SingleLayout::layout(RehearsalMark* item, const Context& ctx)
     layoutTextBase(item, ctx, item->mutldata());
 }
 
-void SingleLayout::layout(Slur* item, const Context& ctx)
+void SingleLayout::layout(Slur* item, const Context&)
 {
     double spatium = item->spatium();
     SlurSegment* s = nullptr;
     if (item->spannerSegments().empty()) {
-        s = new SlurSegment(ctx.dummyParent()->system());
+        s = new SlurSegment(item);
         s->setTrack(item->track());
         item->add(s);
     } else {
@@ -1520,7 +1562,7 @@ void SingleLayout::layout(Spacer* item, const Context&)
     PainterPath path = PainterPath();
     double w = spatium;
     double b = w * .5;
-    double h = item->explicitParent() ? item->absoluteGap() : item->absoluteFromSpatium(std::min(item->gap(), 4.0_sp));       // limit length for palette
+    double h = item->ownershipParent() ? item->absoluteGap() : item->absoluteFromSpatium(std::min(item->gap(), 4.0_sp));       // limit length for palette
 
     switch (item->spacerType()) {
     case SpacerType::DOWN:
@@ -1583,6 +1625,11 @@ void SingleLayout::layout(StaffText* item, const Context& ctx)
     }
 }
 
+void SingleLayout::layout(StaveSharingLabel* item, const Context& ctx)
+{
+    layoutTextBase(item, ctx, item->mutldata());
+}
+
 void SingleLayout::layout(StaffTypeChange* item, const Context& ctx)
 {
     double spatium = ctx.style().spatium();
@@ -1628,7 +1675,7 @@ void SingleLayout::layout(Tapping* item, const Context& ctx)
         text = new TappingText(item);
     }
 
-    text->setParent(item);
+    text->setOwnershipParent(item);
     item->setText(text);
     text->setTrack(item->track());
     DO_ASSERT(item->hand() != TappingHand::INVALID);
@@ -1871,7 +1918,7 @@ void SingleLayout::layout(TrillSegment* item, const Context& ctx)
                                  : a->shape().minVerticalDistance(Shape(box));
             y = accidentalGoesBelow ? minVertDist + vertMargin : -minVertDist - vertMargin;
             a->setPos(x, y);
-            a->setParent(item);
+            a->setOwnershipParent(item);
         }
     } else {
         item->symbolLine(SymId::wiggleTrill, SymId::wiggleTrill);
@@ -1931,7 +1978,7 @@ void SingleLayout::layout(VoltaSegment* item, const Context& ctx)
     double hookHeight = item->absoluteFromSpatium(item->volta()->beginHookHeight());
     if (item->text()) {
         Text* text = item->text();
-        text->setParent(item);
+        text->setOwnershipParent(item);
         RectF textBBox = text->ldata()->bbox().translated(text->pos());
         text->mutldata()->moveY(hookHeight - textBBox.bottom());
         text->mutldata()->moveX(0.5 * spatium);
@@ -2049,11 +2096,18 @@ void SingleLayout::layout1TextBase(const TextBase* item, const Context&, TextBas
         t.setY(t.y() + yoff);
     }
 
-    bb.translate(0.0, yoff);
+    shape.translateY(yoff);
+    ldata->setShape(shape);
 
-    ldata->setBbox(bb);
     if (item->hasFrame()) {
         item->layoutFrame(ldata);
+    }
+
+    if (!muse::RealIsNull(item->textAngle())) {
+        Transform t;
+        t.rotate(item->textAngle());
+        ldata->setShape(shape.transform(t));
+        ldata->highResShape.mut_value().transform(t);
     }
 }
 
@@ -2183,6 +2237,8 @@ void SingleLayout::layoutTextLineBaseSegment(TextLineBaseSegment* item, const Co
         item->text()->setXmlText(tl->beginText());
         item->text()->setFamily(tl->beginFontFamily());
         item->text()->setSize(tl->beginFontSize());
+        item->text()->setSymbolScale(tl->beginTextMusicalSymbolsScale());
+        item->text()->setSymbolSize(tl->beginTextMusicSymbolsSize());
         item->text()->setOffset(tl->beginTextOffset() * item->mag());
         item->text()->setAlign(tl->beginTextAlign());
         item->text()->setPosition(tl->beginTextPosition());
@@ -2191,6 +2247,8 @@ void SingleLayout::layoutTextLineBaseSegment(TextLineBaseSegment* item, const Co
         item->text()->setXmlText(tl->continueText());
         item->text()->setFamily(tl->continueFontFamily());
         item->text()->setSize(tl->continueFontSize());
+        item->text()->setSymbolScale(tl->continueTextMusicalSymbolsScale());
+        item->text()->setSymbolSize(tl->continueTextMusicSymbolsSize());
         item->text()->setOffset(tl->continueTextOffset() * item->mag());
         item->text()->setAlign(tl->continueTextAlign());
         item->text()->setPosition(tl->continueTextPosition());
@@ -2205,6 +2263,8 @@ void SingleLayout::layoutTextLineBaseSegment(TextLineBaseSegment* item, const Co
         item->endText()->setXmlText(tl->endText());
         item->endText()->setFamily(tl->endFontFamily());
         item->endText()->setSize(tl->endFontSize());
+        item->endText()->setSymbolScale(tl->endTextMusicalSymbolsScale());
+        item->endText()->setSymbolSize(tl->endTextMusicSymbolsSize());
         item->endText()->setOffset(tl->endTextOffset() * item->mag());
         item->endText()->setAlign(tl->endTextAlign());
         item->endText()->setPosition(tl->endTextPosition());

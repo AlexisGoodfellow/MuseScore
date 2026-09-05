@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -28,10 +28,9 @@
 #include "engraving/dom/harppedaldiagram.h"
 #include "engraving/dom/interval.h"
 #include "engraving/dom/timesig.h"
+#include "engraving/dom/tremolotwochord.h"
 #include "engraving/dom/tremolosinglechord.h"
 #include "engraving/dom/volta.h"
-
-#include "engraving/iengravingfontsprovider.h"
 
 #include "thirdparty/libmei/cmn.h"
 #include "thirdparty/libmei/cmnornaments.h"
@@ -90,8 +89,8 @@ enum ElisionType {
 class Convert
 {
     // The fallback font is used to convert smufl codes (char32_t) to engraving::SymId
-    static inline muse::GlobalInject<engraving::IEngravingFontsProvider> engravingFonts;
-    static inline muse::GlobalInject<engraving::IEngravingConfiguration> engravingConfiguration;
+    static muse::GlobalInject<engraving::IEngravingFontsProvider> engravingFonts;
+    static muse::GlobalInject<engraving::IEngravingConfiguration> engravingConfiguration;
 public:
 
     /**
@@ -202,6 +201,9 @@ public:
 
     static engraving::DurationType durFromMEI(const libmei::data_DURATION meiDuration, bool& warning);
     static libmei::data_DURATION durToMEI(const engraving::DurationType duration);
+
+    static engraving::TremoloType unitdurFromMEI(const libmei::FTrem& meiFTrem, bool& warning);
+    static libmei::data_DURATION unitdurToMEI(const engraving::TremoloTwoChord* tremolo);
 
     static void dynamFromMEI(engraving::Dynamic* dynamic, const muse::StringList& meiLines, const libmei::Dynam& meiDynam, bool& warning);
     static libmei::Dynam dynamToMEI(const engraving::Dynamic* dynamic, muse::StringList& meiLines);

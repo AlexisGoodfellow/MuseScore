@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -37,6 +37,7 @@
 
 #include "engraving/editing/editnote.h"
 #include "engraving/editing/editsystemlocks.h"
+#include "engraving/editing/transaction/transaction.h"
 
 // api
 #include "apistructs.h"
@@ -239,7 +240,7 @@ void Note::addInternal(mu::engraving::Note* note, mu::engraving::EngravingItem* 
 {
     // Provide parentage for element.
     s->setScore(note->score());
-    s->setParent(note);
+    s->setOwnershipParent(note);
     s->setTrack(note->track());
 
     if (s && isChildAllowed(s->type())) {
@@ -260,7 +261,7 @@ void Note::remove(apiv1::EngravingItem* wrapped)
     mu::engraving::EngravingItem* s = wrapped->element();
     if (!s) {
         LOGW("PluginAPI::Note::remove: Unable to retrieve element. %s", qPrintable(wrapped->name()));
-    } else if (s->explicitParent() != note()) {
+    } else if (s->ownershipParent() != note()) {
         LOGW("PluginAPI::Note::remove: The element is not a child of this note. Use removeElement() instead.");
     } else if (isChildAllowed(s->type())) {
         note()->score()->deleteItem(s);     // Create undo op and remove the element.
@@ -335,7 +336,6 @@ void Chord::setPlayEventType(mu::engraving::PlayEventType v)
 {
     // Only create undo operation if the value has changed.
     if (v != chord()->playEventType()) {
-        chord()->score()->setPlaylistDirty();
         chord()->score()->undo(new ChangeChordPlayEventType(chord(), v));
     }
 }
@@ -368,7 +368,7 @@ void Chord::addInternal(mu::engraving::Chord* chord, mu::engraving::EngravingIte
 {
     // Provide parentage for element.
     s->setScore(chord->score());
-    s->setParent(chord);
+    s->setOwnershipParent(chord);
     // If a note, ensure the element has proper Tpc values. (Will crash otherwise)
     if (s->isNote()) {
         s->setTrack(chord->track());
@@ -387,7 +387,7 @@ void Chord::remove(apiv1::EngravingItem* wrapped)
     mu::engraving::EngravingItem* s = wrapped->element();
     if (!s) {
         LOGW("PluginAPI::Chord::remove: Unable to retrieve element. %s", qPrintable(wrapped->name()));
-    } else if (s->explicitParent() != chord()) {
+    } else if (s->ownershipParent() != chord()) {
         LOGW("PluginAPI::Chord::remove: The element is not a child of this chord. Use removeElement() instead.");
     } else if (chord()->notes().size() <= 1 && s->isNote()) {
         LOGW("PluginAPI::Chord::remove: Removal of final note is not allowed.");
@@ -460,7 +460,7 @@ void MeasureBase::add(apiv1::EngravingItem* wrapped)
 void MeasureBase::addInternal(mu::engraving::MeasureBase* measureBase, mu::engraving::EngravingItem* s)
 {
     s->setScore(measureBase->score());
-    s->setParent(measureBase);
+    s->setOwnershipParent(measureBase);
     measureBase->score()->undoAddElement(s);
 }
 
@@ -469,7 +469,7 @@ void MeasureBase::remove(apiv1::EngravingItem* wrapped)
     mu::engraving::EngravingItem* s = wrapped->element();
     if (!s) {
         LOGW("PluginAPI::MeasureBase::remove: Unable to retrieve element. %s", qPrintable(wrapped->name()));
-    } else if (s->explicitParent() != measureBase()) {
+    } else if (s->ownershipParent() != measureBase()) {
         LOGW("PluginAPI::MeasureBase::remove: The element is not a child of this measure base. Use removeElement() instead.");
     } else {
         measureBase()->score()->deleteItem(s);     // Create undo op and remove the element.
@@ -504,11 +504,12 @@ void System::setIsLocked(bool locked)
     if (locked == isLocked()) {
         return;
     }
-    const mu::engraving::SystemLock* currentLock = system()->systemLock();
+    Transaction& tx = system()->score()->transactionManager()->currentOrDummyTransaction();
+    const mu::engraving::RangeLock* currentLock = system()->systemLock();
     if (currentLock && !locked) {
-        EditSystemLocks::undoRemoveSystemLock(system()->score(), currentLock);
+        EditSystemLocks::undoRemoveSystemLock(tx, currentLock);
     } else if (!currentLock && locked) {
-        EditSystemLocks::undoAddSystemLock(system()->score(), new mu::engraving::SystemLock(system()->first(), system()->last()));
+        EditSystemLocks::undoAddSystemLock(tx, new mu::engraving::RangeLock(system()->first(), system()->last()));
     }
 }
 
@@ -663,6 +664,137 @@ Ornament* Spanner::ornament() const
 }
 
 //---------------------------------------------------------
+//   FretDiagram::setDot
+//   FretDiagram::setMarker
+//   FretDiagram::setBarre
+//   FretDiagram::clear
+///   When the element is owned by the score, use the undo-aware DOM methods
+///   so that modifications are recorded on the undo stack and propagated to
+///   all linked clones. When the element is plugin-owned (not yet added to
+///   a score), use the direct setters to avoid accessing an invalid undo
+///   stack (see ScoreElement::set() in scoreelement.cpp for the same pattern).
+//---------------------------------------------------------
+
+void FretDiagram::setDot(int string, int fret, bool add, int dotType)
+{
+    if (string < 0 || string >= fretDiagram()->strings()) {
+        LOGW("PluginAPI::FretDiagram::setDot: string %d is out of range (0..%d)", string, fretDiagram()->strings() - 1);
+        return;
+    }
+    if (fret < 0) {
+        LOGW("PluginAPI::FretDiagram::setDot: fret %d is negative", fret);
+        return;
+    }
+    if (dotType < int(mu::engraving::FretDotType::NORMAL)
+        || dotType > int(mu::engraving::FretDotType::TRIANGLE)) {
+        LOGW("PluginAPI::FretDiagram::setDot: dotType %d is out of range", dotType);
+        return;
+    }
+    if (ownership() == Ownership::SCORE) {
+        fretDiagram()->undoSetFretDot(string, fret, add,
+                                      static_cast<mu::engraving::FretDotType>(dotType));
+    } else {
+        fretDiagram()->setDot(string, fret, add,
+                              static_cast<mu::engraving::FretDotType>(dotType));
+    }
+}
+
+void FretDiagram::setMarker(int string, int marker)
+{
+    if (string < 0 || string >= fretDiagram()->strings()) {
+        LOGW("PluginAPI::FretDiagram::setMarker: string %d is out of range (0..%d)", string, fretDiagram()->strings() - 1);
+        return;
+    }
+    if (marker < int(mu::engraving::FretMarkerType::NONE)
+        || marker > int(mu::engraving::FretMarkerType::CROSS)) {
+        LOGW("PluginAPI::FretDiagram::setMarker: marker %d is out of range", marker);
+        return;
+    }
+    if (ownership() == Ownership::SCORE) {
+        fretDiagram()->undoSetFretMarker(string,
+                                         static_cast<mu::engraving::FretMarkerType>(marker));
+    } else {
+        fretDiagram()->setMarker(string,
+                                 static_cast<mu::engraving::FretMarkerType>(marker));
+    }
+}
+
+void FretDiagram::setBarre(int string, int fret, bool add)
+{
+    if (string < 0 || string >= fretDiagram()->strings()) {
+        LOGW("PluginAPI::FretDiagram::setBarre: string %d is out of range (0..%d)", string, fretDiagram()->strings() - 1);
+        return;
+    }
+    if (fret <= 0) {
+        LOGW("PluginAPI::FretDiagram::setBarre: fret %d must be > 0", fret);
+        return;
+    }
+    if (ownership() == Ownership::SCORE) {
+        fretDiagram()->undoSetFretBarre(string, fret, add);
+    } else {
+        fretDiagram()->setBarre(string, fret, add);
+    }
+}
+
+void FretDiagram::clear()
+{
+    if (ownership() == Ownership::SCORE) {
+        fretDiagram()->undoFretClear();
+    } else {
+        fretDiagram()->clear();
+    }
+}
+
+QVariantList FretDiagram::dots() const
+{
+    QVariantList result;
+    for (const auto& [string, dotVec] : fretDiagram()->dots()) {
+        for (const mu::engraving::FretItem::Dot& d : dotVec) {
+            if (!d.exists()) {
+                continue;
+            }
+            QVariantMap entry;
+            entry["string"] = string;
+            entry["fret"] = d.fret;
+            entry["dotType"] = int(d.dtype);
+            result.append(entry);
+        }
+    }
+    return result;
+}
+
+QVariantList FretDiagram::markers() const
+{
+    QVariantList result;
+    for (const auto& [string, m] : fretDiagram()->markers()) {
+        if (!m.exists()) {
+            continue;
+        }
+        QVariantMap entry;
+        entry["string"] = string;
+        entry["markerType"] = int(m.mtype);
+        result.append(entry);
+    }
+    return result;
+}
+
+QVariantList FretDiagram::barres() const
+{
+    QVariantList result;
+    for (const auto& [fret, b] : fretDiagram()->barres()) {
+        if (!b.exists()) {
+            continue;
+        }
+        QVariantMap entry;
+        entry["fret"] = fret;
+        entry["startString"] = b.startString;
+        entry["endString"] = b.endString;
+        result.append(entry);
+    }
+    return result;
+}
+
+//---------------------------------------------------------
 //   wrap
 ///   \cond PLUGIN_API \private \endcond
 ///   Wraps mu::engraving::EngravingItem choosing the correct wrapper type
@@ -687,6 +819,8 @@ EngravingItem* mu::engraving::apiv1::wrap(mu::engraving::EngravingItem* e, Owner
     API_WRAP(DurationElement)
     API_WRAP(Beam)
     API_WRAP(Lyrics)
+    API_WRAP(Harmony)
+    API_WRAP(FretDiagram)
     API_WRAP(Segment)
     API_WRAP(Measure)
     API_WRAP(MeasureBase)

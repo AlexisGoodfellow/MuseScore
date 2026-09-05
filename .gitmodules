@@ -1,0 +1,9 @@
+[submodule "muse_framework"]
+	path = muse
+	url = https://github.com/AlexisGoodfellow/muse_framework.git
+	# [editude] Points at the editude soft fork, which carries the WASM
+	# audio/interactive patches that used to live in src/framework/.
+	# See adr/2026-09-04-two-fork-submodule-topology.md.
+[submodule "muse_deps"]
+	path = muse_deps
+	url = https://github.com/musescore/muse_deps.git

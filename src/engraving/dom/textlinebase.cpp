@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -22,6 +22,8 @@
 
 #include "textlinebase.h"
 
+#include "rendering/iscorerenderer.h"
+
 #include "factory.h"
 #include "score.h"
 #include "system.h"
@@ -37,13 +39,13 @@ namespace mu::engraving {
 //   TextLineBaseSegment
 //---------------------------------------------------------
 
-TextLineBaseSegment::TextLineBaseSegment(const ElementType& type, Spanner* sp, System* parent, ElementFlags f)
-    : LineSegment(type, sp, parent, f)
+TextLineBaseSegment::TextLineBaseSegment(const ElementType& type, TextLineBase* sp, ElementFlags f)
+    : LineSegment(type, sp, f)
 {
     m_text    = Factory::createText(this, TextStyleType::DEFAULT, false);
     m_endText = Factory::createText(this, TextStyleType::DEFAULT, false);
-    m_text->setParent(this);
-    m_endText->setParent(this);
+    m_text->setOwnershipParent(this);
+    m_endText->setOwnershipParent(this);
     m_text->setFlag(ElementFlag::MOVABLE, false);
     m_endText->setFlag(ElementFlag::MOVABLE, false);
 }
@@ -53,8 +55,8 @@ TextLineBaseSegment::TextLineBaseSegment(const TextLineBaseSegment& seg)
 {
     m_text    = seg.m_text->clone();
     m_endText = seg.m_endText->clone();
-    m_text->setParent(this);
-    m_endText->setParent(this);
+    m_text->setOwnershipParent(this);
+    m_endText->setOwnershipParent(this);
     // set the right _text
     renderer()->layoutTextLineBaseSegment(this);
 }
@@ -117,7 +119,7 @@ void TextLineBaseSegment::spatiumChanged(double ov, double nv)
     m_endText->spatiumChanged(ov, nv);
 }
 
-static constexpr std::array<Pid, 38> TextLineBasePropertyId = { {
+static constexpr std::array<Pid, 44> TextLineBasePropertyId = { {
     Pid::LINE_VISIBLE,
     Pid::BEGIN_HOOK_TYPE,
     Pid::BEGIN_HOOK_HEIGHT,
@@ -139,6 +141,12 @@ static constexpr std::array<Pid, 38> TextLineBasePropertyId = { {
     Pid::BEGIN_FONT_FACE,
     Pid::BEGIN_FONT_SIZE,
     Pid::BEGIN_FONT_STYLE,
+    Pid::BEGIN_TEXT_MUSICAL_SYMBOLS_SCALE,
+    Pid::BEGIN_TEXT_MUSIC_SYMBOLS_SIZE,
+    Pid::CONTINUE_TEXT_MUSICAL_SYMBOLS_SCALE,
+    Pid::CONTINUE_TEXT_MUSIC_SYMBOLS_SIZE,
+    Pid::END_TEXT_MUSICAL_SYMBOLS_SCALE,
+    Pid::END_TEXT_MUSIC_SYMBOLS_SIZE,
     Pid::BEGIN_TEXT_OFFSET,
     Pid::CONTINUE_TEXT,
     Pid::CONTINUE_TEXT_ALIGN,
@@ -158,7 +166,7 @@ static constexpr std::array<Pid, 38> TextLineBasePropertyId = { {
     Pid::END_TEXT_OFFSET,
 } };
 
-const std::array<Pid, 38>& TextLineBase::textLineBasePropertyIds()
+const std::array<Pid, 44>& TextLineBase::textLineBasePropertyIds()
 {
     return TextLineBasePropertyId;
 }
@@ -268,6 +276,20 @@ PropertyValue TextLineBase::getProperty(Pid id) const
     case Pid::FONT_STYLE: // Redirect to begin text...
     case Pid::BEGIN_FONT_STYLE:
         return int(_beginFontStyle);
+    case Pid::MUSIC_SYMBOL_SIZE: // Redirect to begin text...
+    case Pid::BEGIN_TEXT_MUSIC_SYMBOLS_SIZE:
+        return _beginTextMusicSymbolsSize;
+    case Pid::MUSICAL_SYMBOLS_SCALE: // Redirect to begin text...
+    case Pid::BEGIN_TEXT_MUSICAL_SYMBOLS_SCALE:
+        return _beginTextMusicalSymbolsScale;
+    case Pid::CONTINUE_TEXT_MUSICAL_SYMBOLS_SCALE:
+        return _continueTextMusicalSymbolsScale;
+    case Pid::CONTINUE_TEXT_MUSIC_SYMBOLS_SIZE:
+        return _continueTextMusicSymbolsSize;
+    case Pid::END_TEXT_MUSICAL_SYMBOLS_SCALE:
+        return _endTextMusicalSymbolsScale;
+    case Pid::END_TEXT_MUSIC_SYMBOLS_SIZE:
+        return _endTextMusicSymbolsSize;
     case Pid::BEGIN_TEXT_OFFSET:
         return _beginTextOffset;
     case Pid::CONTINUE_TEXT:
@@ -344,6 +366,24 @@ bool TextLineBase::setProperty(Pid id, const PropertyValue& v)
         break;
     case Pid::BEGIN_FONT_STYLE:
         setBeginFontStyle(FontStyle(v.toInt()));
+        break;
+    case Pid::BEGIN_TEXT_MUSICAL_SYMBOLS_SCALE:
+        setBeginTextMusicalSymbolsScale(v.toReal());
+        break;
+    case Pid::BEGIN_TEXT_MUSIC_SYMBOLS_SIZE:
+        setBeginTextMusicSymbolsSize(v.toReal());
+        break;
+    case Pid::CONTINUE_TEXT_MUSICAL_SYMBOLS_SCALE:
+        setContinueTextMusicalSymbolsScale(v.toReal());
+        break;
+    case Pid::CONTINUE_TEXT_MUSIC_SYMBOLS_SIZE:
+        setContinueTextMusicSymbolsSize(v.toReal());
+        break;
+    case Pid::END_TEXT_MUSICAL_SYMBOLS_SCALE:
+        setEndTextMusicalSymbolsScale(v.toReal());
+        break;
+    case Pid::END_TEXT_MUSIC_SYMBOLS_SIZE:
+        setEndTextMusicSymbolsSize(v.toReal());
         break;
 
     case Pid::CONTINUE_TEXT_ALIGN:
@@ -490,6 +530,20 @@ bool TextLineBase::setProperty(Pid id, const PropertyValue& v)
         setEndFontStyle(style);
         break;
     }
+    case Pid::MUSIC_SYMBOL_SIZE: {
+        const double size = v.toReal();
+        setBeginTextMusicSymbolsSize(size);
+        setContinueTextMusicSymbolsSize(size);
+        setEndTextMusicSymbolsSize(size);
+        break;
+    }
+    case Pid::MUSICAL_SYMBOLS_SCALE: {
+        const double scale = v.toReal();
+        setBeginTextMusicalSymbolsScale(scale);
+        setContinueTextMusicalSymbolsScale(scale);
+        setEndTextMusicalSymbolsScale(scale);
+        break;
+    }
 
     default:
         return SLine::setProperty(id, v);
@@ -515,6 +569,10 @@ PropertyValue TextLineBase::propertyDefault(Pid propertyId) const
         return propertyDefault(Pid::BEGIN_FONT_SIZE);
     case Pid::FONT_STYLE:
         return propertyDefault(Pid::BEGIN_FONT_STYLE);
+    case Pid::MUSICAL_SYMBOLS_SCALE:
+        return propertyDefault(Pid::BEGIN_TEXT_MUSICAL_SYMBOLS_SCALE);
+    case Pid::MUSIC_SYMBOL_SIZE:
+        return propertyDefault(Pid::BEGIN_TEXT_MUSIC_SYMBOLS_SIZE);
 
     default:
         return SLine::propertyDefault(propertyId);
@@ -552,6 +610,18 @@ void TextLineBase::setPropertyFlags(Pid id, PropertyFlags f)
         setPropertyFlags(Pid::BEGIN_FONT_STYLE, f);
         setPropertyFlags(Pid::CONTINUE_FONT_STYLE, f);
         setPropertyFlags(Pid::END_FONT_STYLE, f);
+        break;
+    }
+    case Pid::MUSICAL_SYMBOLS_SCALE: {
+        setPropertyFlags(Pid::BEGIN_TEXT_MUSICAL_SYMBOLS_SCALE, f);
+        setPropertyFlags(Pid::CONTINUE_TEXT_MUSICAL_SYMBOLS_SCALE, f);
+        setPropertyFlags(Pid::END_TEXT_MUSICAL_SYMBOLS_SCALE, f);
+        break;
+    }
+    case Pid::MUSIC_SYMBOL_SIZE: {
+        setPropertyFlags(Pid::BEGIN_TEXT_MUSIC_SYMBOLS_SIZE, f);
+        setPropertyFlags(Pid::CONTINUE_TEXT_MUSIC_SYMBOLS_SIZE, f);
+        setPropertyFlags(Pid::END_TEXT_MUSIC_SYMBOLS_SIZE, f);
         break;
     }
 

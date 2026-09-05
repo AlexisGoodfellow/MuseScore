@@ -18,15 +18,17 @@
     <metaTag name="workNumber"></metaTag>
     <metaTag name="workTitle"></metaTag>
     <Part id="1">
+      <eid>C_C</eid>
       <Staff>
-        <eid>C_C</eid>
+        <eid>D_D</eid>
         <StaffType group="pitched">
           <name>stdNormal</name>
           </StaffType>
         </Staff>
-      <trackName>Track 1</trackName>
       <Instrument id="cavaquinho">
-        <longName>Track 1</longName>
+        <InstrumentLabel>
+          <longName>Track 1</longName>
+          </InstrumentLabel>
         <trackName></trackName>
         <instrumentId>pluck.guitar</instrumentId>
         <singleNoteDynamics>0</singleNoteDynamics>
@@ -51,39 +53,41 @@
     <Staff id="1">
       <VBox>
         <height>10</height>
-        <eid>D_D</eid>
+        <eid>E_E</eid>
         <Text>
-          <eid>E_E</eid>
+          <eid>F_F</eid>
           <style>title</style>
           <text>Test</text>
           </Text>
         </VBox>
       <Measure>
-        <eid>F_F</eid>
+        <eid>G_G</eid>
         <voice>
           <Clef>
             <concertClefType>G8vb</concertClefType>
             <transposingClefType>G8vb</transposingClefType>
             <isHeader>1</isHeader>
-            <eid>G_G</eid>
+            <eid>H_H</eid>
             </Clef>
           <TimeSig>
-            <eid>H_H</eid>
+            <eid>I_I</eid>
             <sigN>4</sigN>
             <sigD>4</sigD>
             </TimeSig>
-          <StaffText>
-            <eid>I_I</eid>
-            <text>Capo. fret 1</text>
-            </StaffText>
+          <Capo>
+            <transposeMode>2</transposeMode>
+            <eid>J_J</eid>
+            <style>staff</style>
+            <text>Capo 1</text>
+            </Capo>
           <Dynamic>
             <subtype>f</subtype>
             <velocity>96</velocity>
-            <eid>J_J</eid>
+            <eid>K_K</eid>
             </Dynamic>
           <Tempo>
             <tempo>1.166667</tempo>
-            <eid>K_K</eid>
+            <eid>L_L</eid>
             <text><sym>metNoteQuarterUp</sym> = 70</text>
             </Tempo>
           <StringTunings>
@@ -97,56 +101,72 @@
               <string>59</string>
               <string>62</string>
               </StringData>
-            <eid>L_L</eid>
+            <eid>M_M</eid>
             <style>string_tunings</style>
             <text/>
             </StringTunings>
           <Chord>
-            <eid>M_M</eid>
+            <eid>N_N</eid>
             <durationType>half</durationType>
             <Note>
-              <eid>N_N</eid>
-              <pitch>52</pitch>
-              <tpc>18</tpc>
+              <eid>O_O</eid>
+              <pitch>53</pitch>
+              <tpc>13</tpc>
               <fret>2</fret>
               <string>3</string>
               </Note>
             <Note>
-              <eid>O_O</eid>
-              <pitch>55</pitch>
-              <tpc>15</tpc>
+              <eid>P_P</eid>
+              <Accidental>
+                <subtype>accidentalSharp</subtype>
+                <eid>Q_Q</eid>
+                </Accidental>
+              <pitch>56</pitch>
+              <tpc>22</tpc>
               <fret>0</fret>
               <string>2</string>
               </Note>
             <Note>
-              <eid>P_P</eid>
-              <pitch>59</pitch>
-              <tpc>19</tpc>
+              <eid>R_R</eid>
+              <pitch>60</pitch>
+              <tpc>14</tpc>
               <fret>0</fret>
               <string>1</string>
               </Note>
             </Chord>
           <Chord>
-            <eid>Q_Q</eid>
+            <eid>S_S</eid>
             <durationType>half</durationType>
             <Note>
-              <eid>R_R</eid>
-              <pitch>53</pitch>
-              <tpc>13</tpc>
+              <eid>T_T</eid>
+              <Accidental>
+                <subtype>accidentalSharp</subtype>
+                <eid>U_U</eid>
+                </Accidental>
+              <pitch>54</pitch>
+              <tpc>20</tpc>
               <fret>3</fret>
               <string>3</string>
               </Note>
             <Note>
-              <eid>S_S</eid>
-              <pitch>57</pitch>
-              <tpc>17</tpc>
+              <eid>V_V</eid>
+              <Accidental>
+                <subtype>accidentalFlat</subtype>
+                <eid>W_W</eid>
+                </Accidental>
+              <pitch>58</pitch>
+              <tpc>12</tpc>
               <fret>2</fret>
               <string>2</string>
               </Note>
             <Note>
-              <eid>T_T</eid>
-              <pitch>60</pitch>
-              <tpc>14</tpc>
+              <eid>X_X</eid>
+              <Accidental>
+                <subtype>accidentalSharp</subtype>
+                <eid>Y_Y</eid>
+                </Accidental>
+              <pitch>61</pitch>
+              <tpc>21</tpc>
               <fret>1</fret>
               <string>1</string>
               </Note>
@@ -154,10 +174,10 @@
           </voice>
         </Measure>
       <Measure>
-        <eid>U_U</eid>
+        <eid>Z_Z</eid>
         <voice>
           <Rest>
-            <eid>V_V</eid>
+            <eid>a_a</eid>
             <durationType>measure</durationType>
             <duration>4/4</duration>
             </Rest>

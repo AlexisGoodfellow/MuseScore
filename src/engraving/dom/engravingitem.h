@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -26,8 +26,6 @@
 #include "draw/types/geometry.h"
 
 #include "modularity/ioc.h"
-#include "../iengravingconfiguration.h"
-#include "../rendering/iscorerenderer.h"
 #include "../rendering/paintoptions.h"
 
 #include "../infrastructure/ld_access.h"
@@ -52,7 +50,16 @@ class Painter;
     LayoutData* mutldata() { return static_cast<Class::LayoutData*>(EngravingItem::mutldata()); } \
     LayoutData* createLayoutData() const override { return new Class::LayoutData(); } \
 
+namespace mu::engraving::rendering {
+class IScoreRenderer;
+}
+
 namespace mu::engraving {
+class IEngravingConfiguration;
+class IEngravingContextConfiguration;
+
+class Transaction;
+
 template<typename T>
 inline void dump(const ld_field<T>& f, std::stringstream& ss)
 {
@@ -166,11 +173,20 @@ public:
 
     void deleteLater();
 
-    EngravingItem* parentItem(bool explicitParent = true) const;
     EngravingItemList childrenItems(bool all = false) const;
 
-    const muse::modularity::ContextPtr& iocContext() const;
+    //! Item-typed variant of ownershipParent(); additionally null when the
+    //! owner is not an item.
+    EngravingItem* ownershipParentItem() const;
+
+    //! The parent in the visual hierarchy, which positions are relative to.
+    //! Defaults to the owner; overridden where placement differs from ownership
+    //! (e.g. measures are placed on systems, but not owned by them).
+    virtual EngravingItem* layoutParent() const;
+
     const std::shared_ptr<IEngravingConfiguration>& configuration() const;
+    const muse::modularity::ContextPtr& iocContext() const;
+    const std::shared_ptr<IEngravingContextConfiguration>& contextConfiguration() const;
     const std::shared_ptr<rendering::IScoreRenderer>& renderer() const;
 
     EngravingItem* findAncestor(ElementType t);
@@ -216,11 +232,14 @@ public:
     bool visible() const { return !flag(ElementFlag::INVISIBLE); }
     virtual void setVisible(bool f);
 
-    bool isInteractionAvailable() const;
+    virtual bool isInteractionAvailable() const;
 
     bool sizeIsSpatiumDependent() const override { return !flag(ElementFlag::SIZE_SPATIUM_DEPENDENT); }
     void setSizeIsSpatiumDependent(bool v) { setFlag(ElementFlag::SIZE_SPATIUM_DEPENDENT, !v); }
     bool offsetIsSpatiumDependent() const override;
+
+    virtual PointF defaultPos() const;
+    virtual Sid defaultPosSid() const;
 
     PlacementV placement() const;
     void setPlacement(PlacementV val) { setFlag(ElementFlag::PLACE_ABOVE, !bool(val)); }
@@ -322,7 +341,7 @@ public:
     virtual void setTrack(track_idx_t val);
 
     int z() const;
-    void setZ(int val);
+    virtual void setZ(int val);
 
     staff_idx_t staffIdx() const;
     void setStaffIdx(staff_idx_t val);
@@ -382,7 +401,7 @@ public:
 
  Reimplemented by elements that accept drops.
 */
-    virtual EngravingItem* drop(EditData&) { return 0; }
+    virtual EngravingItem* drop(Transaction&, EditData&) { return 0; }
 
     mutable bool itemDiscovered = false;       // helper flag for bsp
 
@@ -433,6 +452,7 @@ public:
     bool setProperty(Pid, const PropertyValue&) override;
     void undoChangeProperty(Pid id, const PropertyValue&, PropertyFlags ps) override;
     using EngravingObject::undoChangeProperty;
+    void undoResetProperty(Pid id) override;
     PropertyValue propertyDefault(Pid) const override;
 
     bool custom(Pid) const;
@@ -467,6 +487,14 @@ public:
 
     bool accessibleEnabled() const;
     void setAccessibleEnabled(bool enabled);
+
+    //! Parent in the accessibility hierarchy: the layout parent when placed,
+    //! otherwise the raw parent (so that e.g. palette items reach the dummy).
+    virtual EngravingItem* accessibleParentItem() const;
+    //! Children in the accessibility hierarchy: the items that name this one as their
+    //! accessibleParentItem(). Those are the children it owns, unless ownership and
+    //! placement diverge, in which case the item that places them lists them instead.
+    virtual EngravingItemList accessibleChildren() const;
 
     virtual String accessibleInfo() const;
     virtual String screenReaderInfo() const { return accessibleInfo(); }
@@ -643,6 +671,10 @@ public:
         EngravingItem* m_itemSnappedAfter = nullptr;
 
         StaffCenteringInfo m_staffCenteringInfo;
+
+        // STAVE SHARING
+        EngravingItem* m_sharedItem = nullptr;
+        std::vector<EngravingItem*> m_originItems;
     };
 
     const LayoutData* ldata() const;
@@ -666,6 +698,12 @@ public:
     PropertyPropagation propertyPropagation(const EngravingItem* destinationItem, Pid propertyId) const;
     virtual bool canBeExcludedFromOtherParts() const { return false; }
     virtual void manageExclusionFromParts(bool exclude);
+
+    EngravingItem* sharedItem() const;
+    const std::vector<EngravingItem*>& originItems() const;
+    static void connectSharedItem(EngravingItem* sharedItem, EngravingItem* originItem);
+    static void disconnectSharedItem(EngravingItem* sharedItem, EngravingItem* originItem);
+    static void disconnectAllOriginItems(EngravingItem* sharedItem);
 
     virtual bool isBefore(const EngravingItem* item) const;
 

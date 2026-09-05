@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -47,11 +47,15 @@
 #include "engraving/dom/stafftext.h"
 #include "engraving/dom/stafftype.h"
 #include "engraving/dom/stringdata.h"
+#include "engraving/dom/tempotext.h"
 #include "engraving/dom/tie.h"
 #include "engraving/dom/tremolosinglechord.h"
 #include "engraving/dom/tuplet.h"
 #include "engraving/dom/stringtunings.h"
+#include "engraving/dom/capo.h"
 #include "engraving/types/symid.h"
+
+#include "engraving/editing/editchord.h"
 
 #include "guitarprodrumset.h"
 
@@ -98,14 +102,24 @@ bool GuitarPro4::readMixChange(Measure* measure)
         readChar();
     }
     if (temp >= 0) {
-        if (last_segment) {
-            score->setTempo(last_segment->tick(), double(temp) / 60.0f);
-            last_segment = nullptr;
-        }
         if (temp != previousTempo) {
+            if (last_segment && last_segment->tick() != measure->tick()) {
+                bool hasTempoText = false;
+                for (EngravingItem* e : last_segment->annotations()) {
+                    hasTempoText |= e->isTempoText();
+                }
+                if (!hasTempoText) {
+                    TempoText* tt = Factory::createTempoText(last_segment);
+                    tt->setTempo(double(temp) / 60.0f);
+                    tt->setVisible(false);
+                    tt->setTrack(0);
+                    last_segment->add(tt);
+                }
+            }
             previousTempo = temp;
             setTempo(temp, measure);
         }
+        last_segment = nullptr;
         readChar();
         tempoEdited = true;
     }
@@ -245,7 +259,7 @@ GuitarPro::ReadNoteResult GuitarPro4::readNote(int string, int staffIdx, Note* n
     if (noteBits & NOTE_SFORZATO) {             // 0x40
         Articulation* art = Factory::createArticulation(note->score()->dummy()->chord());
         art->setSymId(SymId::articAccentAbove);
-        if (!note->score()->toggleArticulation(note, art)) {
+        if (!EditChord::toggleArticulation(note->score(), note, art)) {
             delete art;
         }
     }
@@ -328,14 +342,14 @@ GuitarPro::ReadNoteResult GuitarPro4::readNote(int string, int staffIdx, Note* n
             }
             gn->setFret(fret);
             gn->setString(string);
-            int grace_pitch = note->part()->instrument()->stringData()->getPitch(string, fret, nullptr);
+            int grace_pitch = note->part()->instrument()->stringData()->getPitch(string, fret, note->staff(), note->tick());
             gn->setPitch(grace_pitch);
             gn->setTpcFromPitch();
 
             Chord* gc = Factory::createChord(score->dummy()->segment());
             gc->setTrack(note->chord()->track());
             gc->add(gn);
-            gc->setParent(note->chord());
+            gc->setOwnershipParent(note->chord());
 
             TDuration d;
             d.setVal(grace_len);
@@ -364,7 +378,6 @@ GuitarPro::ReadNoteResult GuitarPro4::readNote(int string, int staffIdx, Note* n
                 ChordRest* cr2 = toChord(note->chord());
 
                 Slur* slur1 = Factory::createSlur(score->dummy());
-                slur1->setAnchor(Spanner::Anchor::CHORD);
                 slur1->setStartElement(cr1);
                 slur1->setEndElement(cr2);
                 slur1->setTick(cr1->tick());
@@ -438,7 +451,7 @@ GuitarPro::ReadNoteResult GuitarPro4::readNote(int string, int staffIdx, Note* n
     if (fretNumber > 99 || fretNumber == -1) {
         fretNumber = 0;
     }
-    int pitch = staff->part()->instrument()->stringData()->getPitch(string, fretNumber, nullptr);
+    int pitch = staff->part()->instrument()->stringData()->getPitch(string, fretNumber, staff, note->tick());
     note->setFret(fretNumber);
     note->setString(string);
     note->setPitch(std::min(pitch, mu::engraving::MAX_PITCH));
@@ -461,7 +474,8 @@ GuitarPro::ReadNoteResult GuitarPro4::readNote(int string, int staffIdx, Note* n
             note->chord()->add(harmonicNote);
             harmonicNote->setFret(harmonicFret);
             harmonicNote->setString(note->string());
-            harmonicNote->setPitch(note->staff()->part()->instrument()->stringData()->getPitch(note->string(), harmonicFret, nullptr));
+            harmonicNote->setPitch(note->staff()->part()->instrument()->stringData()->getPitch(note->string(), harmonicFret, note->staff(),
+                                                                                               note->tick()));
             harmonicNote->setTpcFromPitch();
         }
     }
@@ -725,6 +739,11 @@ bool GuitarPro4::read(IODevice* io)
         }
         int midiPort     = readInt() - 1;
         int midiChannel  = readInt() - 1;
+        if (midiChannel < 0 || midiChannel >= static_cast<int>(channelDefaults.size())) {
+            LOGE() << "midiChannel " << midiChannel << " out of range 0-" << channelDefaults.size();
+            return false;
+        }
+
         /*int midiChannel2 =*/ readInt();     // - 1;
         int frets        = readInt();
 
@@ -742,7 +761,6 @@ bool GuitarPro4::read(IODevice* io)
         Instrument* instr = part->instrument();
         instr->setStringData(stringData);
         instr->setSingleNoteDynamics(false);
-        part->setPartName(name);
         part->setPlainLongName(name);
 
         int patch = channelDefaults[midiChannel].patch;
@@ -796,10 +814,19 @@ bool GuitarPro4::read(IODevice* io)
 
         if (capo > 0 && !engravingConfiguration()->guitarProImportExperimental()) {
             Segment* s = measure->getSegment(SegmentType::ChordRest, measure->tick());
-            StaffText* st = new StaffText(s);
-            st->setPlainText(String(u"Capo. fret ") + String::number(capo));
-            st->setTrack(i * VOICES);
-            s->add(st);
+            const size_t track = i * VOICES;
+
+            CapoParams params;
+            params.active = true;
+            params.transposeMode = CapoParams::TransposeMode::TAB_ONLY;
+            params.fretPosition = capo;
+
+            Capo* capoEl = Factory::createCapo(score->dummy()->segment());
+            capoEl->setTrack(track);
+            capoEl->setParams(params);
+            s->add(capoEl);
+
+            staff->insertCapoParams({ 0, 1 }, params, true);
         }
 
         InstrChannel* ch = instr->channel(0);
@@ -930,7 +957,7 @@ bool GuitarPro4::read(IODevice* io)
                         cr = Factory::createChord(score->dummy()->segment());
                     }
                 }
-                cr->setParent(segment);
+                cr->setOwnershipParent(segment);
                 cr->setTrack(track);
                 if (lyrics) {
                     cr->add(lyrics);
@@ -950,7 +977,7 @@ bool GuitarPro4::read(IODevice* io)
                         tuplet->setTrack(cr->track());
                         tuplets[staffIdx] = tuplet;
                         setTuplet(tuplet, tuple);
-                        tuplet->setParent(measure);
+                        tuplet->setOwnershipParent(measure);
                     }
                     tuplet->setTrack(track);
                     tuplet->setBaseLen(l);
@@ -993,7 +1020,7 @@ bool GuitarPro4::read(IODevice* io)
                             if (dotted) {
                                 // there is at most one dotted note in this guitar pro version
                                 NoteDot* dot = Factory::createNoteDot(note);
-                                dot->setParent(note);
+                                dot->setOwnershipParent(note);
                                 dot->setTrack(track);                  // needed to know the staff it belongs to (and detect tablature)
                                 dot->setVisible(true);
                                 note->add(dot);
@@ -1046,7 +1073,7 @@ bool GuitarPro4::read(IODevice* io)
                 if (slide != 2) {
                     if (hasSlur && (slurs[staffIdx] == 0)) {
                         Slur* slur = Factory::createSlur(score->dummy());
-                        slur->setParent(0);
+                        slur->setOwnershipParent(0);
                         slur->setTrack(track);
                         slur->setTrack2(track);
                         slur->setTick(cr->tick());
@@ -1091,11 +1118,10 @@ bool GuitarPro4::read(IODevice* io)
                                     for (auto n : cr1->notes()) {
                                         if (n->string() == last->string()) {
                                             Glissando* s = mu::engraving::Factory::createGlissando(n);
-                                            s->setAnchor(Spanner::Anchor::NOTE);
                                             s->setStartElement(n);
                                             s->setTick(seg->tick());
                                             s->setTrack(chord->track());
-                                            s->setParent(n);
+                                            s->setOwnershipParent(n);
                                             s->setGlissandoType(GlissandoType::STRAIGHT);
                                             s->setEndElement(last);
                                             s->setTick2(chord->segment()->tick());
@@ -1171,11 +1197,10 @@ bool GuitarPro4::read(IODevice* io)
                             break;
                         }
                         Glissando* s = new Glissando(n);
-                        s->setAnchor(Spanner::Anchor::NOTE);
                         s->setStartElement(n);
                         s->setTick(n->chord()->segment()->tick());
                         s->setTrack(n->track());
-                        s->setParent(n);
+                        s->setOwnershipParent(n);
                         s->setGlissandoType(GlissandoType::STRAIGHT);
                         s->setEndElement(nt);
                         s->setTick2(nt->chord()->segment()->tick());
@@ -1193,8 +1218,9 @@ bool GuitarPro4::read(IODevice* io)
     }
 
     m_continiousElementsBuilder->addElementsToScore();
-    m_guitarBendImporter->applyBendsToChords();
+    m_guitarBendImporter->addElementsToScore();
     addTunings();
+    utils::addPlayCountTexts(score);
 
     return true;
 }

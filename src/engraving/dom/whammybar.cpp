@@ -5,7 +5,7 @@
  * MuseScore Studio
  * Music Composition & Notation
  *
- * Copyright (C) 2021 MuseScore Limited
+ * Copyright (C) 2021 MuseScore Limited and others
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as
@@ -55,10 +55,17 @@ static const ElementStyle whammyBarStyle {
     { Sid::whammyBarEndHookType,                   Pid::END_HOOK_TYPE },
     { Sid::whammyBarLineWidth,                     Pid::LINE_WIDTH },
     { Sid::whammyBarText,                          Pid::BEGIN_TEXT },
+
+    { Sid::whammyBarMusicalSymbolSize,             Pid::BEGIN_TEXT_MUSIC_SYMBOLS_SIZE },
+    { Sid::whammyBarMusicalSymbolSize,             Pid::CONTINUE_TEXT_MUSIC_SYMBOLS_SIZE },
+    { Sid::whammyBarMusicalSymbolSize,             Pid::END_TEXT_MUSIC_SYMBOLS_SIZE },
+    { Sid::dummyMusicalSymbolsScale,               Pid::BEGIN_TEXT_MUSICAL_SYMBOLS_SCALE },
+    { Sid::dummyMusicalSymbolsScale,               Pid::CONTINUE_TEXT_MUSICAL_SYMBOLS_SCALE },
+    { Sid::dummyMusicalSymbolsScale,               Pid::END_TEXT_MUSICAL_SYMBOLS_SCALE },
 };
 
-WhammyBarSegment::WhammyBarSegment(WhammyBar* sp, System* parent)
-    : TextLineBaseSegment(ElementType::WHAMMY_BAR_SEGMENT, sp, parent, ElementFlag::MOVABLE | ElementFlag::ON_STAFF)
+WhammyBarSegment::WhammyBarSegment(WhammyBar* sp)
+    : TextLineBaseSegment(ElementType::WHAMMY_BAR_SEGMENT, sp, ElementFlag::MOVABLE | ElementFlag::ON_STAFF)
 {
     m_text->setTextStyleType(propertyDefault(Pid::TEXT_STYLE).value<TextStyleType>());
     m_endText->setTextStyleType(propertyDefault(Pid::TEXT_STYLE).value<TextStyleType>());
@@ -90,9 +97,9 @@ static const ElementStyle whammyBarSegmentStyle {
 //   createLineSegment
 //---------------------------------------------------------
 
-LineSegment* WhammyBar::createLineSegment(System* parent)
+LineSegment* WhammyBar::createLineSegment()
 {
-    WhammyBarSegment* wb = new WhammyBarSegment(this, parent);
+    WhammyBarSegment* wb = new WhammyBarSegment(this);
     wb->setTrack(track());
     wb->initElementStyle(&whammyBarSegmentStyle);
     return wb;
@@ -184,5 +191,10 @@ Sid WhammyBar::getPropertyStyle(Pid id) const
         break;
     }
     return TextLineBase::getPropertyStyle(id);
+}
+
+Sid WhammyBar::defaultPosSid() const
+{
+    return placeAbove() ? Sid::whammyBarPosAbove : Sid::whammyBarPosBelow;
 }
 }
