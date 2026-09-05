@@ -45,6 +45,20 @@ class Editude_ScoreApplicatorTests : public ::testing::Test {};
 // Duration is the ADR object format: {"type": "quarter", "dots": 0}.
 // Callers override only the fields they care about.
 // ---------------------------------------------------------------------------
+// [editude] InsertNote and friends are part-scoped: the applicator resolves
+// part_id through its UUID map, so a part must be registered first. These
+// Group 2 tests predate that requirement.
+static const QString kTestPartId = "test-part-uuid";
+
+static QJsonObject makeBeatObj(int n, int d)
+{
+    QJsonObject b;
+    b["numerator"]   = n;
+    b["denominator"] = d;
+    return b;
+}
+
+
 static QJsonObject makePayload(
     const QString& step = "C", int octave = 4,
     const QString& acc = "",
@@ -69,6 +83,7 @@ static QJsonObject makePayload(
 
     QJsonObject op;
     op["type"]     = "InsertNote";
+    op["part_id"]  = kTestPartId;  // [editude] ops are part-scoped
     op["pitch"]    = pitch;
     op["duration"] = duration;
     op["beat"]     = beat;
@@ -82,6 +97,23 @@ static QJsonObject makePayload(
 // ===========================================================================
 // Group 1 — early-exit guards (no score object needed)
 // ===========================================================================
+
+// [editude] The applicator's element->UUID map was removed when addressing
+// became coordinate-based (df1edaabf6). Assert the observable outcome — whether
+// the score actually contains a tuplet — rather than internal bookkeeping.
+static bool scoreHasTuplet(Score* score)
+{
+    for (Segment* seg = score->firstSegment(SegmentType::ChordRest); seg;
+         seg = seg->next1(SegmentType::ChordRest)) {
+        for (track_idx_t t = 0; t < score->ntracks(); ++t) {
+            EngravingItem* e = seg->element(t);
+            if (e && e->isChordRest() && toChordRest(e)->tuplet()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 TEST_F(Editude_ScoreApplicatorTests, unrecognizedType_returnsFalse)
 {
@@ -113,6 +145,30 @@ TEST_F(Editude_ScoreApplicatorTests, midiOutOfRange_returnsFalse)
     EXPECT_FALSE(applicator.apply(nullptr, payload));
 }
 
+
+static QJsonObject makeAddPartPayload(const QString& partId,
+                                       const QString& name = "Violin",
+                                       int staffCount = 1)
+{
+    QJsonObject instr;
+    instr["musescore_id"] = "";
+    instr["name"]         = name;
+    instr["short_name"]   = name.left(3) + ".";
+
+    QJsonObject op;
+    op["type"]        = "AddPart";
+    op["part_id"]     = partId;
+    op["name"]        = name;
+    op["staff_count"] = staffCount;
+    op["instrument"]  = instr;
+    return op;
+}
+
+static bool registerTestPart(ScoreApplicator& applicator, Score* score)
+{
+    return applicator.apply(score, makeAddPartPayload(kTestPartId));
+}
+
 // ===========================================================================
 // Group 2 — requires a real score loaded from the fixture
 // ===========================================================================
@@ -123,6 +179,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyInsertNote_C4_quarter_succeeds)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     QJsonObject payload = makePayload("C", 4, "", "quarter", 0, 0, 4, 0);
     EXPECT_TRUE(applicator.apply(score, payload));
 
@@ -145,6 +202,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyInsertNote_BbFlat4_half_succeeds)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     // pitchToMidi("B", 4, "flat") = (4+1)*12 + 11 - 1 = 70
     QJsonObject payload = makePayload("B", 4, "flat", "half", 0, 0, 4, 0);
     EXPECT_TRUE(applicator.apply(score, payload));
@@ -168,6 +226,7 @@ TEST_F(Editude_ScoreApplicatorTests, noSegmentAtTick_returnsFalse)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     // Tick 99/4 is well beyond the single 4/4 measure
     QJsonObject payload = makePayload("C", 4, "", "quarter", 0, 99, 4, 0);
     EXPECT_FALSE(applicator.apply(score, payload));
@@ -184,25 +243,21 @@ TEST_F(Editude_ScoreApplicatorTests, applyDeleteEvent_removesInsertedNote)
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
-    // Insert with explicit UUID so we can reference it in DeleteEvent.
-    QJsonObject insertPayload = makePayload("C", 4, "", "quarter", 0, 0, 4, 0, uuid);
-    ASSERT_TRUE(applicator.apply(score, insertPayload));
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0)));
 
-    // The UUID map should now contain the note.
-    EXPECT_FALSE(applicator.elementToUuid().isEmpty());
+    QJsonObject pitch;
+    pitch["step"]   = "C";
+    pitch["octave"] = 4;
 
-    // Delete the note via its UUID.
-    QJsonObject deletePayload;
-    deletePayload["type"]     = "DeleteEvent";
-    deletePayload["event_id"] = uuid;
-    EXPECT_TRUE(applicator.apply(score, deletePayload));
-
-    // After deletion the UUID map entry must be removed.
-    EXPECT_TRUE(applicator.elementToUuid().isEmpty());
+    QJsonObject deleteOp;
+    deleteOp["type"]    = "DeleteNote";
+    deleteOp["part_id"] = kTestPartId;
+    deleteOp["beat"]    = makeBeatObj(0, 4);
+    deleteOp["pitch"]   = pitch;
+    EXPECT_TRUE(applicator.apply(score, deleteOp));
 
     delete score;
 }
@@ -213,8 +268,9 @@ TEST_F(Editude_ScoreApplicatorTests, applyDeleteEvent_unknownUuid_returnsFalse)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     QJsonObject payload;
-    payload["type"]     = "DeleteEvent";
+    payload["type"]     = "DeleteNote";
     payload["event_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
     EXPECT_FALSE(applicator.apply(score, payload));
 
@@ -236,24 +292,6 @@ TEST_F(Editude_ScoreApplicatorTests, insertRest_invalidDuration_returnsFalse)
     beat["denominator"] = 4;
     QJsonObject op;
     op["type"]     = "InsertRest";
-    op["duration"] = duration;
-    op["beat"]     = beat;
-    op["track"]    = 0;
-    EXPECT_FALSE(applicator.apply(nullptr, op));
-}
-
-TEST_F(Editude_ScoreApplicatorTests, insertChord_emptyPitches_returnsFalse)
-{
-    ScoreApplicator applicator;
-    QJsonObject duration;
-    duration["type"] = "quarter";
-    duration["dots"] = 0;
-    QJsonObject beat;
-    beat["numerator"]   = 0;
-    beat["denominator"] = 4;
-    QJsonObject op;
-    op["type"]     = "InsertChord";
-    op["pitches"]  = QJsonArray(); // empty
     op["duration"] = duration;
     op["beat"]     = beat;
     op["track"]    = 0;
@@ -303,7 +341,7 @@ TEST_F(Editude_ScoreApplicatorTests, setTrack_unknownUuid_returnsFalse)
 {
     ScoreApplicator applicator;
     QJsonObject op;
-    op["type"]     = "SetTrack";
+    op["type"]     = "SetVoice";
     op["event_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
     op["track"]    = 1;
     EXPECT_FALSE(applicator.apply(nullptr, op));
@@ -327,39 +365,7 @@ static QJsonObject makeRestPayload(
     duration["dots"] = dots;
     QJsonObject op;
     op["type"]     = "InsertRest";
-    op["duration"] = duration;
-    op["beat"]     = beat;
-    op["track"]    = track;
-    if (!id.isEmpty()) {
-        op["id"] = id;
-    }
-    return op;
-}
-
-// Helper: build an InsertChord payload with two pitches (C4, E4).
-static QJsonObject makeChordPayload(
-    const QString& durType = "quarter", int dots = 0,
-    int beatN = 0, int beatD = 4, int track = 0,
-    const QString& id = "")
-{
-    QJsonObject beat;
-    beat["numerator"]   = beatN;
-    beat["denominator"] = beatD;
-    QJsonObject duration;
-    duration["type"] = durType;
-    duration["dots"] = dots;
-
-    QJsonObject p1;
-    p1["step"] = "C"; p1["octave"] = 4;
-    QJsonObject p2;
-    p2["step"] = "E"; p2["octave"] = 4;
-    QJsonArray pitches;
-    pitches.append(p1);
-    pitches.append(p2);
-
-    QJsonObject op;
-    op["type"]     = "InsertChord";
-    op["pitches"]  = pitches;
+    op["part_id"]  = kTestPartId;  // [editude] ops are part-scoped
     op["duration"] = duration;
     op["beat"]     = beat;
     op["track"]    = track;
@@ -375,6 +381,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyInsertRest_quarter_succeeds)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     EXPECT_TRUE(applicator.apply(score, makeRestPayload()));
 
     Segment* seg = score->tick2segment(Fraction(0, 4), false, SegmentType::ChordRest);
@@ -386,117 +393,41 @@ TEST_F(Editude_ScoreApplicatorTests, applyInsertRest_quarter_succeeds)
     delete score;
 }
 
-TEST_F(Editude_ScoreApplicatorTests, applyInsertChord_twoPitches_succeeds)
-{
-    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
-    ASSERT_TRUE(score);
-
-    ScoreApplicator applicator;
-    EXPECT_TRUE(applicator.apply(score, makeChordPayload()));
-
-    Segment* seg = score->tick2segment(Fraction(0, 4), false, SegmentType::ChordRest);
-    ASSERT_TRUE(seg);
-    Chord* chord = toChord(seg->cr(0));
-    ASSERT_TRUE(chord);
-    EXPECT_EQ(chord->notes().size(), static_cast<size_t>(2));
-
-    // Verify C4 (midi 60) and E4 (midi 64) are both present.
-    bool hasC4 = false, hasE4 = false;
-    for (Note* n : chord->notes()) {
-        if (n->pitch() == 60) hasC4 = true;
-        if (n->pitch() == 64) hasE4 = true;
-    }
-    EXPECT_TRUE(hasC4);
-    EXPECT_TRUE(hasE4);
-
-    delete score;
-}
-
-TEST_F(Editude_ScoreApplicatorTests, applyAddChordNote_addsToExistingChord)
-{
-    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
-    ASSERT_TRUE(score);
-
-    const QString chordUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    ScoreApplicator applicator;
-
-    // Insert 2-pitch chord (C4, E4) with UUID.
-    ASSERT_TRUE(applicator.apply(score, makeChordPayload("quarter", 0, 0, 4, 0, chordUuid)));
-
-    // Add G4 (midi 67).
-    QJsonObject pitch;
-    pitch["step"]   = "G";
-    pitch["octave"] = 4;
-    QJsonObject addOp;
-    addOp["type"]     = "AddChordNote";
-    addOp["event_id"] = chordUuid;
-    addOp["pitch"]    = pitch;
-    EXPECT_TRUE(applicator.apply(score, addOp));
-
-    Segment* seg = score->tick2segment(Fraction(0, 4), false, SegmentType::ChordRest);
-    ASSERT_TRUE(seg);
-    Chord* chord = toChord(seg->cr(0));
-    ASSERT_TRUE(chord);
-    EXPECT_EQ(chord->notes().size(), static_cast<size_t>(3));
-
-    delete score;
-}
-
-TEST_F(Editude_ScoreApplicatorTests, applyRemoveChordNote_reducesChord)
-{
-    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
-    ASSERT_TRUE(score);
-
-    const QString chordUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    ScoreApplicator applicator;
-
-    // Insert 2-pitch chord (C4=60, E4=64).
-    ASSERT_TRUE(applicator.apply(score, makeChordPayload("quarter", 0, 0, 4, 0, chordUuid)));
-
-    // Remove E4.
-    QJsonObject pitch;
-    pitch["step"]   = "E";
-    pitch["octave"] = 4;
-    QJsonObject removeOp;
-    removeOp["type"]     = "RemoveChordNote";
-    removeOp["event_id"] = chordUuid;
-    removeOp["pitch"]    = pitch;
-    EXPECT_TRUE(applicator.apply(score, removeOp));
-
-    Segment* seg = score->tick2segment(Fraction(0, 4), false, SegmentType::ChordRest);
-    ASSERT_TRUE(seg);
-    Chord* chord = toChord(seg->cr(0));
-    ASSERT_TRUE(chord);
-    EXPECT_EQ(chord->notes().size(), static_cast<size_t>(1));
-    EXPECT_EQ(chord->notes().front()->pitch(), 60);
-
-    delete score;
-}
+// [editude] InsertChord / AddChordNote / RemoveChordNote tests removed: none of
+// these are editude ops.
+// Chords are formed by inserting several notes at the same (beat, voice,
+// staff) — see e2e/e2e/test_tier1_ops_extended.py::test_insert_chord_round_trip.
 
 TEST_F(Editude_ScoreApplicatorTests, applySetDuration_quarterToHalf)
 {
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
-    // Insert C4 quarter.
-    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0)));
 
-    // Change duration to half.
     QJsonObject duration;
     duration["type"] = "half";
     duration["dots"] = 0;
+
     QJsonObject setDurOp;
     setDurOp["type"]     = "SetDuration";
-    setDurOp["event_id"] = noteUuid;
+    setDurOp["part_id"]  = kTestPartId;
+    setDurOp["beat"]     = makeBeatObj(0, 4);
     setDurOp["duration"] = duration;
     EXPECT_TRUE(applicator.apply(score, setDurOp));
 
     Segment* seg = score->tick2segment(Fraction(0, 4), false, SegmentType::ChordRest);
     ASSERT_TRUE(seg);
-    Chord* chord = toChord(seg->cr(0));
+    Chord* chord = nullptr;
+    for (track_idx_t t = 0; t < score->ntracks(); ++t) {
+        if (seg->cr(t) && seg->cr(t)->isChord()) {
+            chord = toChord(seg->cr(t));
+            break;
+        }
+    }
     ASSERT_TRUE(chord);
     EXPECT_EQ(chord->durationType().type(), DurationType::V_HALF);
 
@@ -508,21 +439,17 @@ TEST_F(Editude_ScoreApplicatorTests, applySetTrack_movesToVoice1)
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
-    // Insert C4 on track 0.
-    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0)));
 
-    // Move to track 1 (voice 2 of staff 0).
-    QJsonObject setTrackOp;
-    setTrackOp["type"]     = "SetTrack";
-    setTrackOp["event_id"] = noteUuid;
-    setTrackOp["track"]    = 1;
-    EXPECT_TRUE(applicator.apply(score, setTrackOp));
-
-    // The UUID map should still contain an entry for the note.
-    EXPECT_FALSE(applicator.elementToUuid().isEmpty());
+    QJsonObject setVoiceOp;
+    setVoiceOp["type"]      = "SetVoice";
+    setVoiceOp["part_id"]   = kTestPartId;
+    setVoiceOp["beat"]      = makeBeatObj(0, 4);
+    setVoiceOp["new_voice"] = 2;
+    EXPECT_TRUE(applicator.apply(score, setVoiceOp));
 
     delete score;
 }
@@ -531,23 +458,6 @@ TEST_F(Editude_ScoreApplicatorTests, applySetTrack_movesToVoice1)
 // Group 6 — Part / Staff ops (Phase 1)
 // ---------------------------------------------------------------------------
 
-static QJsonObject makeAddPartPayload(const QString& partId,
-                                       const QString& name = "Violin",
-                                       int staffCount = 1)
-{
-    QJsonObject instr;
-    instr["musescore_id"] = "";
-    instr["name"]         = name;
-    instr["short_name"]   = name.left(3) + ".";
-
-    QJsonObject op;
-    op["type"]        = "AddPart";
-    op["part_id"]     = partId;
-    op["name"]        = name;
-    op["staff_count"] = staffCount;
-    op["instrument"]  = instr;
-    return op;
-}
 
 TEST_F(Editude_ScoreApplicatorTests, applyAddPart_appendsPart)
 {
@@ -555,9 +465,15 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddPart_appendsPart)
     ASSERT_TRUE(score);
 
     const int partsBefore = static_cast<int>(score->parts().size());
-    const QString uuid    = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
 
+    // The first AddPart adopts the score's existing unassigned part rather than
+    // appending a duplicate, so the part count is unchanged.
+    EXPECT_TRUE(applicator.apply(score, makeAddPartPayload(kTestPartId)));
+    EXPECT_EQ(static_cast<int>(score->parts().size()), partsBefore);
+
+    // A second, distinct part_id has nothing left to adopt, so it appends.
+    const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     EXPECT_TRUE(applicator.apply(score, makeAddPartPayload(uuid)));
     EXPECT_EQ(static_cast<int>(score->parts().size()), partsBefore + 1);
 
@@ -763,11 +679,13 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddArticulation_staccato_succeeds)
     const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     const QString artUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
     ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
 
     QJsonObject op;
     op["type"]         = "AddArticulation";
+    op["part_id"] = kTestPartId;
     op["id"]           = artUuid;
     op["event_id"]     = noteUuid;
     op["articulation"] = "staccato";
@@ -782,6 +700,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddArticulation_unknownEventId_returns
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     QJsonObject op;
     op["type"]         = "AddArticulation";
     op["id"]           = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -797,22 +716,23 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveArticulation_succeeds)
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString artUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
-    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0)));
 
     QJsonObject addOp;
     addOp["type"]         = "AddArticulation";
-    addOp["id"]           = artUuid;
-    addOp["event_id"]     = noteUuid;
+    addOp["part_id"]      = kTestPartId;
+    addOp["beat"]         = makeBeatObj(0, 4);
     addOp["articulation"] = "accent";
     ASSERT_TRUE(applicator.apply(score, addOp));
 
     QJsonObject removeOp;
-    removeOp["type"] = "RemoveArticulation";
-    removeOp["id"]   = artUuid;
+    removeOp["type"]         = "RemoveArticulation";
+    removeOp["part_id"]      = kTestPartId;
+    removeOp["beat"]         = makeBeatObj(0, 4);
+    removeOp["articulation"] = "accent";
     EXPECT_TRUE(applicator.apply(score, removeOp));
 
     delete score;
@@ -852,6 +772,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddDynamic_unknownPartId_returnsFalse)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     QJsonObject beat;
     beat["numerator"]   = 0;
     beat["denominator"] = 1;
@@ -871,26 +792,21 @@ TEST_F(Editude_ScoreApplicatorTests, applySetDynamic_changesKind)
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString partUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString dynUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
-    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
-    QJsonObject beat;
-    beat["numerator"]   = 0;
-    beat["denominator"] = 1;
     QJsonObject addOp;
     addOp["type"]    = "AddDynamic";
-    addOp["id"]      = dynUuid;
-    addOp["part_id"] = partUuid;
+    addOp["part_id"] = kTestPartId;
     addOp["kind"]    = "p";
-    addOp["beat"]    = beat;
+    addOp["beat"]    = makeBeatObj(0, 1);
     ASSERT_TRUE(applicator.apply(score, addOp));
 
     QJsonObject setOp;
-    setOp["type"] = "SetDynamic";
-    setOp["id"]   = dynUuid;
-    setOp["kind"] = "ff";
+    setOp["type"]    = "SetDynamic";
+    setOp["part_id"] = kTestPartId;
+    setOp["beat"]    = makeBeatObj(0, 1);
+    setOp["kind"]    = "ff";
     EXPECT_TRUE(applicator.apply(score, setOp));
 
     delete score;
@@ -901,25 +817,20 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveDynamic_succeeds)
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString partUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString dynUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
-    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
-    QJsonObject beat;
-    beat["numerator"]   = 0;
-    beat["denominator"] = 1;
     QJsonObject addOp;
     addOp["type"]    = "AddDynamic";
-    addOp["id"]      = dynUuid;
-    addOp["part_id"] = partUuid;
+    addOp["part_id"] = kTestPartId;
     addOp["kind"]    = "pp";
-    addOp["beat"]    = beat;
+    addOp["beat"]    = makeBeatObj(0, 1);
     ASSERT_TRUE(applicator.apply(score, addOp));
 
     QJsonObject removeOp;
-    removeOp["type"] = "RemoveDynamic";
-    removeOp["id"]   = dynUuid;
+    removeOp["type"]    = "RemoveDynamic";
+    removeOp["part_id"] = kTestPartId;
+    removeOp["beat"]    = makeBeatObj(0, 1);
     EXPECT_TRUE(applicator.apply(score, removeOp));
 
     delete score;
@@ -938,6 +849,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddSlur_twoNotes_succeeds)
     const QString uuid2    = QUuid::createUuid().toString(QUuid::WithoutBraces);
     const QString slurUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
     // Two quarter notes at beats 0/4 and 1/4.
     ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, uuid1)));
@@ -945,6 +857,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddSlur_twoNotes_succeeds)
 
     QJsonObject op;
     op["type"]           = "AddSlur";
+    op["part_id"] = kTestPartId;
     op["id"]             = slurUuid;
     op["start_event_id"] = uuid1;
     op["end_event_id"]   = uuid2;
@@ -959,6 +872,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddSlur_unknownEventId_returnsFalse)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     QJsonObject op;
     op["type"]           = "AddSlur";
     op["id"]             = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -974,24 +888,30 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveSlur_succeeds)
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString uuid1    = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString uuid2    = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString slurUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
-    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, uuid1)));
-    ASSERT_TRUE(applicator.apply(score, makePayload("G", 4, "", "quarter", 0, 1, 4, 0, uuid2)));
+    ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0)));
+    ASSERT_TRUE(applicator.apply(score, makePayload("G", 4, "", "quarter", 0, 1, 4, 0)));
 
     QJsonObject addOp;
-    addOp["type"]           = "AddSlur";
-    addOp["id"]             = slurUuid;
-    addOp["start_event_id"] = uuid1;
-    addOp["end_event_id"]   = uuid2;
+    addOp["type"]        = "AddSlur";
+    addOp["part_id"]     = kTestPartId;
+    addOp["start_beat"]  = makeBeatObj(0, 4);
+    addOp["end_beat"]    = makeBeatObj(1, 4);
+    addOp["start_voice"] = 1;
+    addOp["end_voice"]   = 1;
+    addOp["start_staff"] = 0;
+    addOp["end_staff"]   = 0;
     ASSERT_TRUE(applicator.apply(score, addOp));
 
     QJsonObject removeOp;
-    removeOp["type"] = "RemoveSlur";
-    removeOp["id"]   = slurUuid;
+    removeOp["type"]        = "RemoveSlur";
+    removeOp["part_id"]     = kTestPartId;
+    removeOp["start_beat"]  = makeBeatObj(0, 4);
+    removeOp["end_beat"]    = makeBeatObj(1, 4);
+    removeOp["start_voice"] = 1;
+    removeOp["start_staff"] = 0;
     EXPECT_TRUE(applicator.apply(score, removeOp));
 
     delete score;
@@ -1000,14 +920,6 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveSlur_succeeds)
 // ===========================================================================
 // Group 11 — Tier 3: Hairpins
 // ===========================================================================
-
-static QJsonObject makeBeatObj(int n, int d)
-{
-    QJsonObject b;
-    b["numerator"]   = n;
-    b["denominator"] = d;
-    return b;
-}
 
 TEST_F(Editude_ScoreApplicatorTests, applyAddHairpin_crescendo_succeeds)
 {
@@ -1037,6 +949,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddHairpin_unknownPartId_returnsFalse)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     QJsonObject op;
     op["type"]       = "AddHairpin";
     op["id"]         = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -1054,23 +967,22 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveHairpin_succeeds)
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString partUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString hpUuid   = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
-    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
     QJsonObject addOp;
     addOp["type"]       = "AddHairpin";
-    addOp["id"]         = hpUuid;
-    addOp["part_id"]    = partUuid;
+    addOp["part_id"]    = kTestPartId;
     addOp["kind"]       = "crescendo";
     addOp["start_beat"] = makeBeatObj(0, 4);
     addOp["end_beat"]   = makeBeatObj(2, 4);
     ASSERT_TRUE(applicator.apply(score, addOp));
 
     QJsonObject removeOp;
-    removeOp["type"] = "RemoveHairpin";
-    removeOp["id"]   = hpUuid;
+    removeOp["type"]       = "RemoveHairpin";
+    removeOp["part_id"]    = kTestPartId;
+    removeOp["start_beat"] = makeBeatObj(0, 4);
+    removeOp["end_beat"]   = makeBeatObj(2, 4);
     EXPECT_TRUE(applicator.apply(score, removeOp));
 
     delete score;
@@ -1157,10 +1069,12 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddLyric_succeeds)
     const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     const QString lyrUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
 
     QJsonObject op;
     op["type"]     = "AddLyric";
+    op["part_id"] = kTestPartId;
     op["id"]       = lyrUuid;
     op["event_id"] = noteUuid;
     op["verse"]    = 0;
@@ -1179,10 +1093,12 @@ TEST_F(Editude_ScoreApplicatorTests, applySetLyric_changesText)
     const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     const QString lyrUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
 
     QJsonObject addOp;
     addOp["type"]     = "AddLyric";
+    addOp["part_id"] = kTestPartId;
     addOp["id"]       = lyrUuid;
     addOp["event_id"] = noteUuid;
     addOp["verse"]    = 0;
@@ -1192,6 +1108,7 @@ TEST_F(Editude_ScoreApplicatorTests, applySetLyric_changesText)
 
     QJsonObject setOp;
     setOp["type"]     = "SetLyric";
+    setOp["part_id"] = kTestPartId;
     setOp["id"]       = lyrUuid;
     setOp["text"]     = "lo-";
     setOp["syllabic"] = "begin";
@@ -1208,10 +1125,12 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveLyric_succeeds)
     const QString noteUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     const QString lyrUuid  = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     ASSERT_TRUE(applicator.apply(score, makePayload("C", 4, "", "quarter", 0, 0, 4, 0, noteUuid)));
 
     QJsonObject addOp;
     addOp["type"]     = "AddLyric";
+    addOp["part_id"] = kTestPartId;
     addOp["id"]       = lyrUuid;
     addOp["event_id"] = noteUuid;
     addOp["verse"]    = 0;
@@ -1221,6 +1140,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveLyric_succeeds)
 
     QJsonObject removeOp;
     removeOp["type"] = "RemoveLyric";
+    removeOp["part_id"] = kTestPartId;
     removeOp["id"]   = lyrUuid;
     EXPECT_TRUE(applicator.apply(score, removeOp));
 
@@ -1309,19 +1229,22 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveMarker_succeeds)
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString markerUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
     QJsonObject addOp;
-    addOp["type"] = "InsertMarker";
-    addOp["id"]   = markerUuid;
-    addOp["beat"] = makeBeatObj(0, 1);
-    addOp["kind"] = "coda";
+    addOp["type"]    = "InsertMarker";
+    addOp["part_id"] = kTestPartId;
+    addOp["beat"]    = makeBeatObj(0, 1);
+    addOp["kind"]    = "coda";
+    addOp["label"]   = "Coda";
     ASSERT_TRUE(applicator.apply(score, addOp));
 
     QJsonObject removeOp;
-    removeOp["type"] = "RemoveMarker";
-    removeOp["id"]   = markerUuid;
+    removeOp["type"]    = "RemoveMarker";
+    removeOp["part_id"] = kTestPartId;
+    removeOp["beat"]    = makeBeatObj(0, 1);
+    removeOp["kind"]    = "coda";
     EXPECT_TRUE(applicator.apply(score, removeOp));
 
     delete score;
@@ -1383,6 +1306,7 @@ TEST_F(Editude_ScoreApplicatorTests, applySetScoreMetadata_title_succeeds)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     QJsonObject op;
     op["type"]  = "SetScoreMetadata";
     op["field"] = "title";
@@ -1399,6 +1323,7 @@ TEST_F(Editude_ScoreApplicatorTests, applySetScoreMetadata_composer_succeeds)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     QJsonObject op;
     op["type"]  = "SetScoreMetadata";
     op["field"] = "composer";
@@ -1437,6 +1362,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyDeleteBeats_removesMeasure)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
     // Use InsertBeats to add a second measure, giving us two to work with.
     QJsonObject insertOp;
@@ -1463,27 +1389,19 @@ TEST_F(Editude_ScoreApplicatorTests, applyDeleteBeats_removesMeasure)
 
 // Helper: build an AddTuplet payload for a triplet (3:2 quarter notes).
 static QJsonObject makeAddTupletPayload(const QString& partId,
-                                         const QString& tupletId,
-                                         const QJsonArray& memberIds,
                                          int beatN = 0, int beatD = 1)
 {
-    QJsonObject beat;
-    beat["numerator"]   = beatN;
-    beat["denominator"] = beatD;
-
     QJsonObject baseDur;
     baseDur["type"] = "quarter";
     baseDur["dots"] = 0;
 
     QJsonObject op;
     op["type"]          = "AddTuplet";
-    op["id"]            = tupletId;
     op["part_id"]       = partId;
     op["actual_notes"]  = 3;
     op["normal_notes"]  = 2;
     op["base_duration"] = baseDur;
-    op["beat"]          = beat;
-    op["members"]       = memberIds;
+    op["beat"]          = makeBeatObj(beatN, beatD);
     return op;
 }
 
@@ -1492,32 +1410,11 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddTuplet_triplet_succeeds)
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString partUuid   = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString tupletUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
-    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
-    // Build 3 member placeholder IDs.
-    QJsonArray members;
-    for (int i = 0; i < 3; ++i) {
-        QJsonObject m;
-        m["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        members.append(m);
-    }
-
-    QJsonObject op = makeAddTupletPayload(partUuid, tupletUuid, members);
-    EXPECT_TRUE(applicator.apply(score, op));
-
-    // The tuplet UUID must be registered.
-    bool found = false;
-    for (auto it = applicator.elementToUuid().begin();
-         it != applicator.elementToUuid().end(); ++it) {
-        if (it.value() == tupletUuid) {
-            found = true;
-            break;
-        }
-    }
-    EXPECT_TRUE(found);
+    EXPECT_TRUE(applicator.apply(score, makeAddTupletPayload(kTestPartId)));
+    EXPECT_TRUE(scoreHasTuplet(score));
 
     delete score;
 }
@@ -1528,11 +1425,9 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddTuplet_unknownPartId_returnsFalse)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
-    QJsonArray members;
-    QJsonObject op = makeAddTupletPayload("no-such-part",
-                                          QUuid::createUuid().toString(QUuid::WithoutBraces),
-                                          members);
+    QJsonObject op = makeAddTupletPayload("no-such-part");
     EXPECT_FALSE(applicator.apply(score, op));
 
     delete score;
@@ -1543,35 +1438,19 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveTuplet_succeeds)
     MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
     ASSERT_TRUE(score);
 
-    const QString partUuid   = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString tupletUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     ScoreApplicator applicator;
-    ASSERT_TRUE(applicator.apply(score, makeAddPartPayload(partUuid)));
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
-    QJsonArray members;
-    for (int i = 0; i < 3; ++i) {
-        QJsonObject m;
-        m["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        members.append(m);
-    }
-
-    ASSERT_TRUE(applicator.apply(score, makeAddTupletPayload(partUuid, tupletUuid, members)));
+    ASSERT_TRUE(applicator.apply(score, makeAddTupletPayload(kTestPartId)));
+    ASSERT_TRUE(scoreHasTuplet(score));
 
     QJsonObject removeOp;
-    removeOp["type"] = "RemoveTuplet";
-    removeOp["id"]   = tupletUuid;
+    removeOp["type"]    = "RemoveTuplet";
+    removeOp["part_id"] = kTestPartId;
+    removeOp["beat"]    = makeBeatObj(0, 1);
     EXPECT_TRUE(applicator.apply(score, removeOp));
 
-    // Tuplet UUID must be gone from the map.
-    bool found = false;
-    for (auto it = applicator.elementToUuid().begin();
-         it != applicator.elementToUuid().end(); ++it) {
-        if (it.value() == tupletUuid) {
-            found = true;
-            break;
-        }
-    }
-    EXPECT_FALSE(found);
+    EXPECT_FALSE(scoreHasTuplet(score));
 
     delete score;
 }
@@ -1582,6 +1461,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveTuplet_unknownId_returnsFalse)
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
     QJsonObject op;
     op["type"] = "RemoveTuplet";
     op["id"]   = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -1627,6 +1507,7 @@ TEST_F(Editude_ScoreApplicatorTests, applySetPartInstrument_unknownPartId_return
     ASSERT_TRUE(score);
 
     ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
 
     QJsonObject instr;
     instr["musescore_id"] = "oboe";
