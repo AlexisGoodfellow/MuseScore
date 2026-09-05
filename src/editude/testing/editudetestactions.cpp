@@ -17,7 +17,8 @@
 #include "engraving/dom/pitchspelling.h"
 #include "engraving/dom/rest.h"
 #include "engraving/dom/segment.h"
-#include "engraving/editing/undo.h"
+#include "engraving/editing/transaction/undostack.h"
+#include "engraving/editing/transaction/undoablecommand.h"
 #include "engraving/types/types.h"
 #include "engraving/types/typesconv.h"
 
@@ -1052,7 +1053,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddPart(const QJsonObject& b
     const int staffCount = body.value("staff_count").toInt(1);
 
     Part* part = new Part(score);
-    part->setPartName(String(name));
+    part->setPlainLongName(String(name));
 
     const QJsonObject instr = body["instrument"].toObject();
     if (!instr.isEmpty()) {
@@ -1121,7 +1122,7 @@ EditudeTestActions::Reply EditudeTestActions::actionSetPartName(const QJsonObjec
 
     const QString name = body["name"].toString();
     score->startCmd(TranslatableString("test", "set part name"));
-    part->setPartName(String(name));
+    part->setPlainLongName(String(name));
     part->setLongNameAll(String(name));
     // Register a tracked ChangeProperty so the translator's Pass 10 detects
     // the name change via Pid::STAFF_LONG_NAME on Part.
@@ -1951,7 +1952,7 @@ EditudeTestActions::Reply EditudeTestActions::actionSetPartInstrument(const QJso
         existing->setLongName(String(longName));
         existing->setShortName(String(shortName));
     }
-    part->setPartName(String(longName));
+    part->setPlainLongName(String(longName));
     part->setLongNameAll(String(longName));
     part->setShortNameAll(String(shortName));
     part->undoChangeProperty(Pid::STAFF_LONG_NAME, PropertyValue(String(longName)));

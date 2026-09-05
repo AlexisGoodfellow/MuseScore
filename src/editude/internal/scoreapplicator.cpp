@@ -43,11 +43,15 @@
 #include "engraving/dom/clef.h"
 #include "engraving/dom/dynamic.h"
 #include "engraving/editing/editscoreproperties.h"
+#include "engraving/editing/noteinput.h"
+#include "engraving/editing/editvoice.h"
+#include "engraving/editing/edittimesig.h"
+#include "engraving/editing/edithairpin.h"
+#include "engraving/editing/transaction/transaction.h"
 #include "engraving/dom/keysig.h"
 #include "engraving/dom/lyrics.h"
 #include "engraving/dom/hairpin.h"
 #include "engraving/dom/harmony.h"
-#include "engraving/dom/navigate.h"
 #include "engraving/dom/tuplet.h"
 #include "engraving/dom/jump.h"
 #include "engraving/dom/marker.h"
@@ -68,7 +72,8 @@
 #include "engraving/dom/tremolosinglechord.h"
 #include "engraving/dom/tremolotwochord.h"
 #include "engraving/dom/trill.h"
-#include "engraving/editing/undo.h"
+#include "engraving/editing/transaction/undostack.h"
+#include "engraving/editing/transaction/undoablecommand.h"
 #include "engraving/dom/volta.h"
 #include "engraving/types/bps.h"
 #include "engraving/types/fraction.h"
@@ -194,7 +199,8 @@ bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
     // instead of replacing the entire ChordRest (which setNoteRest does).
     EngravingItem* existing = seg->element(track);
     if (existing && existing->isChord()) {
-        score->addNote(toChord(existing), nval);
+        // [editude] moved to the editing/ layer, now takes a Transaction&
+        NoteInput::addNote(score->transactionManager()->currentOrDummyTransaction(), score, toChord(existing), nval);
     } else {
         score->setNoteRest(seg, track, nval, dur.ticks());
     }
@@ -500,7 +506,11 @@ bool ScoreApplicator::applySetTie(Score* score, const QJsonObject& op)
     if (wantTie) {
         // "start" or "continue": ensure a forward tie exists.
         if (!note->tieFor()) {
-            ChordRest* nextCR = nextChordRest(note->chord());
+            // [editude] nextChordRest moved from navigate.h onto Segment.
+            Chord* srcChord = note->chord();
+            ChordRest* nextCR = srcChord->segment()
+                                ? srcChord->segment()->nextChordRest(srcChord->track())
+                                : nullptr;
             Note* endNote = nullptr;
             if (nextCR && nextCR->isChord()) {
                 Chord* nextChord = toChord(nextCR);
@@ -566,7 +576,8 @@ bool ScoreApplicator::applySetVoice(Score* score, const QJsonObject& op)
         score->select(cr);
     }
     score->startCmd(TranslatableString("undoableAction", "Set voice"));
-    score->changeSelectedElementsVoice(static_cast<voice_idx_t>(newVoice - 1));
+    // [editude] moved to the editing/ layer, now takes a Transaction&
+        EditVoice::changeSelectedElementsVoice(score->transactionManager()->currentOrDummyTransaction(), score, static_cast<voice_idx_t>(newVoice - 1));
     score->endCmd();
     return true;
 }
@@ -605,7 +616,8 @@ bool ScoreApplicator::applySetTimeSignature(Score* score, const QJsonObject& op)
     ts->setSig(Fraction(num, denom), TimeSigType::NORMAL);
 
     score->startCmd(TranslatableString("undoableAction", "Set time signature"));
-    score->cmdAddTimeSig(measure, 0, ts, false);
+    // [editude] moved to the editing/ layer, now takes a Transaction&
+        EditTimeSig::addTimeSig(score->transactionManager()->currentOrDummyTransaction(), score, measure, 0, ts, false);
     score->endCmd();
     return true;
 }
@@ -638,7 +650,7 @@ bool ScoreApplicator::applySetTempo(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Set tempo"));
     TempoText* tt = Factory::createTempoText(seg);
     tt->setTempo(BeatsPerSecond(bpm / 60.0));
-    tt->setParent(seg);
+    tt->setOwnershipParent(seg);
     tt->setTrack(0);
     score->undoAddElement(tt);
     score->endCmd();
@@ -682,7 +694,7 @@ bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
         if (!seg) {
             return true;
         }
-        const staff_idx_t firstStaff = part->startTrack() / VOICES;
+        const staff_idx_t firstStaff = part->trackRange().startTrack / VOICES;
         const staff_idx_t nStaves    = static_cast<staff_idx_t>(part->nstaves());
         score->startCmd(TranslatableString("undoableAction", "Remove key signature"));
         for (staff_idx_t i = 0; i < nStaves; ++i) {
@@ -711,7 +723,7 @@ bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const staff_idx_t firstStaff = part->startTrack() / VOICES;
+    const staff_idx_t firstStaff = part->trackRange().startTrack / VOICES;
     const staff_idx_t nStaves    = static_cast<staff_idx_t>(part->nstaves());
     const Key key = static_cast<Key>(sharps);
 
@@ -722,7 +734,7 @@ bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
         KeySig* ks = Factory::createKeySig(seg);
         ks->setTrack(track);
         ks->setKey(key);
-        ks->setParent(seg);
+        ks->setOwnershipParent(seg);
         score->undoAddElement(ks);
     }
     score->endCmd();
@@ -750,7 +762,7 @@ bool ScoreApplicator::applySetClef(Score* score, const QJsonObject& op)
         if (!seg) {
             return true;
         }
-        const track_idx_t track = (part->startTrack() / VOICES + staffIdx) * VOICES;
+        const track_idx_t track = (part->trackRange().startTrack / VOICES + staffIdx) * VOICES;
         EngravingItem* el = seg->element(track);
         if (el && el->isClef()) {
             score->startCmd(TranslatableString("undoableAction", "Remove clef"));
@@ -803,14 +815,14 @@ bool ScoreApplicator::applySetClef(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const track_idx_t track = (part->startTrack() / VOICES + staffIdx) * VOICES;
+    const track_idx_t track = (part->trackRange().startTrack / VOICES + staffIdx) * VOICES;
     Segment* seg = measure->undoGetSegment(SegmentType::Clef, tick);
 
     score->startCmd(TranslatableString("undoableAction", "Set clef"));
     Clef* clef = Factory::createClef(score->dummy()->segment());
     clef->setClefType(ct);
     clef->setTrack(track);
-    clef->setParent(seg);
+    clef->setOwnershipParent(seg);
     score->doUndoAddElement(clef);
     score->endCmd();
     return true;
@@ -825,7 +837,9 @@ bool ScoreApplicator::applySetPartName(Score* score, const QJsonObject& op)
     }
     const QString name = op["name"].toString();
     score->startCmd(TranslatableString("undoableAction", "Set part name"));
-    part->setPartName(String(name));
+    // [editude] partName() is now derived from the instrument's long name;
+    // the stored part-name field and its setter were removed upstream.
+    part->setPlainLongName(String(name));
     score->endCmd();
     return true;
 }
@@ -853,7 +867,7 @@ bool ScoreApplicator::applySetStaffCount(Score* score, const QJsonObject& op)
             score->undoInsertStaff(staff, static_cast<staff_idx_t>(i), false);
         }
     } else {
-        const staff_idx_t partStart = part->startTrack() / VOICES;
+        const staff_idx_t partStart = part->trackRange().startTrack / VOICES;
         for (int i = current; i > target; --i) {
             score->cmdRemoveStaff(static_cast<staff_idx_t>(partStart + i - 1));
         }
@@ -894,7 +908,9 @@ bool ScoreApplicator::applyAddPart(Score* score, const QJsonObject& op)
     const int staffCount = op["staff_count"].toInt(1);
 
     Part* part = new Part(score);
-    part->setPartName(String(name));
+    // [editude] partName() is now derived from the instrument's long name;
+    // the stored part-name field and its setter were removed upstream.
+    part->setPlainLongName(String(name));
 
     const QJsonObject instr = op["instrument"].toObject();
     if (!instr.isEmpty()) {
@@ -1013,7 +1029,7 @@ bool ScoreApplicator::applySetPartInstrument(Score* score, const QJsonObject& op
             }
         }
     }
-    part->setPartName(String(longName));
+    part->setPlainLongName(String(longName));
     part->setLongNameAll(String(longName));
     part->setShortNameAll(String(shortName));
     score->endCmd();
@@ -1459,7 +1475,7 @@ bool ScoreApplicator::applyAddArticulation(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Add articulation"));
     Articulation* art = Factory::createArticulation(score->dummy()->chord());
     art->setSymId(symId);
-    art->setParent(cr);
+    art->setOwnershipParent(cr);
     art->setTrack(cr->track());
     score->undoAddElement(art);
     score->endCmd();
@@ -1575,12 +1591,12 @@ bool ScoreApplicator::applyAddDynamic(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
 
     score->startCmd(TranslatableString("undoableAction", "Add dynamic"));
     Dynamic* dyn = Factory::createDynamic(seg);
-    dyn->setParent(seg);
+    dyn->setOwnershipParent(seg);
     dyn->setTrack(track);
     dyn->setDynamicType(dt);
     score->undoAddElement(dyn);
@@ -1599,7 +1615,7 @@ bool ScoreApplicator::applySetDynamic(Score* score, const QJsonObject& op)
     const QJsonObject beat = op["beat"].toObject();
     const QString kind     = op["kind"].toString();
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     const DynamicType dt = dynamicTypeFromName(kind);
     if (dt == DynamicType::OTHER) {
@@ -1649,7 +1665,7 @@ bool ScoreApplicator::applyRemoveDynamic(Score* score, const QJsonObject& op)
 
     const QJsonObject beat = op["beat"].toObject();
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     // Find the Dynamic at this tick/track.
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
@@ -1784,10 +1800,11 @@ bool ScoreApplicator::applyAddHairpin(Score* score, const QJsonObject& op)
 
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     score->startCmd(TranslatableString("undoableAction", "Add hairpin"));
-    score->addHairpin(hpType, startTick, endTick, track);
+    // [editude] moved to the editing/ layer, now takes a Transaction&
+        EditHairpin::addHairpin(score->transactionManager()->currentOrDummyTransaction(), score, hpType, startTick, endTick, track);
     score->endCmd();
     return true;
 }
@@ -1804,7 +1821,7 @@ bool ScoreApplicator::applyRemoveHairpin(Score* score, const QJsonObject& op)
     const QJsonObject eb = op["end_beat"].toObject();
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     // Scan spanner map for a Hairpin matching the range and track.
     Hairpin* target = nullptr;
@@ -1893,7 +1910,7 @@ bool ScoreApplicator::applyAddTuplet(Score* score, const QJsonObject& op)
     tuplet->setBaseLen(baseLen);
     tuplet->setTrack(track);
     tuplet->setTick(tick);
-    tuplet->setParent(measure);
+    tuplet->setOwnershipParent(measure);
     score->cmdCreateTuplet(ocr, tuplet);
     score->endCmd();
     return true;
@@ -2019,7 +2036,7 @@ bool ScoreApplicator::applyAddLyric(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Add lyric"));
     Lyrics* lyric = Factory::createLyrics(cr);
     lyric->setTrack(cr->track());
-    lyric->setParent(cr);
+    lyric->setOwnershipParent(cr);
     lyric->setVerse(verse);
     lyric->setSyllabic(lyricSyllabicFromName(syllabic));
     lyric->setPlainText(String(text));
@@ -2138,7 +2155,7 @@ bool ScoreApplicator::applyAddChordSymbol(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Add chord symbol"));
     Harmony* harmony = Factory::createHarmony(seg);
     harmony->setTrack(0);
-    harmony->setParent(seg);
+    harmony->setOwnershipParent(seg);
     harmony->setHarmonyType(HarmonyType::STANDARD);
     harmony->setHarmony(String(name));
     score->undoAddElement(harmony);
@@ -2240,12 +2257,12 @@ bool ScoreApplicator::applyAddStaffText(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
 
     score->startCmd(TranslatableString("undoableAction", "Add staff text"));
     StaffText* st = Factory::createStaffText(seg, TextStyleType::STAFF);
-    st->setParent(seg);
+    st->setOwnershipParent(seg);
     st->setTrack(track);
     st->setPlainText(String(text));
     score->undoAddElement(st);
@@ -2264,7 +2281,7 @@ bool ScoreApplicator::applySetStaffText(Score* score, const QJsonObject& op)
     const QJsonObject beat = op["beat"].toObject();
     const QString text     = op["text"].toString();
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
@@ -2306,7 +2323,7 @@ bool ScoreApplicator::applyRemoveStaffText(Score* score, const QJsonObject& op)
 
     const QJsonObject beat = op["beat"].toObject();
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
@@ -2358,7 +2375,7 @@ bool ScoreApplicator::applyAddSystemText(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Add system text"));
     SystemText* st = Factory::createSystemText(seg, TextStyleType::SYSTEM);
-    st->setParent(seg);
+    st->setOwnershipParent(seg);
     st->setTrack(0);
     st->setPlainText(String(text));
     score->undoAddElement(st);
@@ -2457,7 +2474,7 @@ bool ScoreApplicator::applyAddRehearsalMark(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Add rehearsal mark"));
     RehearsalMark* rm = Factory::createRehearsalMark(seg);
-    rm->setParent(seg);
+    rm->setOwnershipParent(seg);
     rm->setTrack(0);
     rm->setPlainText(String(text));
     score->undoAddElement(rm);
@@ -2559,7 +2576,7 @@ bool ScoreApplicator::applyAddOctaveLine(Score* score, const QJsonObject& op)
 
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     score->startCmd(TranslatableString("undoableAction", "Add octave line"));
     Ottava* ottava = Factory::createOttava(score->dummy());
@@ -2584,7 +2601,7 @@ bool ScoreApplicator::applyRemoveOctaveLine(Score* score, const QJsonObject& op)
     const QJsonObject eb = op["end_beat"].toObject();
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     Ottava* target = nullptr;
     for (auto it = score->spanner().lower_bound(startTick.ticks());
@@ -2647,14 +2664,15 @@ bool ScoreApplicator::applyAddGlissando(Score* score, const QJsonObject& op)
     gliss->setGlissandoType(style == QStringLiteral("wavy")
                             ? GlissandoType::WAVY
                             : GlissandoType::STRAIGHT);
-    gliss->setAnchor(Spanner::Anchor::NOTE);
+    // [editude] anchor is now a fixed override on this type; setter removed.
+    // gliss->setAnchor(Spanner::Anchor::NOTE);
     gliss->setTrack(startNote->track());
     gliss->setTrack2(endNote->track());
     gliss->setTick(startNote->tick());
     gliss->setTick2(endNote->tick());
     gliss->setStartElement(startNote);
     gliss->setEndElement(endNote);
-    gliss->setParent(startNote);
+    gliss->setOwnershipParent(startNote);
     score->undoAddElement(gliss);
     score->endCmd();
     return true;
@@ -2750,14 +2768,15 @@ bool ScoreApplicator::applyAddGuitarBend(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Add guitar bend"));
     GuitarBend* bend = Factory::createGuitarBend(startNote);
-    bend->setAnchor(Spanner::Anchor::NOTE);
+    // [editude] anchor is now a fixed override on this type; setter removed.
+    // bend->setAnchor(Spanner::Anchor::NOTE);
     bend->setTrack(startNote->track());
     bend->setTrack2(endNote->track());
     bend->setTick(startNote->tick());
     bend->setTick2(endNote->tick());
     bend->setStartElement(startNote);
     bend->setEndElement(endNote);
-    bend->setParent(startNote);
+    bend->setOwnershipParent(startNote);
     bend->setBendType(bendType);
     score->undoAddElement(bend);
     score->endCmd();
@@ -2821,7 +2840,7 @@ bool ScoreApplicator::applyAddPedalLine(Score* score, const QJsonObject& op)
     const QJsonObject eb = op["end_beat"].toObject();
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     score->startCmd(TranslatableString("undoableAction", "Add pedal line"));
     Pedal* pedal = Factory::createPedal(score->dummy());
@@ -2845,7 +2864,7 @@ bool ScoreApplicator::applyRemovePedalLine(Score* score, const QJsonObject& op)
     const QJsonObject eb = op["end_beat"].toObject();
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     Pedal* target = nullptr;
     for (auto it = score->spanner().lower_bound(startTick.ticks());
@@ -2891,7 +2910,7 @@ bool ScoreApplicator::applyAddTrillLine(Score* score, const QJsonObject& op)
 
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     score->startCmd(TranslatableString("undoableAction", "Add trill line"));
     Trill* trill = Factory::createTrill(score->dummy());
@@ -2933,7 +2952,7 @@ bool ScoreApplicator::applyRemoveTrillLine(Score* score, const QJsonObject& op)
     const QJsonObject eb = op["end_beat"].toObject();
     const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
     const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     Trill* target = nullptr;
     for (auto it = score->spanner().lower_bound(startTick.ticks());
@@ -2997,7 +3016,7 @@ bool ScoreApplicator::applyAddArpeggio(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Add arpeggio"));
     Arpeggio* arp = Factory::createArpeggio(chord);
     arp->setArpeggioType(arpeggioTypeFromName(dirName));
-    arp->setParent(chord);
+    arp->setOwnershipParent(chord);
     arp->setTrack(chord->track());
     score->undoAddElement(arp);
     score->endCmd();
@@ -3105,7 +3124,7 @@ bool ScoreApplicator::applyAddGraceNote(Score* score, const QJsonObject& op)
     graceChord->setNoteType(nt);
     graceChord->setGraceIndex(static_cast<size_t>(order));
     graceChord->setTrack(parentChord->track());
-    graceChord->setParent(parentChord);
+    graceChord->setOwnershipParent(parentChord);
 
     TDuration dur(graceNoteDurationType(nt));
     graceChord->setDurationType(dur);
@@ -3206,12 +3225,12 @@ bool ScoreApplicator::applyAddBreathMark(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     score->startCmd(TranslatableString("undoableAction", "Add breath mark"));
     Segment* seg = measure->undoGetSegment(SegmentType::Breath, tick);
     Breath* breath = Factory::createBreath(seg);
-    breath->setParent(seg);
+    breath->setOwnershipParent(seg);
     breath->setTrack(track);
     breath->setSymId(breathTypeFromString(typeName));
     breath->setPause(pause);
@@ -3230,7 +3249,7 @@ bool ScoreApplicator::applyRemoveBreathMark(Score* score, const QJsonObject& op)
 
     const QJsonObject beat = op["beat"].toObject();
     const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
-    const track_idx_t track = part->startTrack();
+    const track_idx_t track = part->trackRange().startTrack;
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -3288,7 +3307,7 @@ bool ScoreApplicator::applyAddTremolo(Score* score, const QJsonObject& op)
     score->startCmd(TranslatableString("undoableAction", "Add tremolo"));
     TremoloSingleChord* trem = Factory::createTremoloSingleChord(chord);
     trem->setTremoloType(tremoloTypeFromString(typeName));
-    trem->setParent(chord);
+    trem->setOwnershipParent(chord);
     trem->setTrack(chord->track());
     score->undoAddElement(trem);
     score->endCmd();
@@ -3362,7 +3381,7 @@ bool ScoreApplicator::applyAddTwoNoteTremolo(Score* score, const QJsonObject& op
     TremoloTwoChord* trem = Factory::createTremoloTwoChord(chord1);
     trem->setTremoloType(tremoloTypeFromString(typeName));
     trem->setChords(chord1, chord2);
-    trem->setParent(chord1);
+    trem->setOwnershipParent(chord1);
     trem->setTrack(chord1->track());
     score->undoAddElement(trem);
     score->endCmd();
@@ -3598,7 +3617,7 @@ bool ScoreApplicator::applyInsertMarker(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Insert marker"));
     Marker* marker = Factory::createMarker(measure);
-    marker->setParent(measure);
+    marker->setOwnershipParent(measure);
     marker->setTrack(0);
     marker->setMarkerType(markerType);
     if (!label.isEmpty()) {
@@ -3670,7 +3689,7 @@ bool ScoreApplicator::applyInsertJump(Score* score, const QJsonObject& op)
 
     score->startCmd(TranslatableString("undoableAction", "Insert jump"));
     Jump* jump = Factory::createJump(measure);
-    jump->setParent(measure);
+    jump->setOwnershipParent(measure);
     jump->setTrack(0);
     if (!jumpTo.isEmpty()) {
         jump->setJumpTo(String(jumpTo));

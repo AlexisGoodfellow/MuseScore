@@ -102,12 +102,12 @@ static int findOldMidiPitch(Note* note)
     // Try last() first (forward path).  After UndoStack::undo() decrements
     // m_currentIndex, the undone macro sits at next() rather than last(),
     // so fall back to next() for the undo path.
-    for (const UndoMacro* macro : { undoStack->last(), undoStack->next() }) {
+    for (const UndoableTransaction* macro : { undoStack->last(), undoStack->next() }) {
         if (!macro) {
             continue;
         }
-        for (size_t i = 0; i < macro->childCount(); ++i) {
-            const UndoCommand* cmd = macro->commands()[i];
+        for (size_t i = 0; i < macro->commands().size(); ++i) {
+            const UndoableCommand* cmd = macro->commands()[i];
             if (cmd->type() != CommandType::ChangeProperty) {
                 continue;
             }
@@ -134,12 +134,12 @@ static int findOldVoice(EngravingItem* item, Part* /*part*/)
         return -1;
     }
     // Try last() first (forward path), then next() (undo path).
-    for (const UndoMacro* macro : { undoStack->last(), undoStack->next() }) {
+    for (const UndoableTransaction* macro : { undoStack->last(), undoStack->next() }) {
         if (!macro) {
             continue;
         }
-        for (size_t i = 0; i < macro->childCount(); ++i) {
-            const UndoCommand* cmd = macro->commands()[i];
+        for (size_t i = 0; i < macro->commands().size(); ++i) {
+            const UndoableCommand* cmd = macro->commands()[i];
             if (cmd->type() != CommandType::ChangeProperty) {
                 continue;
             }
@@ -180,12 +180,12 @@ static DurationTypeWithDots findOldDuration(ChordRest* cr)
         return invalid;
     }
     // Try last() first (forward path), then next() (undo path).
-    for (const UndoMacro* macro : { undoStack->last(), undoStack->next() }) {
+    for (const UndoableTransaction* macro : { undoStack->last(), undoStack->next() }) {
         if (!macro) {
             continue;
         }
-        for (size_t i = 0; i < macro->childCount(); ++i) {
-            const UndoCommand* cmd = macro->commands()[i];
+        for (size_t i = 0; i < macro->commands().size(); ++i) {
+            const UndoableCommand* cmd = macro->commands()[i];
             if (cmd->type() != CommandType::ChangeProperty) {
                 continue;
             }
@@ -238,7 +238,7 @@ static Part* resolvePartFromTrack(track_idx_t track,
     const staff_idx_t staffIdx = track / VOICES;
     for (auto it = knownParts.cbegin(); it != knownParts.cend(); ++it) {
         Part* p = it.key();
-        const staff_idx_t first = p->startTrack() / VOICES;
+        const staff_idx_t first = p->trackRange().startTrack / VOICES;
         if (staffIdx >= first
             && staffIdx < first + static_cast<staff_idx_t>(p->nstaves())) {
             return p;
@@ -1601,7 +1601,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             continue;
         }
         if (cmds.count(CommandType::AddElement)) {
-            Chord* parentChord = toChord(chord->explicitParent());
+            Chord* parentChord = toChord(chord->ownershipParent());
             if (!parentChord) continue;
             Part* gnPart = chord->staff() ? chord->staff()->part() : nullptr;
             if (!gnPart) {
@@ -1727,7 +1727,7 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             const QString partUuid = resolvePartUuid(part, lazyAddPartOps);
             if (partUuid.isEmpty()) continue;
             const staff_idx_t globalStaff = clef->track() / VOICES;
-            const staff_idx_t firstStaff  = part->startTrack() / VOICES;
+            const staff_idx_t firstStaff  = part->trackRange().startTrack / VOICES;
             const int staffIdx = static_cast<int>(globalStaff - firstStaff);
             if (isAdd) {
                 ops.append(buildSetClef(clef, partUuid, staffIdx));
@@ -2339,10 +2339,10 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             QJsonArray oldNumbers;
             const UndoStack* us = volta->score()->undoStack();
             if (us) {
-                for (const UndoMacro* macro : { us->last(), us->next() }) {
+                for (const UndoableTransaction* macro : { us->last(), us->next() }) {
                     if (!macro) continue;
-                    for (size_t i = 0; i < macro->childCount(); ++i) {
-                        const UndoCommand* cmd = macro->commands()[i];
+                    for (size_t i = 0; i < macro->commands().size(); ++i) {
+                        const UndoableCommand* cmd = macro->commands()[i];
                         if (cmd->type() != CommandType::ChangeProperty) continue;
                         const auto* cp = static_cast<const ChangeProperty*>(cmd);
                         if (cp->getElement() == volta && cp->getId() == Pid::VOLTA_ENDING) {
@@ -3919,7 +3919,7 @@ QJsonObject OperationTranslator::buildAddGraceNote(EngravingObject* graceObj,
                                                     const QString& partId)
 {
     auto* gc = static_cast<Chord*>(graceObj);
-    Chord* parentChord = toChord(gc->explicitParent());
+    Chord* parentChord = toChord(gc->ownershipParent());
     Part* part = gc->staff() ? gc->staff()->part() : nullptr;
 
     QJsonObject payload;

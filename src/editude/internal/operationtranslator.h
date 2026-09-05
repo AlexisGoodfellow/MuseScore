@@ -31,7 +31,8 @@
 #include <QString>
 #include <QVector>
 
-#include "engraving/editing/undo.h"
+#include "engraving/editing/transaction/undostack.h"
+#include "engraving/editing/transaction/undoablecommand.h"
 #include "engraving/dom/engravingobject.h"
 #include "engraving/dom/note.h"
 #include "engraving/dom/property.h"

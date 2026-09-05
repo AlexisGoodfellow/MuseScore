@@ -20,7 +20,7 @@
  */
 #include <gtest/gtest.h>
 
-#include "internal/voicekeys.h"
+#include "editude/internal/voicekeys.h"
 
 using namespace mu::editude::internal;
 

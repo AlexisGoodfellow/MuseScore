@@ -26,13 +26,14 @@
 #endif
 
 #include <algorithm>
+#include <variant>
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QMap>
-#include <QApplication>
+#include <QGuiApplication>
 #include <QDir>
 #include <QFile>
 #include <QKeyEvent>
@@ -53,6 +54,10 @@
 #include "global/io/buffer.h"
 #include "global/io/file.h"
 #include "notation/internal/igetscore.h"
+#include "notation/inotationinteraction.h"
+#include "notation/inotationselection.h"
+#include "notation/inotationundostack.h"
+#include "project/inotationproject.h"
 #include "log.h"
 #include "internal/platform/macos/appnap.h"
 #include "annotationoverlay.h"
@@ -398,9 +403,11 @@ void EditudeService::start()
 #endif // Q_OS_WASM
 
     if (m_playbackController()) {
-        m_playbackController()->isPlayingChanged().onNotify(
+        // [editude] isPlayingChanged() is a Channel<bool> upstream now, not a
+        // Notification; onPlaybackStateChanged() re-reads isPlaying() itself.
+        m_playbackController()->isPlayingChanged().onReceive(
             this,
-            [this]() {
+            [this](bool) {
                 onPlaybackStateChanged();
             });
     }
@@ -580,24 +587,30 @@ void EditudeService::setPlaybackDimmed(bool dimmed)
 
     if (!dimmed) {
         if (m_playbackBaselineCaptured) {
-            m_audioPlayback()->setMasterOutputParams(m_playbackBaseline);
+            m_audioPlayback()->setMasterControlParams(m_playbackBaseline);
         }
         return;
     }
 
-    m_audioPlayback()->masterOutputParams()
-        .onResolve(this, [this](const muse::audio::AudioOutputParams& params) {
+    m_audioPlayback()->masterParams()
+        .onResolve(this, [this](const muse::audio::TrackParams& params) {
             // Talkback may have ended while the promise was in flight.
             if (!m_playbackDimmed) {
                 return;
             }
             if (!m_playbackBaselineCaptured) {
-                m_playbackBaseline = params;
+                m_playbackBaseline = params.control;
                 m_playbackBaselineCaptured = true;
             }
-            muse::audio::AudioOutputParams ducked = m_playbackBaseline;
-            ducked.volume = m_playbackBaseline.volume + k_talkbackDuckDb;
-            m_audioPlayback()->setMasterOutputParams(ducked);
+            // Volume is an AutomatableValue: it may hold an automation envelope
+            // rather than a scalar, and offsetting an envelope is not meaningful.
+            const auto* baseDb = std::get_if<muse::audio::volume_db_t>(&m_playbackBaseline.volume.value());
+            if (!baseDb) {
+                return;
+            }
+            muse::audio::ControlParams ducked = m_playbackBaseline;
+            ducked.volume = muse::audio::volume_db_t(*baseDb + k_talkbackDuckDb);
+            m_audioPlayback()->setMasterControlParams(ducked);
         });
 }
 
@@ -1202,9 +1215,9 @@ void EditudeService::onNotationChanged(mu::notation::INotationPtr notation)
     // The deferred call avoids infinite recursion: markScoreSaved() fires the
     // same notification, but by then needSave().val is false so we skip.
     if (auto project = m_globalContext()->currentProject()) {
-        project->needSave().notification.onNotify(this, [this]() {
+        project->needSaveChanged().onNotify(this, [this]() {
             if (auto proj = m_globalContext()->currentProject()) {
-                if (proj->needSave().val) {
+                if (proj->isNeedSave()) {
                     QTimer::singleShot(0, this, [this]() {
                         markScoreSaved();
                     });
@@ -1352,17 +1365,19 @@ void EditudeService::onScoreChanges(const mu::engraving::ScoreChanges& changes)
 //
 void EditudeService::markScoreSaved()
 {
-    if (!m_score || !m_score->masterScore()) {
+    // [editude] editude projects are persisted via OT ops, never to a local
+    // file, so the "Save changes?" prompt is always wrong here.
+    //
+    // Upstream removed MasterScore::setSaved() and NotationProject::needSave()
+    // in favour of deriving the flag from undo-stack cleanliness (see
+    // NotationProject::listenIfNeedSaveChanges).  Clearing the stack is
+    // therefore the supported way to present the project as saved — and it is
+    // what the OT model wants regardless, since undo history lives on the
+    // server rather than in the local stack.
+    if (!m_score || !m_score->undoStack()) {
         return;
     }
-    m_score->masterScore()->setSaved(true);
-
-    // Fire the project-level needSave notification so the title bar
-    // re-reads needSave().val (now false) and clears the asterisk.
-    // setSaved(true) alone doesn't trigger this notification.
-    if (auto project = m_globalContext()->currentProject()) {
-        project->needSave().notification.notify();
-    }
+    m_score->undoStack()->clearAll();
 }
 
 QUrl EditudeService::deriveServerBaseUrl() const

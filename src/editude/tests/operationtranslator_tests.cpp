@@ -43,7 +43,8 @@
 #include "engraving/dom/timesig.h"
 #include "engraving/dom/tuplet.h"
 #include "engraving/dom/volta.h"
-#include "engraving/editing/undo.h"
+#include "engraving/editing/transaction/undostack.h"
+#include "engraving/editing/transaction/undoablecommand.h"
 #include "engraving/types/fraction.h"
 #include "engraving/tests/utils/scorerw.h"
 

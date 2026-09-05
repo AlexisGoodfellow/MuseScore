@@ -37,7 +37,7 @@ inline mu::engraving::track_idx_t trackFromCoord(
     mu::engraving::Part* part, int voice, int staff)
 {
     const mu::engraving::staff_idx_t firstStaff =
-        part->startTrack() / mu::engraving::VOICES;
+        part->trackRange().startTrack / mu::engraving::VOICES;
     return static_cast<mu::engraving::track_idx_t>(
         (firstStaff + staff) * mu::engraving::VOICES + (voice - 1));
 }
@@ -52,7 +52,7 @@ inline int staffFromTrack(mu::engraving::Part* part,
                           mu::engraving::track_idx_t track)
 {
     const mu::engraving::staff_idx_t firstStaff =
-        part->startTrack() / mu::engraving::VOICES;
+        part->trackRange().startTrack / mu::engraving::VOICES;
     return static_cast<int>(track / mu::engraving::VOICES - firstStaff);
 }
 
