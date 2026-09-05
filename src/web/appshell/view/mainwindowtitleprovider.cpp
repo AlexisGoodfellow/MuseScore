@@ -22,6 +22,23 @@
 #include "mainwindowtitleprovider.h"
 #include "translation.h"
 
+// [editude] Interfaces no longer pulled in transitively after the
+// framework/notation split.
+#include "notation/inotation.h"
+#include "notation/inotationselection.h"
+#include "notation/inotationselectionrange.h"
+#include "notation/inotationundostack.h"
+#include "notation/inotationinteraction.h"
+#include "notation/inotationaccessibility.h"
+#include "notation/inotationelements.h"
+#include "notation/inotationstyle.h"
+#include "notation/inotationviewstate.h"
+#include "project/inotationproject.h"
+#include "engraving/dom/score.h"
+#include "engraving/dom/part.h"
+#include "engraving/dom/staff.h"
+// [/editude]
+
 using namespace mu::appshell;
 using namespace mu::notation;
 

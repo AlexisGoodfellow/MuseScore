@@ -201,12 +201,16 @@ int main(int argc, char** argv)
             QMetaObject::invokeMethod(qapp, [&app]() {
                 app->setupNewContext();
 
+                // [editude] Qt WASM has no QSslSocket; TLS is the browser's job.
+#ifndef Q_OS_WASM
                 LOGI() << QString("SSL Info: supported: %1, build: %2, runtime: %3, active backend: %4, available backends: %5")
                     .arg(QSslSocket::supportsSsl())
                     .arg(QSslSocket::sslLibraryBuildVersionString())
                     .arg(QSslSocket::sslLibraryVersionString())
                     .arg(QSslSocket::activeBackend())
                     .arg(QSslSocket::availableBackends().join(", "));
+#endif
+                // [/editude]
             }, Qt::QueuedConnection);
         }, Qt::QueuedConnection);
     }, Qt::QueuedConnection);

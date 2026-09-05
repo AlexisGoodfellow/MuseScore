@@ -30,8 +30,11 @@ option(MUSE_FIX_MUSEAUDIO_FILENAME "Fix MuseAudio.js file name" OFF)
 
 # src/web/audioengine
 set(MU_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../..)
-set(MUSE_FRAMEWORK_PATH ${MU_ROOT})
-set(MUSE_FRAMEWORK_SRC_PATH ${MU_ROOT}/src/framework)
+# [editude] The framework moved out of src/framework into the muse submodule
+# (upstream 9b5d259ae5); match the convention in the top-level CMakeLists.
+set(MUSE_FRAMEWORK_PATH ${MU_ROOT}/muse)
+set(MUSE_FRAMEWORK_SRC_PATH ${MUSE_FRAMEWORK_PATH}/framework)
+# [/editude]
 
 if (NOT EXISTS ${MU_ROOT}/buildscripts)
     message(FATAL_ERROR "not root: ${MU_ROOT}")
@@ -41,7 +44,8 @@ set(CMAKE_MODULE_PATH
     ${MU_ROOT}
     ${MU_ROOT}/buildscripts
     ${MU_ROOT}/buildscripts/cmake
-    ${MU_ROOT}/src/framework/cmake
+    ${MUSE_FRAMEWORK_PATH}/buildscripts/cmake  # [editude]
+    ${MUSE_FRAMEWORK_SRC_PATH}/cmake           # [editude]
     ${CMAKE_MODULE_PATH}
     )
 
@@ -86,7 +90,7 @@ set(_QT_STUBS
     "SHELL:-include ${CMAKE_CURRENT_LIST_DIR}/qt_stubs/QSettings"
 )
 
-set(AUDIO_ROOT ${MU_ROOT}/src/framework/audio)
+set(AUDIO_ROOT ${MUSE_FRAMEWORK_SRC_PATH}/audio)  # [editude]
 add_subdirectory(${AUDIO_ROOT}/common common)
 target_compile_options(muse_audio_common PRIVATE ${_QT_STUBS})
 
@@ -116,9 +120,9 @@ target_include_directories(MuseAudio PRIVATE
 
     # compat
     ${MUSE_FRAMEWORK_PATH}/src
-    ${MUSE_FRAMEWORK_PATH}/src/framework
-    ${MUSE_FRAMEWORK_PATH}/src/framework/global
-    ${MUSE_FRAMEWORK_PATH}/src/framework/audio
+    ${MUSE_FRAMEWORK_SRC_PATH}
+    ${MUSE_FRAMEWORK_SRC_PATH}/global
+    ${MUSE_FRAMEWORK_SRC_PATH}/audio
     # end compat
 )
 
@@ -126,9 +130,35 @@ target_include_directories(MuseAudio PRIVATE
 # substitutes it with #define (not #cmakedefine), so an empty value produces
 # invalid C.  Mode 1 = MUSE_MODULE_AUDIO_WORKER_MODE (standalone worker).
 set(MUSE_MODULE_AUDIO_WORKMODE 1)
-configure_file(${MU_ROOT}/src/framework/cmake/muse_framework_config.h.in muse_framework_config.h )
+configure_file(${MUSE_FRAMEWORK_SRC_PATH}/cmake/muse_framework_config.h.in muse_framework_config.h )
 
-add_subdirectory(${MU_ROOT}/src/framework/global global)
+# [editude] muse_global depends on source deps (utfcpp, pugixml, picojson)
+# resolved by ExtDepsManifest during the main build. This standalone
+# audio-engine configure does not run that manifest, so recreate the targets
+# from the copies the main build already fetched. `just _wasm` always runs
+# _build-wasm first, so they are present.
+set(_editude_deps "${MU_ROOT}/build.wasm/_deps")
+if (NOT EXISTS "${_editude_deps}")
+    message(FATAL_ERROR
+        "Source deps not found at ${_editude_deps}. Run 'just _build-wasm' first.")
+endif()
+
+if (NOT TARGET utfcpp)
+    add_library(utfcpp INTERFACE IMPORTED GLOBAL)
+    target_include_directories(utfcpp INTERFACE "${_editude_deps}/utfcpp/utfcpp/source")
+endif()
+
+if (NOT TARGET pugixml)
+    add_library(pugixml STATIC "${_editude_deps}/pugixml/pugixml/src/pugixml.cpp")
+    target_include_directories(pugixml PUBLIC "${_editude_deps}/pugixml/pugixml/src")
+    set_target_properties(pugixml PROPERTIES POSITION_INDEPENDENT_CODE ON UNITY_BUILD OFF)
+endif()
+
+# picojson is header-only and consumed via a global property in the main build.
+set_property(GLOBAL PROPERTY picojson_SOURCE_DIR "${_editude_deps}/picojson")
+# [/editude]
+
+add_subdirectory(${MUSE_FRAMEWORK_SRC_PATH}/global global)
 target_compile_options(muse_global PRIVATE ${_QT_STUBS})
 
 target_compile_options(MuseAudio PRIVATE ${_QT_STUBS})

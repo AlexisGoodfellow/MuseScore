@@ -31,6 +31,7 @@
 #include "audio/main/istartaudiocontroller.h"
 #include "audio/main/isoundfontcontroller.h"
 #include "engraving/dom/engravingitem.h"
+#include "project/types/projecttypes.h"  // [editude] SaveMode
 
 namespace mu::appjs {
 

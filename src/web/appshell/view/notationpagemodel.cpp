@@ -32,6 +32,26 @@
 
 #include "log.h"
 
+// [editude] These interfaces are no longer pulled in transitively
+// after the framework/notation split.
+#include "notation/inotation.h"
+#include "notation/inotationselection.h"
+#include "notation/inotationselectionrange.h"
+#include "notation/inotationundostack.h"
+#include "project/inotationproject.h"
+#include "engraving/dom/part.h"
+
+// [editude] Interfaces no longer pulled in transitively after the
+// framework/notation split.
+#include "notation/inotationaccessibility.h"
+#include "notation/inotationelements.h"
+#include "notation/inotationstyle.h"
+#include "notation/inotationviewstate.h"
+#include "engraving/dom/score.h"
+#include "engraving/dom/staff.h"
+// [/editude]
+// [/editude]
+
 using namespace mu::appshell;
 using namespace mu::notation;
 using namespace muse::actions;
@@ -74,7 +94,7 @@ void NotationPageModel::init()
     updatePercussionPanelVisibility();
 
     // [editude] percussion panel APIs moved to INotationSceneConfiguration
-    notationSceneConfiguration()->useNewPercussionPanelChanged().onNotify(this, [this]() {
+    notationSceneConfiguration()->percussionPanelUseNotationPreviewChanged().onNotify(this, [this]() {
         updateDrumsetPanelVisibility();
         updatePercussionPanelVisibility();
     });
@@ -217,7 +237,7 @@ void NotationPageModel::updateDrumsetPanelVisibility()
     };
 
     // This should never be open when the new percussion panel is in use...
-    if (notationSceneConfiguration()->useNewPercussionPanel()) { // [editude]
+    if (notationSceneConfiguration()->percussionPanelUseNotationPreview()) { // [editude]
         setDrumsetPanelOpen(false);
         return;
     }
@@ -257,7 +277,7 @@ void NotationPageModel::updatePercussionPanelVisibility()
     };
 
     // This should never be open when the old drumset panel is in use...
-    if (!notationSceneConfiguration()->useNewPercussionPanel()) { // [editude]
+    if (!notationSceneConfiguration()->percussionPanelUseNotationPreview()) { // [editude]
         setPercussionPanelOpen(false);
         return;
     }
@@ -294,7 +314,7 @@ void NotationPageModel::updatePercussionPanelVisibility()
             }
             return;
         }
-        for (const Part* p : rangeSelection->selectedParts()) {
+        for (const engraving::Part* p : rangeSelection->selectedParts()) {
             if (p->hasDrumStaff()) {
                 continue;
             }
@@ -305,7 +325,7 @@ void NotationPageModel::updatePercussionPanelVisibility()
         }
     } else {
         for (const EngravingItem* e : selection->elements()) {
-            const Staff* staff = e->staff();
+            const engraving::Staff* staff = e->staff();
             if (staff && staff->isDrumStaff(e->tick())) {
                 continue;
             }

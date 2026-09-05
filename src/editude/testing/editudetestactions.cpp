@@ -18,6 +18,10 @@
 #include "engraving/dom/rest.h"
 #include "engraving/dom/segment.h"
 #include "engraving/editing/transaction/undostack.h"
+#include "engraving/editing/noteinput.h"
+#include "engraving/editing/edithairpin.h"
+#include "engraving/editing/editvoice.h"
+#include "engraving/editing/transaction/transaction.h"
 #include "engraving/editing/transaction/undoablecommand.h"
 #include "engraving/types/types.h"
 #include "engraving/types/typesconv.h"
@@ -309,7 +313,7 @@ EditudeTestActions::Reply EditudeTestActions::actionInsertNote(const QJsonObject
     // instead of replacing the entire ChordRest (which setNoteRest does).
     EngravingItem* existing = seg->element(track);
     if (existing && existing->isChord()) {
-        score->addNote(toChord(existing), nval);
+        NoteInput::addNote(score->transactionManager()->currentOrDummyTransaction(), score, toChord(existing), nval);
     } else {
         score->setNoteRest(seg, track, nval, dur.ticks());
     }
@@ -689,7 +693,7 @@ EditudeTestActions::Reply EditudeTestActions::actionSetVoice(const QJsonObject& 
         score->select(cr);
     }
     score->startCmd(TranslatableString("test", "set voice"));
-    score->changeSelectedElementsVoice(static_cast<voice_idx_t>(newVoice - 1));
+    EditVoice::changeSelectedElementsVoice(score->transactionManager()->currentOrDummyTransaction(), score, static_cast<voice_idx_t>(newVoice - 1));
     score->endCmd();
     return okResponse();
 }
@@ -865,7 +869,7 @@ QJsonArray EditudeTestActions::serializePartEvents(Part* part)
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
             segCount++;
-            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+            for (track_idx_t track = part->trackRange().startTrack; track < part->trackRange().endTrack; ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el) {
                     continue;
@@ -1161,7 +1165,7 @@ EditudeTestActions::Reply EditudeTestActions::actionSetStaffCount(const QJsonObj
             score->undoInsertStaff(s, static_cast<staff_idx_t>(i), false);
         }
     } else {
-        const staff_idx_t partStart = part->startTrack() / VOICES;
+        const staff_idx_t partStart = part->trackRange().startTrack / VOICES;
         for (int i = current; i > target; --i) {
             // cmdRemoveStaff takes an absolute staff index
             score->cmdRemoveStaff(static_cast<staff_idx_t>(partStart + i - 1));
@@ -1186,7 +1190,7 @@ QJsonObject EditudeTestActions::serializePartArticulations(Part* part)
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
-            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+            for (track_idx_t track = part->trackRange().startTrack; track < part->trackRange().endTrack; ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el || !el->isChord()) {
                     continue;
@@ -1223,7 +1227,7 @@ QJsonObject EditudeTestActions::serializePartTuplets(Part* part)
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
-            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+            for (track_idx_t track = part->trackRange().startTrack; track < part->trackRange().endTrack; ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el || !el->isChordRest()) {
                     continue;
@@ -1291,7 +1295,7 @@ QJsonObject EditudeTestActions::serializePartArpeggios(Part* part)
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
-            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+            for (track_idx_t track = part->trackRange().startTrack; track < part->trackRange().endTrack; ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el || !el->isChord()) {
                     continue;
@@ -1324,7 +1328,7 @@ QJsonObject EditudeTestActions::serializePartGraceNotes(Part* part)
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
-            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+            for (track_idx_t track = part->trackRange().startTrack; track < part->trackRange().endTrack; ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el || !el->isChord()) {
                     continue;
@@ -1363,7 +1367,7 @@ QJsonObject EditudeTestActions::serializePartBreaths(Part* part)
                 if (!el || el->type() != ElementType::BREATH) {
                     continue;
                 }
-                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) {
+                if (el->track() < part->trackRange().startTrack || el->track() >= part->trackRange().endTrack) {
                     continue;
                 }
                 Breath* breath = static_cast<Breath*>(el);
@@ -1387,7 +1391,7 @@ QJsonObject EditudeTestActions::serializePartTremolos(Part* part)
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
-            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+            for (track_idx_t track = part->trackRange().startTrack; track < part->trackRange().endTrack; ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el || !el->isChord()) {
                     continue;
@@ -1420,7 +1424,7 @@ QJsonObject EditudeTestActions::serializePartTwoNoteTremolos(Part* part)
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
-            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+            for (track_idx_t track = part->trackRange().startTrack; track < part->trackRange().endTrack; ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el || !el->isChord()) {
                     continue;
@@ -1471,7 +1475,7 @@ QJsonObject EditudeTestActions::serializePartDynamics(Part* part)
                 if (!el || !el->isDynamic()) {
                     continue;
                 }
-                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) {
+                if (el->track() < part->trackRange().startTrack || el->track() >= part->trackRange().endTrack) {
                     continue;
                 }
                 Dynamic* dyn = toDynamic(el);
@@ -1496,7 +1500,7 @@ QJsonObject EditudeTestActions::serializePartSlurs(Part* part)
         if (!sp->isSlur()) {
             continue;
         }
-        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
+        if (sp->track() < part->trackRange().startTrack || sp->track() >= part->trackRange().endTrack) {
             continue;
         }
         ChordRest* startCR = dynamic_cast<ChordRest*>(sp->startElement());
@@ -1537,7 +1541,7 @@ QJsonObject EditudeTestActions::serializePartHairpins(Part* part)
         if (!sp->isHairpin()) {
             continue;
         }
-        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
+        if (sp->track() < part->trackRange().startTrack || sp->track() >= part->trackRange().endTrack) {
             continue;
         }
         Hairpin* hp = toHairpin(sp);
@@ -1564,7 +1568,7 @@ QJsonObject EditudeTestActions::serializePartOctaveLines(Part* part)
         if (!sp->isOttava()) {
             continue;
         }
-        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
+        if (sp->track() < part->trackRange().startTrack || sp->track() >= part->trackRange().endTrack) {
             continue;
         }
         Ottava* ot = toOttava(sp);
@@ -1596,7 +1600,7 @@ QJsonObject EditudeTestActions::serializePartGlissandos(Part* part)
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
-            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+            for (track_idx_t track = part->trackRange().startTrack; track < part->trackRange().endTrack; ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el || !el->isChord()) {
                     continue;
@@ -1648,7 +1652,7 @@ QJsonObject EditudeTestActions::serializePartGuitarBends(Part* part)
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
-            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+            for (track_idx_t track = part->trackRange().startTrack; track < part->trackRange().endTrack; ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el || !el->isChord()) {
                     continue;
@@ -1712,7 +1716,7 @@ QJsonObject EditudeTestActions::serializePartPedalLines(Part* part)
         if (!sp->isPedal()) {
             continue;
         }
-        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
+        if (sp->track() < part->trackRange().startTrack || sp->track() >= part->trackRange().endTrack) {
             continue;
         }
         const QString key = QString::number(pedIndex++);
@@ -1734,7 +1738,7 @@ QJsonObject EditudeTestActions::serializePartTrillLines(Part* part)
         if (!sp->isTrill()) {
             continue;
         }
-        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) {
+        if (sp->track() < part->trackRange().startTrack || sp->track() >= part->trackRange().endTrack) {
             continue;
         }
         Trill* tr = toTrill(sp);
@@ -1768,7 +1772,7 @@ QJsonObject EditudeTestActions::serializePartLyricsMap(Part* part)
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::ChordRest); seg;
              seg = seg->next(SegmentType::ChordRest)) {
-            for (track_idx_t track = part->startTrack(); track < part->endTrack(); ++track) {
+            for (track_idx_t track = part->trackRange().startTrack; track < part->trackRange().endTrack; ++track) {
                 EngravingItem* el = seg->element(track);
                 if (!el || !el->isChordRest()) {
                     continue;
@@ -2250,7 +2254,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddArticulation(const QJsonO
     score->startCmd(TranslatableString("test", "add articulation"));
     Articulation* art = Factory::createArticulation(score->dummy()->chord());
     art->setSymId(symId);
-    art->setParent(cr);
+    art->setOwnershipParent(cr);
     art->setTrack(cr->track());
     score->undoAddElement(art);
     score->endCmd();
@@ -2401,7 +2405,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddArpeggio(const QJsonObjec
     score->startCmd(TranslatableString("test", "add arpeggio"));
     Arpeggio* arp = Factory::createArpeggio(chord);
     arp->setArpeggioType(arpType);
-    arp->setParent(chord);
+    arp->setOwnershipParent(chord);
     arp->setTrack(chord->track());
     score->undoAddElement(arp);
     score->endCmd();
@@ -2503,7 +2507,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddTuplet(const QJsonObject&
     tuplet->setBaseLen(baseLen);
     tuplet->setTrack(track);
     tuplet->setTick(tick);
-    tuplet->setParent(measure);
+    tuplet->setOwnershipParent(measure);
     score->cmdCreateTuplet(cr, tuplet);
     score->endCmd();
 
@@ -2649,7 +2653,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddGraceNote(const QJsonObje
     graceChord->setNoteType(nt);
     graceChord->setGraceIndex(static_cast<size_t>(order));
     graceChord->setTrack(parentChord->track());
-    graceChord->setParent(parentChord);
+    graceChord->setOwnershipParent(parentChord);
 
     TDuration dur(dt);
     graceChord->setDurationType(dur);
@@ -2737,8 +2741,8 @@ EditudeTestActions::Reply EditudeTestActions::actionAddBreathMark(const QJsonObj
     score->startCmd(TranslatableString("test", "add breath mark"));
     Segment* seg = measure->undoGetSegment(SegmentType::Breath, tick);
     Breath* breath = Factory::createBreath(seg);
-    breath->setParent(seg);
-    breath->setTrack(part->startTrack());
+    breath->setOwnershipParent(seg);
+    breath->setTrack(part->trackRange().startTrack);
     breath->setSymId(breathTypeFromString(typeName));
     breath->setPause(pause);
     score->undoAddElement(breath);
@@ -2772,7 +2776,7 @@ EditudeTestActions::Reply EditudeTestActions::actionRemoveBreathMark(const QJson
             if (seg->tick() != tick) continue;
             for (EngravingItem* el : seg->elist()) {
                 if (!el || el->type() != ElementType::BREATH) continue;
-                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) continue;
+                if (el->track() < part->trackRange().startTrack || el->track() >= part->trackRange().endTrack) continue;
                 breath = static_cast<Breath*>(el);
                 break;
             }
@@ -2821,7 +2825,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddTremolo(const QJsonObject
     score->startCmd(TranslatableString("test", "add tremolo"));
     TremoloSingleChord* trem = Factory::createTremoloSingleChord(chord);
     trem->setTremoloType(tremoloTypeFromString(typeName));
-    trem->setParent(chord);
+    trem->setOwnershipParent(chord);
     trem->setTrack(chord->track());
     score->undoAddElement(trem);
     score->endCmd();
@@ -2993,8 +2997,8 @@ EditudeTestActions::Reply EditudeTestActions::actionAddDynamic(const QJsonObject
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
     score->startCmd(TranslatableString("test", "add dynamic"));
     Dynamic* dyn = Factory::createDynamic(seg);
-    dyn->setParent(seg);
-    dyn->setTrack(part->startTrack());
+    dyn->setOwnershipParent(seg);
+    dyn->setTrack(part->trackRange().startTrack);
     dyn->setDynamicType(dt);
     score->undoAddElement(dyn);
     score->endCmd();
@@ -3027,7 +3031,7 @@ EditudeTestActions::Reply EditudeTestActions::actionSetDynamic(const QJsonObject
             if (seg->tick() != tick) continue;
             for (EngravingItem* el : seg->annotations()) {
                 if (!el || !el->isDynamic()) continue;
-                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) continue;
+                if (el->track() < part->trackRange().startTrack || el->track() >= part->trackRange().endTrack) continue;
                 dyn = toDynamic(el);
                 break;
             }
@@ -3090,7 +3094,7 @@ EditudeTestActions::Reply EditudeTestActions::actionRemoveDynamic(const QJsonObj
             if (seg->tick() != tick) continue;
             for (EngravingItem* el : seg->annotations()) {
                 if (!el || !el->isDynamic()) continue;
-                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) continue;
+                if (el->track() < part->trackRange().startTrack || el->track() >= part->trackRange().endTrack) continue;
                 dyn = toDynamic(el);
                 break;
             }
@@ -3178,7 +3182,7 @@ EditudeTestActions::Reply EditudeTestActions::actionRemoveSlur(const QJsonObject
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isSlur()) continue;
-        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) continue;
+        if (sp->track() < part->trackRange().startTrack || sp->track() >= part->trackRange().endTrack) continue;
         if (sp->tick() == startTick && sp->tick2() == endTick) {
             int spVoice = voiceFromTrack(part, sp->track());
             int spStaff = staffFromTrack(part, sp->track());
@@ -3221,7 +3225,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddHairpin(const QJsonObject
     const HairpinType hpType = isCrescendo ? HairpinType::CRESC_HAIRPIN : HairpinType::DIM_HAIRPIN;
 
     score->startCmd(TranslatableString("test", "add hairpin"));
-    score->addHairpin(hpType, startTick, endTick, part->startTrack());
+    EditHairpin::addHairpin(score->transactionManager()->currentOrDummyTransaction(), score, hpType, startTick, endTick, part->trackRange().startTrack);
     score->endCmd();
 
     return okResponse();
@@ -3248,7 +3252,7 @@ EditudeTestActions::Reply EditudeTestActions::actionRemoveHairpin(const QJsonObj
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isHairpin()) continue;
-        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) continue;
+        if (sp->track() < part->trackRange().startTrack || sp->track() >= part->trackRange().endTrack) continue;
         if (sp->tick() == startTick) {
             hp = toHairpin(sp);
             break;
@@ -3296,7 +3300,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddOctaveLine(const QJsonObj
     score->startCmd(TranslatableString("test", "add octave line"));
     Ottava* ottava = Factory::createOttava(score->dummy());
     ottava->setOttavaType(otType);
-    ottava->setTrack(part->startTrack());
+    ottava->setTrack(part->trackRange().startTrack);
     ottava->setTick(startTick);
     ottava->setTick2(endTick);
     score->undoAddElement(ottava);
@@ -3325,7 +3329,7 @@ EditudeTestActions::Reply EditudeTestActions::actionRemoveOctaveLine(const QJson
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isOttava()) continue;
-        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) continue;
+        if (sp->track() < part->trackRange().startTrack || sp->track() >= part->trackRange().endTrack) continue;
         if (sp->tick() == startTick) {
             ottava = toOttava(sp);
             break;
@@ -3389,14 +3393,15 @@ EditudeTestActions::Reply EditudeTestActions::actionAddGlissando(const QJsonObje
     score->startCmd(TranslatableString("test", "add glissando"));
     Glissando* gliss = Factory::createGlissando(score->dummy());
     gliss->setGlissandoType(glType);
-    gliss->setAnchor(Spanner::Anchor::NOTE);
+    // [editude] anchor is a fixed override on this type now; setter removed.
+    // gliss->setAnchor(Spanner::Anchor::NOTE);
     gliss->setTrack(startNote->track());
     gliss->setTrack2(endNote->track());
     gliss->setTick(startNote->tick());
     gliss->setTick2(endNote->tick());
     gliss->setStartElement(startNote);
     gliss->setEndElement(endNote);
-    gliss->setParent(startNote);
+    gliss->setOwnershipParent(startNote);
     score->undoAddElement(gliss);
     score->endCmd();
 
@@ -3504,14 +3509,15 @@ EditudeTestActions::Reply EditudeTestActions::actionAddGuitarBend(const QJsonObj
 
     score->startCmd(TranslatableString("test", "add guitar bend"));
     GuitarBend* bend = Factory::createGuitarBend(startNote);
-    bend->setAnchor(Spanner::Anchor::NOTE);
+    // [editude] anchor is a fixed override on this type now; setter removed.
+    // bend->setAnchor(Spanner::Anchor::NOTE);
     bend->setTrack(startNote->track());
     bend->setTrack2(endNote->track());
     bend->setTick(startNote->tick());
     bend->setTick2(endNote->tick());
     bend->setStartElement(startNote);
     bend->setEndElement(endNote);
-    bend->setParent(startNote);
+    bend->setOwnershipParent(startNote);
     bend->setBendType(bendType);
     score->undoAddElement(bend);
     score->endCmd();
@@ -3587,7 +3593,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddPedalLine(const QJsonObje
 
     score->startCmd(TranslatableString("test", "add pedal line"));
     Pedal* pedal = Factory::createPedal(score->dummy());
-    pedal->setTrack(part->startTrack());
+    pedal->setTrack(part->trackRange().startTrack);
     pedal->setTick(startTick);
     pedal->setTick2(endTick);
     score->undoAddElement(pedal);
@@ -3616,7 +3622,7 @@ EditudeTestActions::Reply EditudeTestActions::actionRemovePedalLine(const QJsonO
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isPedal()) continue;
-        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) continue;
+        if (sp->track() < part->trackRange().startTrack || sp->track() >= part->trackRange().endTrack) continue;
         if (sp->tick() == startTick) {
             pedal = toPedal(sp);
             break;
@@ -3658,7 +3664,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddTrillLine(const QJsonObje
     score->startCmd(TranslatableString("test", "add trill line"));
     Trill* trill = Factory::createTrill(score->dummy());
     trill->setTrillType(TrillType::TRILL_LINE);
-    trill->setTrack(part->startTrack());
+    trill->setTrack(part->trackRange().startTrack);
     trill->setTick(startTick);
     trill->setTick2(endTick);
 
@@ -3707,7 +3713,7 @@ EditudeTestActions::Reply EditudeTestActions::actionRemoveTrillLine(const QJsonO
     for (auto& kv : score->spanner()) {
         Spanner* sp = kv.second;
         if (!sp->isTrill()) continue;
-        if (sp->track() < part->startTrack() || sp->track() >= part->endTrack()) continue;
+        if (sp->track() < part->trackRange().startTrack || sp->track() >= part->trackRange().endTrack) continue;
         if (sp->tick() == startTick) {
             trill = toTrill(sp);
             break;
@@ -3761,7 +3767,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddLyric(const QJsonObject& 
     score->startCmd(TranslatableString("test", "add lyric"));
     Lyrics* lyric = Factory::createLyrics(cr);
     lyric->setTrack(cr->track());
-    lyric->setParent(cr);
+    lyric->setOwnershipParent(cr);
     lyric->setVerse(verse);
     lyric->setSyllabic(syllabic);
     lyric->setPlainText(String(text));
@@ -3887,8 +3893,8 @@ EditudeTestActions::Reply EditudeTestActions::actionAddStaffText(const QJsonObje
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
     score->startCmd(TranslatableString("test", "add staff text"));
     StaffText* st = Factory::createStaffText(seg, TextStyleType::STAFF);
-    st->setParent(seg);
-    st->setTrack(part->startTrack());
+    st->setOwnershipParent(seg);
+    st->setTrack(part->trackRange().startTrack);
     st->setPlainText(String(text));
     score->undoAddElement(st);
     score->endCmd();
@@ -3920,7 +3926,7 @@ EditudeTestActions::Reply EditudeTestActions::actionSetStaffText(const QJsonObje
             if (seg->tick() != tick) continue;
             for (EngravingItem* el : seg->annotations()) {
                 if (!el || el->type() != ElementType::STAFF_TEXT) continue;
-                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) continue;
+                if (el->track() < part->trackRange().startTrack || el->track() >= part->trackRange().endTrack) continue;
                 st = static_cast<StaffText*>(el);
                 break;
             }
@@ -3962,7 +3968,7 @@ EditudeTestActions::Reply EditudeTestActions::actionRemoveStaffText(const QJsonO
             if (seg->tick() != tick) continue;
             for (EngravingItem* el : seg->annotations()) {
                 if (!el || el->type() != ElementType::STAFF_TEXT) continue;
-                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) continue;
+                if (el->track() < part->trackRange().startTrack || el->track() >= part->trackRange().endTrack) continue;
                 st = static_cast<StaffText*>(el);
                 break;
             }
@@ -4006,7 +4012,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddSystemText(const QJsonObj
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
     score->startCmd(TranslatableString("test", "add system text"));
     SystemText* st = Factory::createSystemText(seg, TextStyleType::SYSTEM);
-    st->setParent(seg);
+    st->setOwnershipParent(seg);
     st->setTrack(0);
     st->setPlainText(String(text));
     score->undoAddElement(st);
@@ -4111,7 +4117,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddRehearsalMark(const QJson
     Segment* seg = measure->undoGetChordRestOrTimeTickSegment(tick);
     score->startCmd(TranslatableString("test", "add rehearsal mark"));
     RehearsalMark* rm = Factory::createRehearsalMark(seg);
-    rm->setParent(seg);
+    rm->setOwnershipParent(seg);
     rm->setTrack(0);
     rm->setPlainText(String(text));
     score->undoAddElement(rm);
@@ -4564,7 +4570,7 @@ EditudeTestActions::Reply EditudeTestActions::actionSetTempo(const QJsonObject& 
     score->startCmd(TranslatableString("test", "set tempo"));
     TempoText* tt = Factory::createTempoText(seg);
     tt->setTempo(BeatsPerSecond(bpm / 60.0));
-    tt->setParent(seg);
+    tt->setOwnershipParent(seg);
     tt->setTrack(0);
     score->undoAddElement(tt);
     score->endCmd();
@@ -4599,7 +4605,7 @@ EditudeTestActions::Reply EditudeTestActions::actionSetKeySignature(const QJsonO
         return errorResponse(422, "beat not found in score");
     }
 
-    const staff_idx_t firstStaff = part->startTrack() / VOICES;
+    const staff_idx_t firstStaff = part->trackRange().startTrack / VOICES;
     const staff_idx_t nStaves    = static_cast<staff_idx_t>(part->nstaves());
     const Key key = static_cast<Key>(sharps);
 
@@ -4610,7 +4616,7 @@ EditudeTestActions::Reply EditudeTestActions::actionSetKeySignature(const QJsonO
         KeySig* ks = Factory::createKeySig(seg);
         ks->setTrack(track);
         ks->setKey(key);
-        ks->setParent(seg);
+        ks->setOwnershipParent(seg);
         score->undoAddElement(ks);
     }
     score->endCmd();
@@ -4670,14 +4676,14 @@ EditudeTestActions::Reply EditudeTestActions::actionSetClef(const QJsonObject& b
         return errorResponse(422, "beat not found in score");
     }
 
-    const track_idx_t track = (part->startTrack() / VOICES + staffIdx) * VOICES;
+    const track_idx_t track = (part->trackRange().startTrack / VOICES + staffIdx) * VOICES;
     Segment* seg = measure->undoGetSegment(SegmentType::Clef, tick);
 
     score->startCmd(TranslatableString("test", "set clef"));
     Clef* clef = Factory::createClef(score->dummy()->segment());
     clef->setClefType(ct);
     clef->setTrack(track);
-    clef->setParent(seg);
+    clef->setOwnershipParent(seg);
     score->doUndoAddElement(clef);
     score->endCmd();
     return okResponse();
@@ -4711,7 +4717,7 @@ EditudeTestActions::Reply EditudeTestActions::actionAddChordSymbol(const QJsonOb
     score->startCmd(TranslatableString("test", "add chord symbol"));
     Harmony* harmony = Factory::createHarmony(seg);
     harmony->setTrack(0);
-    harmony->setParent(seg);
+    harmony->setOwnershipParent(seg);
     harmony->setHarmonyType(HarmonyType::STANDARD);
     harmony->setHarmony(String(name));
     score->undoAddElement(harmony);
@@ -4850,7 +4856,7 @@ QJsonArray EditudeTestActions::serializePartKeyChanges(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonArray result;
-    const track_idx_t startTrack = part->startTrack();
+    const track_idx_t startTrack = part->trackRange().startTrack;
     for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
         for (Segment* seg = m->first(SegmentType::KeySig); seg;
              seg = seg->next(SegmentType::KeySig)) {
@@ -4874,7 +4880,7 @@ QJsonArray EditudeTestActions::serializePartClefChanges(Part* part)
 {
     Score* score = m_svc->scoreForTest();
     QJsonArray result;
-    const staff_idx_t firstStaff = part->startTrack() / VOICES;
+    const staff_idx_t firstStaff = part->trackRange().startTrack / VOICES;
     const staff_idx_t nStaves    = static_cast<staff_idx_t>(part->nstaves());
 
     static const QHash<ClefType, QString> s_clefNames = {
@@ -4955,7 +4961,7 @@ QJsonObject EditudeTestActions::serializePartStaffTexts(Part* part)
                 if (!el || el->type() != ElementType::STAFF_TEXT) {
                     continue;
                 }
-                if (el->track() < part->startTrack() || el->track() >= part->endTrack()) {
+                if (el->track() < part->trackRange().startTrack || el->track() >= part->trackRange().endTrack) {
                     continue;
                 }
                 StaffText* st = static_cast<StaffText*>(el);

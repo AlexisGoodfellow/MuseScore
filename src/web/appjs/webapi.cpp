@@ -32,6 +32,27 @@
 
 #include "log.h"
 
+// [editude] These interfaces are no longer pulled in transitively
+// after the framework/notation split.
+#include "notation/inotation.h"
+#include "notation/inotationselection.h"
+#include "notation/inotationselectionrange.h"
+#include "notation/inotationundostack.h"
+#include "project/inotationproject.h"
+#include "engraving/dom/part.h"
+
+// [editude] Interfaces no longer pulled in transitively after the
+// framework/notation split.
+#include "notation/inotationinteraction.h"
+#include "notation/inotationaccessibility.h"
+#include "notation/inotationelements.h"
+#include "notation/inotationstyle.h"
+#include "notation/inotationviewstate.h"
+#include "engraving/dom/score.h"
+#include "engraving/dom/staff.h"
+// [/editude]
+// [/editude]
+
 using namespace muse;
 using namespace mu::appjs;
 
@@ -116,7 +137,8 @@ void WebApi::load(const void* source, unsigned int len)
 
 void WebApi::addSoundFont(const std::string& uri)
 {
-    auto sfc = contextResolve<muse::audio::ISoundFontController>();
+    // [editude] ISoundFontController is a global interface now.
+    auto sfc = muse::modularity::globalIoc()->resolve<muse::audio::ISoundFontController>("appjs");
     if (sfc) {
         sfc->addSoundFont(Uri(uri));
     }
@@ -124,7 +146,8 @@ void WebApi::addSoundFont(const std::string& uri)
 
 void WebApi::startAudioProcessing()
 {
-    auto ctrl = contextResolve<muse::audio::IStartAudioController>();
+    // [editude] IStartAudioController is a global interface now.
+    auto ctrl = muse::modularity::globalIoc()->resolve<muse::audio::IStartAudioController>("appjs");
     if (ctrl) {
         ctrl->startAudioProcessing(IApplication::RunMode::GuiApp);
     }

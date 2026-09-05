@@ -49,6 +49,10 @@ public:
     void setIsNotationNavigatorVisible(bool visible) const override;
     muse::async::Notification isNotationNavigatorVisibleChanged() const override;
 
+    // [editude] Local navigator state; see the .cpp.
+    mutable bool m_notationNavigatorVisible = false;
+    mutable muse::async::Notification m_notationNavigatorVisibleChanged;
+
 private:
 };
 }

@@ -76,6 +76,9 @@ void MuseScoreGuiApp::showContextSplash(const muse::modularity::ContextPtr& ctxI
 
 std::shared_ptr<muse::CmdOptions> MuseScoreGuiApp::makeContextOptions(const muse::StringList& args) const
 {
+    // [editude] CommandLineParser is only compiled with MUE_ENABLE_CONSOLEAPP,
+    // which the web build does not set — and WASM has no command line.
+#ifndef Q_OS_WASM
     if (args.size() > 0) {
         std::vector<std::string> args_ = args.toStdStringList();
         args_.insert(args_.begin(), "dummy/path/to/app.exe");  // for compatibility
@@ -90,9 +93,12 @@ std::shared_ptr<muse::CmdOptions> MuseScoreGuiApp::makeContextOptions(const muse
         commandLineParser.init();
         commandLineParser.parse(argc, argv.data());
         return commandLineParser.options();
-    } else {
-        return m_appOptions;
     }
+#else
+    UNUSED(args);
+#endif
+    // [/editude]
+    return m_appOptions;
 }
 
 QString MuseScoreGuiApp::mainWindowQmlPath(const QString& platform) const
@@ -154,9 +160,14 @@ void MuseScoreGuiApp::applyCommandLineOptions(const std::shared_ptr<CmdOptions>&
         return;
     }
 
+    // [editude] --revert-to-factory-settings is a desktop CLI option; the web
+    // IAppShellConfiguration does not carry it and WASM has no command line.
+#ifndef Q_OS_WASM
     if (options->app.revertToFactorySettings) {
         appshellConfiguration()->revertToFactorySettings(options->app.revertToFactorySettings.value());
     }
+#endif
+    // [/editude]
 
     if (guitarProConfiguration()) {
         if (options->guitarPro.experimental) {

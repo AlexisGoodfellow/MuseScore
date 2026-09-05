@@ -73,9 +73,9 @@ void WebAudioEngine::init()
     m_globalSetup->registerExports();
     m_globalSetup->resolveImports();
 
-    // Register context services (audio engine, playback)
-    m_contextSetup = std::make_shared<EngineContextSetup>(m_ctx);
-    m_contextSetup->registerExports();
+    // [editude] EngineContextSetup is gone — the audio engine services moved
+    // to the global EngineGlobalSetup above, matching the interfaces that
+    // became MODULE_GLOBAL_INTERFACE upstream.
 
     // Set up the RPC channel and register it globally
     rpc::set_last_stream_id(100000);
@@ -84,7 +84,8 @@ void WebAudioEngine::init()
     modularity::globalIoc()->registerExport<IRpcChannel>("audio_engine", m_rpcChannel);
 
     // Create and start the engine controller
-    m_controller = std::make_shared<EngineController>(m_rpcChannel, m_ctx);
+    // [editude] EngineController's other dependencies are GlobalInject'd now.
+    m_controller = std::make_shared<EngineController>(m_rpcChannel);
     m_controller->onStartRunning();
 
     LOGI() << "Web audio engine running";

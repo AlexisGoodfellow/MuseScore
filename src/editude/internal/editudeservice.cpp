@@ -2004,8 +2004,6 @@ void EditudeService::connectToSession(const QString& sessionUrl)
         m_tokenRefreshTimer->stop();
     }
 
-    // Cancel any pending sequenceRemoved wait from a prior connectToSession call.
-    m_audioPlayback()->sequenceRemoved().disconnect(this);
 
     // Reset all state to match a fresh start()
     m_state = State::Disconnected;
@@ -2104,27 +2102,22 @@ void EditudeService::connectToSession(const QString& sessionUrl)
         // open the new score via openScoreForSession().
         auto closeAndReopen = [this, scoreToClose]() {
             QTimer::singleShot(0, this, [this, scoreToClose]() {
-                if (scoreToClose) {
-                    scoreToClose->masterScore()->setSaved(true);
+                // [editude] setSaved() was removed; "needs save" is derived
+                // from undo-stack cleanliness now.
+                if (scoreToClose && scoreToClose->undoStack()) {
+                    scoreToClose->undoStack()->clearAll();
                 }
 
-                auto oldSeqId = m_playbackController()->currentTrackSequenceId();
                 m_projectFiles()->closeOpenedProject(false);
 
-                if (oldSeqId >= 0) {
-                    m_audioPlayback()->sequenceRemoved().onReceive(
-                        this,
-                        [this, oldSeqId](muse::audio::TrackSequenceId removedId) {
-                            if (removedId != oldSeqId) {
-                                return;
-                            }
-                            m_audioPlayback()->sequenceRemoved().disconnect(this);
-                            openScoreForSession();
-                        },
-                        muse::async::Asyncable::Mode::SetReplace);
-                } else {
-                    openScoreForSession();
-                }
+                // [editude] This used to wait for sequenceRemoved() before
+                // reopening, to avoid racing audio teardown. Upstream removed
+                // track sequences from IPlayback entirely, so there is no such
+                // signal any more; defer to the next event-loop turn instead.
+                // If a teardown race reappears it will show up in the project
+                // switching e2e tests.
+                QTimer::singleShot(0, this, [this]() { openScoreForSession(); });
+                // [/editude]
             });
         };
 

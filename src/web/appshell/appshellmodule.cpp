@@ -56,20 +56,34 @@ std::string AppShellModule::moduleName() const
 
 void AppShellModule::registerExports()
 {
-    m_applicationActionController = std::make_shared<ApplicationActionController>(globalCtx());
-    m_applicationUiActions = std::make_shared<ApplicationUiActions>(m_applicationActionController, globalCtx());
     m_appShellConfiguration = std::make_shared<AppShellConfiguration>(globalCtx());
     globalIoc()->registerExport<IAppShellConfiguration>(moduleName(), m_appShellConfiguration);
-    globalIoc()->registerExport<IStartupScenario>(moduleName(), new StartupScenario(globalCtx()));
 }
 
-void AppShellModule::resolveImports()
+// [editude] Contextual services moved here; see the header.
+muse::modularity::IContextSetup* AppShellModule::newContext(const muse::modularity::ContextPtr& ctx) const
 {
-    auto ar = globalIoc()->resolve<ui::IUiActionsRegister>(moduleName());
+    return new AppShellContext(ctx);
+}
+
+void AppShellContext::registerExports()
+{
+    m_applicationActionController = std::make_shared<ApplicationActionController>(iocContext());
+    m_applicationUiActions = std::make_shared<ApplicationUiActions>(m_applicationActionController, iocContext());
+    ioc()->registerExport<IStartupScenario>("appshell", new StartupScenario(iocContext()));
+}
+
+void AppShellContext::resolveImports()
+{
+    auto ar = ioc()->resolve<ui::IUiActionsRegister>("appshell");
     if (ar) {
         ar->reg(m_applicationUiActions);
     }
+}
+// [/editude]
 
+void AppShellModule::resolveImports()
+{
     auto ir = globalIoc()->resolve<interactive::IInteractiveUriRegister>(moduleName());
     if (ir) {
         ir->registerPageUri(Uri("musescore://notation"));

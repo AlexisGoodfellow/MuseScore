@@ -42,17 +42,26 @@ std::string AppShellConfiguration::museScoreRevision() const
     return application()->revision().toStdString();
 }
 
+// [editude] Upstream moved navigator visibility off IUiConfiguration onto a
+// new appShellState() service that the web appshell does not wire up. The WASM
+// shell has no navigator panel, so hold the flag locally to satisfy the
+// interface without pulling in that service.
 bool AppShellConfiguration::isNotationNavigatorVisible() const
 {
-    return uiConfiguration()->isVisible(NOTATION_NAVIGATOR_VISIBLE_KEY, false);
+    return m_notationNavigatorVisible;
 }
 
 void AppShellConfiguration::setIsNotationNavigatorVisible(bool visible) const
 {
-    uiConfiguration()->setIsVisible(NOTATION_NAVIGATOR_VISIBLE_KEY, visible);
+    if (m_notationNavigatorVisible == visible) {
+        return;
+    }
+    m_notationNavigatorVisible = visible;
+    m_notationNavigatorVisibleChanged.notify();
 }
 
 muse::async::Notification AppShellConfiguration::isNotationNavigatorVisibleChanged() const
 {
-    return uiConfiguration()->isVisibleChanged(NOTATION_NAVIGATOR_VISIBLE_KEY);
+    return m_notationNavigatorVisibleChanged;
 }
+// [/editude]

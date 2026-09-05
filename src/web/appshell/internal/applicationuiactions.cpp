@@ -30,6 +30,23 @@
 
 #include "log.h"
 
+// [editude] Interfaces no longer pulled in transitively after the
+// framework/notation split.
+#include "notation/inotation.h"
+#include "notation/inotationselection.h"
+#include "notation/inotationselectionrange.h"
+#include "notation/inotationundostack.h"
+#include "notation/inotationinteraction.h"
+#include "notation/inotationaccessibility.h"
+#include "notation/inotationelements.h"
+#include "notation/inotationstyle.h"
+#include "notation/inotationviewstate.h"
+#include "project/inotationproject.h"
+#include "engraving/dom/score.h"
+#include "engraving/dom/part.h"
+#include "engraving/dom/staff.h"
+// [/editude]
+
 using namespace muse;
 using namespace mu::appshell;
 using namespace muse::ui;
@@ -175,7 +192,7 @@ void ApplicationUiActions::init()
     });
 
     // [editude] percussion panel API moved to INotationSceneConfiguration
-    notationSceneConfiguration()->useNewPercussionPanelChanged().onNotify(this, [this]() {
+    notationSceneConfiguration()->percussionPanelUseNotationPreviewChanged().onNotify(this, [this]() {
         m_actionEnabledChanged.send({ TOGGLE_PERCUSSION_PANEL_ACTION_CODE });
     });
 }
@@ -211,7 +228,7 @@ const muse::ui::UiActionList& ApplicationUiActions::actionsList() const
 bool ApplicationUiActions::actionEnabled(const UiAction& act) const
 {
     if (act.code == TOGGLE_PERCUSSION_PANEL_ACTION_CODE) {
-        return notationSceneConfiguration()->useNewPercussionPanel(); // [editude]
+        return notationSceneConfiguration()->percussionPanelUseNotationPreview(); // [editude]
     }
 
     return m_controller->canReceiveAction(act.code);

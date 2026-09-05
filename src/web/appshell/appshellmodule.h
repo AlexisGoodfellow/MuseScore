@@ -40,6 +40,12 @@ public:
     void registerExports() override;
     void resolveImports() override;
 
+    // [editude] Upstream split contextual services out of the module into an
+    // IContextSetup. IStartupScenario and IUiActionsRegister are contextual
+    // now, so they cannot be registered or resolved from global scope.
+    muse::modularity::IContextSetup* newContext(const muse::modularity::ContextPtr& ctx) const override;
+    // [/editude]
+
     void registerResources() override;
     void registerUiTypes() override;
 
@@ -53,6 +59,23 @@ private:
     std::shared_ptr<ApplicationUiActions> m_applicationUiActions;
     std::shared_ptr<AppShellConfiguration> m_appShellConfiguration;
 };
+
+// [editude] Contextual half of the web appshell — mirrors AppShellContext in
+// the native appshell.
+class AppShellContext : public muse::modularity::IContextSetup
+{
+public:
+    AppShellContext(const muse::modularity::ContextPtr& ctx)
+        : muse::modularity::IContextSetup(ctx) {}
+
+    void registerExports() override;
+    void resolveImports() override;
+
+private:
+    std::shared_ptr<ApplicationActionController> m_applicationActionController;
+    std::shared_ptr<ApplicationUiActions> m_applicationUiActions;
+};
+// [/editude]
 }
 
 #endif // MU_APPSHELL_APPSHELLMODULE_H
