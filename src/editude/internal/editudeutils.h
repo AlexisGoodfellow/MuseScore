@@ -28,6 +28,23 @@
 namespace mu::editude::internal {
 
 // ---------------------------------------------------------------------------
+// Wire beat object -> tick
+// ---------------------------------------------------------------------------
+// A missing or malformed beat leaves denominator 0, and Fraction::ticks()
+// divides by it: SIGFPE on x86, silently wrong on arm64. Ops arrive over the
+// network, so a peer must never be able to crash a client this way. Return a
+// tick that cannot match anything in a score, so the caller's lookup fails and
+// the op is rejected through the normal path.
+inline mu::engraving::Fraction beatToTick(const QJsonObject& beat)
+{
+    const int denominator = beat["denominator"].toInt();
+    if (denominator <= 0) {
+        return mu::engraving::Fraction(-1, 1);
+    }
+    return mu::engraving::Fraction(beat["numerator"].toInt(), denominator);
+}
+
+// ---------------------------------------------------------------------------
 // Coordinate ↔ MuseScore track conversion
 // ---------------------------------------------------------------------------
 // Wire format: voice = 1–4, staff = 0-indexed within part.

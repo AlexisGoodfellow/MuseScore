@@ -686,8 +686,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddArticulation_staccato_succeeds)
     QJsonObject op;
     op["type"]         = "AddArticulation";
     op["part_id"] = kTestPartId;
-    op["id"]           = artUuid;
-    op["event_id"]     = noteUuid;
+    op["beat"] = makeBeatObj(0, 4);
     op["articulation"] = "staccato";
     EXPECT_TRUE(applicator.apply(score, op));
 
@@ -858,9 +857,12 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddSlur_twoNotes_succeeds)
     QJsonObject op;
     op["type"]           = "AddSlur";
     op["part_id"] = kTestPartId;
-    op["id"]             = slurUuid;
-    op["start_event_id"] = uuid1;
-    op["end_event_id"]   = uuid2;
+    op["start_beat"]  = makeBeatObj(0, 4);
+    op["end_beat"]    = makeBeatObj(1, 4);
+    op["start_voice"] = 1;
+    op["end_voice"]   = 1;
+    op["start_staff"] = 0;
+    op["end_staff"]   = 0;
     EXPECT_TRUE(applicator.apply(score, op));
 
     delete score;
@@ -1020,14 +1022,15 @@ TEST_F(Editude_ScoreApplicatorTests, applySetChordSymbol_changesName)
 
     QJsonObject addOp;
     addOp["type"] = "AddChordSymbol";
-    addOp["id"]   = csUuid;
+    addOp["part_id"] = kTestPartId;
     addOp["name"] = "Am";
     addOp["beat"] = makeBeatObj(0, 1);
     ASSERT_TRUE(applicator.apply(score, addOp));
 
     QJsonObject setOp;
     setOp["type"] = "SetChordSymbol";
-    setOp["id"]   = csUuid;
+    setOp["part_id"] = kTestPartId;
+    setOp["beat"] = makeBeatObj(0, 1);
     setOp["name"] = "Am7";
     EXPECT_TRUE(applicator.apply(score, setOp));
 
@@ -1044,14 +1047,15 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveChordSymbol_succeeds)
 
     QJsonObject addOp;
     addOp["type"] = "AddChordSymbol";
-    addOp["id"]   = csUuid;
+    addOp["part_id"] = kTestPartId;
     addOp["name"] = "G7";
     addOp["beat"] = makeBeatObj(0, 1);
     ASSERT_TRUE(applicator.apply(score, addOp));
 
     QJsonObject removeOp;
     removeOp["type"] = "RemoveChordSymbol";
-    removeOp["id"]   = csUuid;
+    removeOp["part_id"] = kTestPartId;
+    removeOp["beat"] = makeBeatObj(0, 1);
     EXPECT_TRUE(applicator.apply(score, removeOp));
 
     delete score;
@@ -1075,8 +1079,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyAddLyric_succeeds)
     QJsonObject op;
     op["type"]     = "AddLyric";
     op["part_id"] = kTestPartId;
-    op["id"]       = lyrUuid;
-    op["event_id"] = noteUuid;
+    op["beat"] = makeBeatObj(0, 4);
     op["verse"]    = 0;
     op["syllabic"] = "single";
     op["text"]     = "la";
@@ -1099,8 +1102,7 @@ TEST_F(Editude_ScoreApplicatorTests, applySetLyric_changesText)
     QJsonObject addOp;
     addOp["type"]     = "AddLyric";
     addOp["part_id"] = kTestPartId;
-    addOp["id"]       = lyrUuid;
-    addOp["event_id"] = noteUuid;
+    addOp["beat"] = makeBeatObj(0, 4);
     addOp["verse"]    = 0;
     addOp["syllabic"] = "begin";
     addOp["text"]     = "hel-";
@@ -1108,8 +1110,8 @@ TEST_F(Editude_ScoreApplicatorTests, applySetLyric_changesText)
 
     QJsonObject setOp;
     setOp["type"]     = "SetLyric";
+    setOp["beat"] = makeBeatObj(0, 1);
     setOp["part_id"] = kTestPartId;
-    setOp["id"]       = lyrUuid;
     setOp["text"]     = "lo-";
     setOp["syllabic"] = "begin";
     EXPECT_TRUE(applicator.apply(score, setOp));
@@ -1131,8 +1133,7 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveLyric_succeeds)
     QJsonObject addOp;
     addOp["type"]     = "AddLyric";
     addOp["part_id"] = kTestPartId;
-    addOp["id"]       = lyrUuid;
-    addOp["event_id"] = noteUuid;
+    addOp["beat"] = makeBeatObj(0, 4);
     addOp["verse"]    = 0;
     addOp["syllabic"] = "single";
     addOp["text"]     = "la";
@@ -1140,8 +1141,8 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveLyric_succeeds)
 
     QJsonObject removeOp;
     removeOp["type"] = "RemoveLyric";
+    removeOp["beat"] = makeBeatObj(0, 1);
     removeOp["part_id"] = kTestPartId;
-    removeOp["id"]   = lyrUuid;
     EXPECT_TRUE(applicator.apply(score, removeOp));
 
     delete score;
@@ -1195,8 +1196,9 @@ TEST_F(Editude_ScoreApplicatorTests, applyRemoveVolta_succeeds)
     ASSERT_TRUE(applicator.apply(score, addOp));
 
     QJsonObject removeOp;
-    removeOp["type"] = "RemoveVolta";
-    removeOp["id"]   = voltaUuid;
+    removeOp["type"]       = "RemoveVolta";
+    removeOp["start_beat"] = makeBeatObj(0, 1);
+    removeOp["end_beat"]   = makeBeatObj(0, 1);
     EXPECT_TRUE(applicator.apply(score, removeOp));
 
     delete score;

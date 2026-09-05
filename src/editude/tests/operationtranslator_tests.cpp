@@ -940,8 +940,7 @@ TEST_F(Editude_OperationTranslatorTests, addLyric_singleNoteEvent_emitsAddLyric)
 
     QJsonObject lyrOp;
     lyrOp["type"]       = "AddLyric";
-    lyrOp["id"]         = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    lyrOp["event_id"]   = noteUuid;
+    lyrOp["beat"] = makeBeatObj(0, 4);
     lyrOp["verse"]      = 0;
     lyrOp["syllabic"]   = "single";
     lyrOp["text"]       = "la";
@@ -977,8 +976,7 @@ TEST_F(Editude_OperationTranslatorTests, setLyric_changeProperty_emitsSetLyric)
 
     QJsonObject lyrOp;
     lyrOp["type"]     = "AddLyric";
-    lyrOp["id"]       = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    lyrOp["event_id"] = noteUuid;
+    lyrOp["beat"] = makeBeatObj(0, 4);
     lyrOp["verse"]    = 0;
     lyrOp["syllabic"] = "begin";
     lyrOp["text"]     = "Al-";
@@ -1018,8 +1016,7 @@ TEST_F(Editude_OperationTranslatorTests, removeLyric_knownElement_emitsRemoveLyr
 
     QJsonObject lyrOp;
     lyrOp["type"]     = "AddLyric";
-    lyrOp["id"]       = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    lyrOp["event_id"] = noteUuid;
+    lyrOp["beat"] = makeBeatObj(0, 4);
     lyrOp["verse"]    = 0;
     lyrOp["syllabic"] = "single";
     lyrOp["text"]     = "do";

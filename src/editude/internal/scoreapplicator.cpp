@@ -168,7 +168,7 @@ bool ScoreApplicator::applyInsertNote(Score* score, const QJsonObject& op)
     const QJsonObject pitch    = op["pitch"].toObject();
     const QJsonObject durObj   = op["duration"].toObject();
 
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int midi = pitchToMidi(pitch["step"].toString(),
                                  pitch["octave"].toInt(),
                                  pitch["accidental"].toString());
@@ -249,7 +249,7 @@ bool ScoreApplicator::applyInsertRest(Score* score, const QJsonObject& op)
     const QJsonObject beat   = op["beat"].toObject();
     const QJsonObject durObj = op["duration"].toObject();
 
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const DurationType dt = parseDurationType(durObj["type"].toString());
     const int dots        = durObj["dots"].toInt(0);
 
@@ -287,7 +287,7 @@ bool ScoreApplicator::applyDeleteNote(Score* score, const QJsonObject& op)
 
     const QJsonObject beat  = op["beat"].toObject();
     const QJsonObject pitch = op["pitch"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int midi = pitchToMidi(pitch["step"].toString(),
                                  pitch["octave"].toInt(),
                                  pitch["accidental"].toString());
@@ -349,7 +349,7 @@ bool ScoreApplicator::applyDeleteRest(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice = opVoice(op);
     const int stf   = opStaff(op);
 
@@ -386,7 +386,7 @@ bool ScoreApplicator::applySetPitch(Score* score, const QJsonObject& op)
 
     const QJsonObject beat     = op["beat"].toObject();
     const QJsonObject pitchObj = op["pitch"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int oldMidi = pitchToMidi(pitchObj["step"].toString(),
                                     pitchObj["octave"].toInt(),
                                     pitchObj["accidental"].toString());
@@ -435,7 +435,7 @@ bool ScoreApplicator::applySetDuration(Score* score, const QJsonObject& op)
 
     const QJsonObject beat   = op["beat"].toObject();
     const QJsonObject durObj = op["duration"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice = opVoice(op);
     const int stf   = opStaff(op);
     const track_idx_t track = trackFromCoord(part, voice, stf);
@@ -479,7 +479,7 @@ bool ScoreApplicator::applySetTie(Score* score, const QJsonObject& op)
 
     const QJsonObject beat     = op["beat"].toObject();
     const QJsonObject pitchObj = op["pitch"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int midi = pitchToMidi(pitchObj["step"].toString(),
                                  pitchObj["octave"].toInt(),
                                  pitchObj["accidental"].toString());
@@ -555,7 +555,7 @@ bool ScoreApplicator::applySetVoice(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int oldVoice = opVoice(op);
     const int stf      = opStaff(op);
     const int newVoice = op["new_voice"].toInt(1);
@@ -596,7 +596,7 @@ bool ScoreApplicator::applySetTimeSignature(Score* score, const QJsonObject& op)
         return true;
     }
 
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int num   = tsObj["numerator"].toInt(0);
     const int denom = tsObj["denominator"].toInt(0);
 
@@ -632,7 +632,7 @@ bool ScoreApplicator::applySetTempo(Score* score, const QJsonObject& op)
         return true;
     }
 
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const double bpm = tempoObj["bpm"].toDouble(0.0);
 
     if (bpm <= 0.0) {
@@ -685,7 +685,7 @@ bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
     const QJsonValue ksSigVal = op["key_signature"];
     if (ksSigVal.isNull() || ksSigVal.isUndefined()) {
         const QJsonObject beat = op["beat"].toObject();
-        const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+        const Fraction tick = beatToTick(beat);
         Measure* measure = score->tick2measure(tick);
         if (!measure) {
             return true;
@@ -709,7 +709,7 @@ bool ScoreApplicator::applySetKeySignature(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int sharps = ksSigVal.toObject()["sharps"].toInt(0);
 
     if (sharps < -7 || sharps > 7) {
@@ -752,7 +752,7 @@ bool ScoreApplicator::applySetClef(Score* score, const QJsonObject& op)
     const QJsonValue clefVal = op["clef"];
     if (clefVal.isNull() || clefVal.isUndefined()) {
         const QJsonObject beat = op["beat"].toObject();
-        const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+        const Fraction tick = beatToTick(beat);
         const int staffIdx = op["staff"].toInt(0);
         Measure* measure = score->tick2measure(tick);
         if (!measure) {
@@ -773,7 +773,7 @@ bool ScoreApplicator::applySetClef(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int staffIdx     = op["staff"].toInt(0);
     const QString clefName = clefVal.toObject()["name"].toString();
 
@@ -1085,7 +1085,7 @@ bool ScoreApplicator::applySetTabNote(Score* score, const QJsonObject& op)
 
     const QJsonObject beat     = op["beat"].toObject();
     const QJsonObject pitchObj = op["pitch"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int midi = pitchToMidi(pitchObj["step"].toString(),
                                  pitchObj["octave"].toInt(),
                                  pitchObj["accidental"].toString());
@@ -1183,7 +1183,7 @@ bool ScoreApplicator::applySetNoteHead(Score* score, const QJsonObject& op)
 
     const QJsonObject beat     = op["beat"].toObject();
     const QJsonObject pitchObj = op["pitch"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int midi = pitchToMidi(pitchObj["step"].toString(),
                                  pitchObj["octave"].toInt(),
                                  pitchObj["accidental"].toString());
@@ -1455,7 +1455,7 @@ bool ScoreApplicator::applyAddArticulation(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice = opVoice(op);
     const int stf   = opStaff(op);
     const QString artName = op["articulation"].toString();
@@ -1491,7 +1491,7 @@ bool ScoreApplicator::applyRemoveArticulation(Score* score, const QJsonObject& o
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice = opVoice(op);
     const int stf   = opStaff(op);
     const QString artName = op["articulation"].toString();
@@ -1584,7 +1584,7 @@ bool ScoreApplicator::applyAddDynamic(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
         LOGW() << "[editude] applyAddDynamic: no measure at tick" << tick.toString();
@@ -1614,7 +1614,7 @@ bool ScoreApplicator::applySetDynamic(Score* score, const QJsonObject& op)
 
     const QJsonObject beat = op["beat"].toObject();
     const QString kind     = op["kind"].toString();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const track_idx_t track = part->trackRange().startTrack;
 
     const DynamicType dt = dynamicTypeFromName(kind);
@@ -1664,7 +1664,7 @@ bool ScoreApplicator::applyRemoveDynamic(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const track_idx_t track = part->trackRange().startTrack;
 
     // Find the Dynamic at this tick/track.
@@ -1712,8 +1712,8 @@ bool ScoreApplicator::applyAddSlur(Score* score, const QJsonObject& op)
 
     const QJsonObject sb = op["start_beat"].toObject();
     const QJsonObject eb = op["end_beat"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const int startVoice = op["start_voice"].toInt(1);
     const int startStaff = op["start_staff"].toInt(0);
     const int endVoice   = op["end_voice"].toInt(1);
@@ -1750,8 +1750,8 @@ bool ScoreApplicator::applyRemoveSlur(Score* score, const QJsonObject& op)
 
     const QJsonObject sb = op["start_beat"].toObject();
     const QJsonObject eb = op["end_beat"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const int startVoice = op["start_voice"].toInt(1);
     const int startStaff = op["start_staff"].toInt(0);
     const track_idx_t startTrack = trackFromCoord(part, startVoice, startStaff);
@@ -1798,8 +1798,8 @@ bool ScoreApplicator::applyAddHairpin(Score* score, const QJsonObject& op)
                                ? HairpinType::CRESC_HAIRPIN
                                : HairpinType::DIM_HAIRPIN;
 
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const track_idx_t track = part->trackRange().startTrack;
 
     score->startCmd(TranslatableString("undoableAction", "Add hairpin"));
@@ -1819,8 +1819,8 @@ bool ScoreApplicator::applyRemoveHairpin(Score* score, const QJsonObject& op)
 
     const QJsonObject sb = op["start_beat"].toObject();
     const QJsonObject eb = op["end_beat"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const track_idx_t track = part->trackRange().startTrack;
 
     // Scan spanner map for a Hairpin matching the range and track.
@@ -1867,7 +1867,7 @@ bool ScoreApplicator::applyAddTuplet(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice = opVoice(op);
     const int stf   = opStaff(op);
     const track_idx_t track = trackFromCoord(part, voice, stf);
@@ -1925,7 +1925,7 @@ bool ScoreApplicator::applyRemoveTuplet(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice = opVoice(op);
     const int stf   = opStaff(op);
     const track_idx_t track = trackFromCoord(part, voice, stf);
@@ -2020,7 +2020,7 @@ bool ScoreApplicator::applyAddLyric(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice    = opVoice(op);
     const int stf      = opStaff(op);
     const int verse    = op["verse"].toInt(0);
@@ -2054,7 +2054,7 @@ bool ScoreApplicator::applySetLyric(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice    = opVoice(op);
     const int stf      = opStaff(op);
     const int verse    = op["verse"].toInt(0);
@@ -2100,7 +2100,7 @@ bool ScoreApplicator::applyRemoveLyric(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice = opVoice(op);
     const int stf   = opStaff(op);
     const int verse = op["verse"].toInt(0);
@@ -2143,7 +2143,7 @@ bool ScoreApplicator::applyAddChordSymbol(Score* score, const QJsonObject& op)
         return false;
     }
 
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
         LOGW() << "[editude] applyAddChordSymbol: no measure at tick" << tick.toString();
@@ -2167,7 +2167,7 @@ bool ScoreApplicator::applySetChordSymbol(Score* score, const QJsonObject& op)
 {
     const QJsonObject beat = op["beat"].toObject();
     const QString name     = op["name"].toString();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
 
     // Find the Harmony at this tick on track 0.
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
@@ -2203,7 +2203,7 @@ bool ScoreApplicator::applySetChordSymbol(Score* score, const QJsonObject& op)
 bool ScoreApplicator::applyRemoveChordSymbol(Score* score, const QJsonObject& op)
 {
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
@@ -2249,7 +2249,7 @@ bool ScoreApplicator::applyAddStaffText(Score* score, const QJsonObject& op)
 
     const QString text     = op["text"].toString();
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -2280,7 +2280,7 @@ bool ScoreApplicator::applySetStaffText(Score* score, const QJsonObject& op)
 
     const QJsonObject beat = op["beat"].toObject();
     const QString text     = op["text"].toString();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const track_idx_t track = part->trackRange().startTrack;
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
@@ -2322,7 +2322,7 @@ bool ScoreApplicator::applyRemoveStaffText(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const track_idx_t track = part->trackRange().startTrack;
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
@@ -2363,7 +2363,7 @@ bool ScoreApplicator::applyAddSystemText(Score* score, const QJsonObject& op)
 {
     const QString text     = op["text"].toString();
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -2387,7 +2387,7 @@ bool ScoreApplicator::applySetSystemText(Score* score, const QJsonObject& op)
 {
     const QJsonObject beat = op["beat"].toObject();
     const QString text     = op["text"].toString();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
@@ -2422,7 +2422,7 @@ bool ScoreApplicator::applySetSystemText(Score* score, const QJsonObject& op)
 bool ScoreApplicator::applyRemoveSystemText(Score* score, const QJsonObject& op)
 {
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
@@ -2462,7 +2462,7 @@ bool ScoreApplicator::applyAddRehearsalMark(Score* score, const QJsonObject& op)
 {
     const QString text     = op["text"].toString();
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -2486,7 +2486,7 @@ bool ScoreApplicator::applySetRehearsalMark(Score* score, const QJsonObject& op)
 {
     const QJsonObject beat = op["beat"].toObject();
     const QString text     = op["text"].toString();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
@@ -2521,7 +2521,7 @@ bool ScoreApplicator::applySetRehearsalMark(Score* score, const QJsonObject& op)
 bool ScoreApplicator::applyRemoveRehearsalMark(Score* score, const QJsonObject& op)
 {
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
 
     Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
     if (!seg) {
@@ -2574,8 +2574,8 @@ bool ScoreApplicator::applyAddOctaveLine(Score* score, const QJsonObject& op)
     else if (kind == QStringLiteral("15ma"))  ottType = OttavaType::OTTAVA_15MA;
     else if (kind == QStringLiteral("15mb"))  ottType = OttavaType::OTTAVA_15MB;
 
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const track_idx_t track = part->trackRange().startTrack;
 
     score->startCmd(TranslatableString("undoableAction", "Add octave line"));
@@ -2599,8 +2599,8 @@ bool ScoreApplicator::applyRemoveOctaveLine(Score* score, const QJsonObject& op)
 
     const QJsonObject sb = op["start_beat"].toObject();
     const QJsonObject eb = op["end_beat"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const track_idx_t track = part->trackRange().startTrack;
 
     Ottava* target = nullptr;
@@ -2640,8 +2640,8 @@ bool ScoreApplicator::applyAddGlissando(Score* score, const QJsonObject& op)
     const QJsonObject eb = op["end_beat"].toObject();
     const QJsonObject sp = op["start_pitch"].toObject();
     const QJsonObject ep = op["end_pitch"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const int startMidi = pitchToMidi(sp["step"].toString(), sp["octave"].toInt(),
                                       sp["accidental"].toString());
     const int endMidi   = pitchToMidi(ep["step"].toString(), ep["octave"].toInt(),
@@ -2688,7 +2688,7 @@ bool ScoreApplicator::applyRemoveGlissando(Score* score, const QJsonObject& op)
 
     const QJsonObject sb = op["start_beat"].toObject();
     const QJsonObject sp = op["start_pitch"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
     const int startMidi = pitchToMidi(sp["step"].toString(), sp["octave"].toInt(),
                                       sp["accidental"].toString());
     const int startVoice = op["start_voice"].toInt(1);
@@ -2747,8 +2747,8 @@ bool ScoreApplicator::applyAddGuitarBend(Score* score, const QJsonObject& op)
     const QJsonObject eb = op["end_beat"].toObject();
     const QJsonObject sp = op["start_pitch"].toObject();
     const QJsonObject ep = op["end_pitch"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const int startMidi = pitchToMidi(sp["step"].toString(), sp["octave"].toInt(),
                                       sp["accidental"].toString());
     const int endMidi   = pitchToMidi(ep["step"].toString(), ep["octave"].toInt(),
@@ -2793,7 +2793,7 @@ bool ScoreApplicator::applyRemoveGuitarBend(Score* score, const QJsonObject& op)
 
     const QJsonObject sb = op["start_beat"].toObject();
     const QJsonObject sp = op["start_pitch"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
     const int startMidi = pitchToMidi(sp["step"].toString(), sp["octave"].toInt(),
                                       sp["accidental"].toString());
     const int startVoice = op["start_voice"].toInt(1);
@@ -2838,8 +2838,8 @@ bool ScoreApplicator::applyAddPedalLine(Score* score, const QJsonObject& op)
 
     const QJsonObject sb = op["start_beat"].toObject();
     const QJsonObject eb = op["end_beat"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const track_idx_t track = part->trackRange().startTrack;
 
     score->startCmd(TranslatableString("undoableAction", "Add pedal line"));
@@ -2862,8 +2862,8 @@ bool ScoreApplicator::applyRemovePedalLine(Score* score, const QJsonObject& op)
 
     const QJsonObject sb = op["start_beat"].toObject();
     const QJsonObject eb = op["end_beat"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const track_idx_t track = part->trackRange().startTrack;
 
     Pedal* target = nullptr;
@@ -2908,8 +2908,8 @@ bool ScoreApplicator::applyAddTrillLine(Score* score, const QJsonObject& op)
     else if (kind == QStringLiteral("downprall"))  trType = TrillType::DOWNPRALL_LINE;
     else if (kind == QStringLiteral("prallprall")) trType = TrillType::PRALLPRALL_LINE;
 
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const track_idx_t track = part->trackRange().startTrack;
 
     score->startCmd(TranslatableString("undoableAction", "Add trill line"));
@@ -2950,8 +2950,8 @@ bool ScoreApplicator::applyRemoveTrillLine(Score* score, const QJsonObject& op)
 
     const QJsonObject sb = op["start_beat"].toObject();
     const QJsonObject eb = op["end_beat"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const track_idx_t track = part->trackRange().startTrack;
 
     Trill* target = nullptr;
@@ -3001,7 +3001,7 @@ bool ScoreApplicator::applyAddArpeggio(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice    = opVoice(op);
     const int stf      = opStaff(op);
     const QString dirName = op["direction"].toString();
@@ -3032,7 +3032,7 @@ bool ScoreApplicator::applyRemoveArpeggio(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice = opVoice(op);
     const int stf   = opStaff(op);
 
@@ -3095,7 +3095,7 @@ bool ScoreApplicator::applyAddGraceNote(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat  = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice         = opVoice(op);
     const int stf           = opStaff(op);
     const int order         = op["order"].toInt(0);
@@ -3152,7 +3152,7 @@ bool ScoreApplicator::applyRemoveGraceNote(Score* score, const QJsonObject& op)
 
     const QJsonObject beat  = op["beat"].toObject();
     const QJsonObject pitch = op["pitch"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice = opVoice(op);
     const int stf   = opStaff(op);
     const int order = op["order"].toInt(0);
@@ -3217,7 +3217,7 @@ bool ScoreApplicator::applyAddBreathMark(Score* score, const QJsonObject& op)
     const QString typeName   = op["breath_type"].toString();
     const QJsonObject beat   = op["beat"].toObject();
     const double pause       = op["pause"].toDouble(0.0);
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -3248,7 +3248,7 @@ bool ScoreApplicator::applyRemoveBreathMark(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const track_idx_t track = part->trackRange().startTrack;
 
     Measure* measure = score->tick2measure(tick);
@@ -3292,7 +3292,7 @@ bool ScoreApplicator::applyAddTremolo(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice    = opVoice(op);
     const int stf      = opStaff(op);
     const QString typeName = op["tremolo_type"].toString();
@@ -3323,7 +3323,7 @@ bool ScoreApplicator::applyRemoveTremolo(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beat = op["beat"].toObject();
-    const Fraction tick(beat["numerator"].toInt(), beat["denominator"].toInt());
+    const Fraction tick = beatToTick(beat);
     const int voice = opVoice(op);
     const int stf   = opStaff(op);
 
@@ -3360,8 +3360,8 @@ bool ScoreApplicator::applyAddTwoNoteTremolo(Score* score, const QJsonObject& op
 
     const QJsonObject sb = op["start_beat"].toObject();
     const QJsonObject eb = op["end_beat"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
-    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
+    const Fraction endTick = beatToTick(eb);
     const int startVoice = op["start_voice"].toInt(1);
     const int startStaff = op["start_staff"].toInt(0);
     const int endVoice   = op["end_voice"].toInt(1);
@@ -3397,7 +3397,7 @@ bool ScoreApplicator::applyRemoveTwoNoteTremolo(Score* score, const QJsonObject&
     }
 
     const QJsonObject sb = op["start_beat"].toObject();
-    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction startTick = beatToTick(sb);
     const int startVoice = op["start_voice"].toInt(1);
     const int startStaff = op["start_staff"].toInt(0);
 
@@ -3427,7 +3427,7 @@ bool ScoreApplicator::applyRemoveTwoNoteTremolo(Score* score, const QJsonObject&
 bool ScoreApplicator::applySetStartRepeat(Score* score, const QJsonObject& op)
 {
     const QJsonObject beatObj = op["beat"].toObject();
-    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const Fraction tick = beatToTick(beatObj);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -3445,7 +3445,7 @@ bool ScoreApplicator::applySetStartRepeat(Score* score, const QJsonObject& op)
 bool ScoreApplicator::applySetEndRepeat(Score* score, const QJsonObject& op)
 {
     const QJsonObject beatObj = op["beat"].toObject();
-    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const Fraction tick = beatToTick(beatObj);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -3469,10 +3469,8 @@ bool ScoreApplicator::applyInsertVolta(Score* score, const QJsonObject& op)
 {
     const QJsonObject startBeatObj = op["start_beat"].toObject();
     const QJsonObject endBeatObj   = op["end_beat"].toObject();
-    const Fraction startTick(startBeatObj["numerator"].toInt(),
-                             startBeatObj["denominator"].toInt());
-    const Fraction endTick(endBeatObj["numerator"].toInt(),
-                           endBeatObj["denominator"].toInt());
+    const Fraction startTick = beatToTick(startBeatObj);
+    const Fraction endTick = beatToTick(endBeatObj);
 
     Measure* startMeasure = score->tick2measure(startTick);
     Measure* endMeasure   = score->tick2measure(endTick);
@@ -3504,10 +3502,8 @@ bool ScoreApplicator::applyRemoveVolta(Score* score, const QJsonObject& op)
 {
     const QJsonObject startBeatObj = op["start_beat"].toObject();
     const QJsonObject endBeatObj   = op["end_beat"].toObject();
-    const Fraction startTick(startBeatObj["numerator"].toInt(),
-                             startBeatObj["denominator"].toInt());
-    const Fraction endTick(endBeatObj["numerator"].toInt(),
-                           endBeatObj["denominator"].toInt());
+    const Fraction startTick = beatToTick(startBeatObj);
+    const Fraction endTick = beatToTick(endBeatObj);
 
     Volta* target = nullptr;
     for (auto it = score->spanner().lower_bound(startTick.ticks());
@@ -3548,8 +3544,7 @@ bool ScoreApplicator::applyRemoveVolta(Score* score, const QJsonObject& op)
 bool ScoreApplicator::applySetVoltaNumbers(Score* score, const QJsonObject& op)
 {
     const QJsonObject startBeatObj = op["start_beat"].toObject();
-    const Fraction startTick(startBeatObj["numerator"].toInt(),
-                             startBeatObj["denominator"].toInt());
+    const Fraction startTick = beatToTick(startBeatObj);
 
     // Match by start tick and old_numbers.
     const QJsonArray oldNumbersArr = op["old_numbers"].toArray();
@@ -3596,7 +3591,7 @@ bool ScoreApplicator::applyInsertMarker(Score* score, const QJsonObject& op)
     }
 
     const QJsonObject beatObj = op["beat"].toObject();
-    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const Fraction tick = beatToTick(beatObj);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -3632,7 +3627,7 @@ bool ScoreApplicator::applyRemoveMarker(Score* score, const QJsonObject& op)
 {
     const QString kind = op["kind"].toString();
     const QJsonObject beatObj = op["beat"].toObject();
-    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const Fraction tick = beatToTick(beatObj);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -3674,7 +3669,7 @@ bool ScoreApplicator::applyRemoveMarker(Score* score, const QJsonObject& op)
 bool ScoreApplicator::applyInsertJump(Score* score, const QJsonObject& op)
 {
     const QJsonObject beatObj = op["beat"].toObject();
-    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const Fraction tick = beatToTick(beatObj);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -3711,7 +3706,7 @@ bool ScoreApplicator::applyInsertJump(Score* score, const QJsonObject& op)
 bool ScoreApplicator::applyRemoveJump(Score* score, const QJsonObject& op)
 {
     const QJsonObject beatObj = op["beat"].toObject();
-    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const Fraction tick = beatToTick(beatObj);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -3775,7 +3770,7 @@ bool ScoreApplicator::applySetScoreMetadata(Score* score, const QJsonObject& op)
 bool ScoreApplicator::applySetMeasureLen(Score* score, const QJsonObject& op)
 {
     const QJsonObject beatObj = op["beat"].toObject();
-    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const Fraction tick = beatToTick(beatObj);
 
     Measure* measure = score->tick2measure(tick);
     if (!measure) {
@@ -3794,7 +3789,7 @@ bool ScoreApplicator::applySetMeasureLen(Score* score, const QJsonObject& op)
         score->endCmd();
     } else {
         const QJsonObject lenObj = op["actual_len"].toObject();
-        const Fraction newLen(lenObj["numerator"].toInt(), lenObj["denominator"].toInt());
+        const Fraction newLen = beatToTick(lenObj);
         if (newLen <= Fraction(0, 1)) {
             LOGW() << "[editude] applySetMeasureLen: non-positive actual_len";
             return false;
@@ -3815,8 +3810,8 @@ bool ScoreApplicator::applyInsertBeats(Score* score, const QJsonObject& op)
     const QJsonObject atObj  = op["at_beat"].toObject();
     const QJsonObject durObj = op["duration"].toObject();
 
-    const Fraction atTick(atObj["numerator"].toInt(), atObj["denominator"].toInt());
-    const Fraction duration(durObj["numerator"].toInt(), durObj["denominator"].toInt());
+    const Fraction atTick = beatToTick(atObj);
+    const Fraction duration = beatToTick(durObj);
 
     if (duration <= Fraction(0, 1)) {
         LOGW() << "[editude] applyInsertBeats: non-positive duration";
@@ -3877,8 +3872,8 @@ bool ScoreApplicator::applyDeleteBeats(Score* score, const QJsonObject& op)
     const QJsonObject atObj  = op["at_beat"].toObject();
     const QJsonObject durObj = op["duration"].toObject();
 
-    const Fraction atTick(atObj["numerator"].toInt(), atObj["denominator"].toInt());
-    const Fraction duration(durObj["numerator"].toInt(), durObj["denominator"].toInt());
+    const Fraction atTick = beatToTick(atObj);
+    const Fraction duration = beatToTick(durObj);
 
     if (duration <= Fraction(0, 1)) {
         LOGW() << "[editude] applyDeleteBeats: non-positive duration";
