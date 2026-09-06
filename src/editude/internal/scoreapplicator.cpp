@@ -40,6 +40,8 @@
 #include "engraving/dom/staff.h"
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/fingering.h"
+#include "engraving/dom/instrchange.h"
+#include "engraving/editing/editinstrumentchange.h"
 #include "engraving/dom/vibrato.h"
 #include "engraving/dom/letring.h"
 #include "engraving/dom/palmmute.h"
@@ -1327,6 +1329,8 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("AddGuitarBend"))    return applyAddGuitarBend(score, payload);
     if (type == QLatin1String("RemoveGuitarBend")) return applyRemoveGuitarBend(score, payload);
     // Advanced spanners — pedal lines
+    if (type == QLatin1String("AddInstrumentChange"))return applyAddInstrumentChange(score, payload);
+    if (type == QLatin1String("RemoveInstrumentChange"))return applyRemoveInstrumentChange(score, payload);
     if (type == QLatin1String("AddVibratoLine"))    return applyAddVibratoLine(score, payload);
     if (type == QLatin1String("RemoveVibratoLine"))return applyRemoveVibratoLine(score, payload);
     if (type == QLatin1String("AddLetRing"))        return applyAddLetRing(score, payload);
@@ -2940,6 +2944,90 @@ bool ScoreApplicator::applyRemoveGuitarBend(Score* score, const QJsonObject& op)
 // ---------------------------------------------------------------------------
 // Advanced spanners — pedal lines (beat-range + part-addressed)
 // ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applyAddInstrumentChange(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddInstrumentChange: unknown or missing part_id";
+        return false;
+    }
+
+    const QJsonObject instr = op["instrument"].toObject();
+    if (instr.isEmpty()) {
+        LOGW() << "[editude] applyAddInstrumentChange: missing instrument";
+        return false;
+    }
+
+    const Fraction tick = beatToTick(op["beat"].toObject());
+    const track_idx_t track = part->trackRange().startTrack;
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick, opVoice(op), opStaff(op));
+    if (!cr) {
+        LOGW() << "[editude] applyAddInstrumentChange: no ChordRest at coordinate";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add instrument change"));
+    // Carry the display names; the template id drives playback properties on
+    // the receiving side exactly as it does for a part-level instrument. The
+    // one-argument factory leaves m_instrument null and setInstrument() writes
+    // through that pointer, so construct with the instrument instead.
+    Instrument changed;
+    changed.setId(String(instr["musescore_id"].toString()));
+    changed.setLongName(String(instr["name"].toString()));
+    changed.setShortName(String(instr["short_name"].toString()));
+
+    // MuseScore builds the element on the dummy segment and attaches it to the
+    // ChordRest as an annotation; parenting it to a live segment and calling
+    // undoAddElement traps.
+    InstrumentChange* ic = Factory::createInstrumentChange(score->dummy()->segment(), changed);
+    ic->setTrack(track);
+    ic->setXmlText(instr["name"].toString());
+    cr->undoAddAnnotation(ic);
+    // Attaching the element leaves it pointing at the staff's instrument for
+    // that tick. ChangeInstrument is MuseScore's undoable command for the
+    // switch: it sets the instrument on both the element and the part's
+    // timeline, and refreshes MIDI mapping.
+    score->undo(new ChangeInstrument(ic, new Instrument(changed)));
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveInstrumentChange(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveInstrumentChange: unknown or missing part_id";
+        return false;
+    }
+
+    const Fraction tick = beatToTick(op["beat"].toObject());
+    const track_idx_t track = part->trackRange().startTrack;
+
+    Segment* seg = score->tick2segment(tick, false, SegmentType::ChordRest);
+    if (!seg) {
+        LOGW() << "[editude] applyRemoveInstrumentChange: no segment at coordinate";
+        return false;
+    }
+
+    EngravingItem* target = nullptr;
+    for (EngravingItem* e : seg->annotations()) {
+        if (e && e->type() == ElementType::INSTRUMENT_CHANGE && e->track() == track) {
+            target = e;
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveInstrumentChange: none found at coordinate";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Remove instrument change"));
+    score->undoRemoveElement(target);
+    score->endCmd();
+    return true;
+}
 
 bool ScoreApplicator::applyAddVibratoLine(Score* score, const QJsonObject& op)
 {

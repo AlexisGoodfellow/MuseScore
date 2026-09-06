@@ -29,6 +29,8 @@
 #include "engraving/dom/arpeggio.h"
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/fingering.h"
+#include "engraving/dom/instrchange.h"
+#include "engraving/editing/editinstrumentchange.h"
 #include "engraving/dom/vibrato.h"
 #include "engraving/dom/letring.h"
 #include "engraving/dom/palmmute.h"
@@ -197,6 +199,7 @@ EditudeTestActions::Reply EditudeTestActions::dispatchAction(const QJsonObject& 
     if (action == QLatin1String("remove_glissando"))     return actionRemoveGlissando(body);
     if (action == QLatin1String("add_guitar_bend"))      return actionAddGuitarBend(body);
     if (action == QLatin1String("remove_guitar_bend"))   return actionRemoveGuitarBend(body);
+    if (action == QLatin1String("add_instrument_change"))return actionAddInstrumentChange(body);
     if (action == QLatin1String("add_vibrato_line"))    return actionAddVibratoLine(body);
     if (action == QLatin1String("add_let_ring"))        return actionAddLetRing(body);
     if (action == QLatin1String("add_palm_mute"))       return actionAddPalmMute(body);
@@ -856,6 +859,7 @@ QJsonObject EditudeTestActions::serializePart(Part* part)
         { "glissandos",    serializePartGlissandos(part) },
         { "guitar_bends",  serializePartGuitarBends(part) },
         { "pedal_lines",   serializePartPedalLines(part) },
+        { "instrument_changes", serializePartInstrumentChanges(part) },
         { "vibrato_lines", serializePartVibratoLines(part) },
         { "let_rings", serializePartLetRings(part) },
         { "palm_mutes", serializePartPalmMutes(part) },
@@ -1832,6 +1836,38 @@ QJsonObject EditudeTestActions::serializePartPalmMutes(Part* part)
             { "start_beat", beatJson(sp->tick()) },
             { "end_beat",   beatJson(sp->tick2()) },
         };
+    }
+    return result;
+}
+
+QJsonObject EditudeTestActions::serializePartInstrumentChanges(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    int index = 0;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(SegmentType::ChordRest); seg;
+             seg = seg->next(SegmentType::ChordRest)) {
+            for (EngravingItem* e : seg->annotations()) {
+                if (!e || e->type() != ElementType::INSTRUMENT_CHANGE) {
+                    continue;
+                }
+                if (e->track() < part->trackRange().startTrack
+                    || e->track() >= part->trackRange().endTrack) {
+                    continue;
+                }
+                auto* ic = static_cast<InstrumentChange*>(e);
+                const Instrument* instr = ic->instrument();
+                result[QString::number(index++)] = QJsonObject{
+                    { "beat", beatJson(seg->tick()) },
+                    { "instrument", QJsonObject{
+                          { "musescore_id", instr ? instr->id().toQString() : QString() },
+                          { "name",         instr ? instr->longName().toQString() : QString() },
+                          { "short_name",   instr ? instr->shortName().toQString() : QString() },
+                      } },
+                };
+            }
+        }
     }
     return result;
 }
@@ -3800,6 +3836,55 @@ EditudeTestActions::Reply EditudeTestActions::actionRemoveGuitarBend(const QJson
 // ---------------------------------------------------------------------------
 // Advanced spanners -- pedal lines (coordinate-addressed)
 // ---------------------------------------------------------------------------
+
+EditudeTestActions::Reply EditudeTestActions::actionAddInstrumentChange(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject beatObj = body["beat"].toObject();
+    const Fraction tick(beatObj["numerator"].toInt(), beatObj["denominator"].toInt());
+    const QJsonObject instr = body["instrument"].toObject();
+    if (instr.isEmpty()) {
+        return errorResponse(422, "instrument required");
+    }
+
+    ChordRest* cr = findChordRestAtCoord(score, part, tick,
+                                         body.value("voice").toInt(1),
+                                         body.value("staff").toInt(0));
+    if (!cr) {
+        return errorResponse(404, "no chordrest at coordinate");
+    }
+
+    score->startCmd(TranslatableString("test", "add instrument change"));
+    // The one-argument factory leaves m_instrument null, and setInstrument()
+    // writes through that pointer; construct with the instrument instead.
+    Instrument changed;
+    changed.setId(String(instr["musescore_id"].toString()));
+    changed.setLongName(String(instr["name"].toString()));
+    changed.setShortName(String(instr["short_name"].toString()));
+
+    InstrumentChange* ic = Factory::createInstrumentChange(score->dummy()->segment(), changed);
+    ic->setTrack(part->trackRange().startTrack);
+    ic->setXmlText(instr["name"].toString());
+    cr->undoAddAnnotation(ic);
+    // Attaching the element leaves it pointing at the staff's instrument for
+    // that tick. ChangeInstrument is MuseScore's undoable command for the
+    // switch: it sets the instrument on both the element and the part's
+    // timeline, and refreshes MIDI mapping.
+    score->undo(new ChangeInstrument(ic, new Instrument(changed)));
+    score->endCmd();
+
+    return okResponse();
+}
 
 EditudeTestActions::Reply EditudeTestActions::actionAddVibratoLine(const QJsonObject& body)
 {

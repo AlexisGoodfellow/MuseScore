@@ -30,6 +30,7 @@
 #include "engraving/dom/arpeggio.h"
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/fingering.h"
+#include "engraving/dom/instrchange.h"
 #include "engraving/dom/vibrato.h"
 #include "engraving/dom/letring.h"
 #include "engraving/dom/palmmute.h"
@@ -1830,6 +1831,28 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 }
             }
             ops.append(buildRemoveArticulation(art, artPartUuid, anchorNote));
+        }
+    }
+
+    // Instrument changes
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::INSTRUMENT_CHANGE) {
+            continue;
+        }
+        if (claimed.contains(obj)) continue;
+        auto* ic = static_cast<InstrumentChange*>(obj);
+        Part* icPart = static_cast<EngravingItem*>(ic)->part();
+        if (!icPart) {
+            icPart = resolvePartFromTrack(ic->track(), m_knownPartUuids);
+        }
+        if (!icPart) continue;
+        const QString icPartUuid = resolvePartUuid(icPart, lazyAddPartOps);
+        if (icPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            ops.append(buildAddInstrumentChange(ic, icPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            ops.append(buildRemoveInstrumentChange(icPartUuid, ic->tick()));
         }
     }
 
@@ -3918,6 +3941,35 @@ QJsonObject OperationTranslator::buildRemoveGuitarBend(EngravingObject* bendObj,
 // ---------------------------------------------------------------------------
 // Advanced spanners — pedal lines (part-scoped, beat-range)
 // ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddInstrumentChange(EngravingObject* ic,
+                                                          const QString& partId)
+{
+    auto* change = static_cast<InstrumentChange*>(ic);
+    const Instrument* instr = change->instrument();
+
+    QJsonObject instrJson;
+    instrJson["musescore_id"] = instr ? instr->id().toQString() : QString();
+    instrJson["name"]         = instr ? instr->longName().toQString() : QString();
+    instrJson["short_name"]   = instr ? instr->shortName().toQString() : QString();
+
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("AddInstrumentChange");
+    payload["part_id"]    = partId;
+    payload["beat"]       = beatJson(change->tick());
+    payload["instrument"] = instrJson;
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveInstrumentChange(const QString& partId,
+                                                              const Fraction& tick)
+{
+    QJsonObject payload;
+    payload["type"]    = QStringLiteral("RemoveInstrumentChange");
+    payload["part_id"] = partId;
+    payload["beat"]    = beatJson(tick);
+    return payload;
+}
 
 QJsonObject OperationTranslator::buildAddVibratoLine(EngravingObject* sp,
                                                  const QString& partId)

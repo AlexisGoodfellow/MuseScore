@@ -240,6 +240,10 @@ private:
                                               const QString& partId);
 
     // Advanced spanners — pedal lines.
+    static QJsonObject buildAddInstrumentChange(mu::engraving::EngravingObject* ic,
+                                               const QString& partId);
+    static QJsonObject buildRemoveInstrumentChange(const QString& partId,
+                                                   const mu::engraving::Fraction& tick);
     static QJsonObject buildAddVibratoLine(mu::engraving::EngravingObject* sp,
                                    const QString& partId);
     static QJsonObject buildRemoveVibratoLine(const QString& partId,

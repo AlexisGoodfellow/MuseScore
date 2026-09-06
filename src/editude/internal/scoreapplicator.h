@@ -153,6 +153,8 @@ private:
     bool applyAddGuitarBend(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveGuitarBend(mu::engraving::Score* score, const QJsonObject& payload);
     // Advanced spanners — pedal lines
+    bool applyAddInstrumentChange(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveInstrumentChange(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyAddVibratoLine(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveVibratoLine(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyAddLetRing(mu::engraving::Score* score, const QJsonObject& payload);
