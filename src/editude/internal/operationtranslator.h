@@ -128,6 +128,9 @@ private:
                                                mu::engraving::Part* part);
 
     // Tier 3 builders — coordinate-addressed.
+    static QJsonObject buildFingering(mu::engraving::EngravingObject* fing,
+                                      const QString& partId,
+                                      bool remove);
     static QJsonObject buildAddArticulation(mu::engraving::EngravingObject* art,
                                             const QString& partId,
                                             mu::engraving::Note* note);

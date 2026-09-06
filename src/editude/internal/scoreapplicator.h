@@ -96,6 +96,8 @@ private:
     bool applySetNoteHead(mu::engraving::Score* score, const QJsonObject& payload);
 
     // Tier 3 — articulations
+    bool applyAddFingering(mu::engraving::Score* score, const QJsonObject& payload);
+    bool applyRemoveFingering(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyAddArticulation(mu::engraving::Score* score, const QJsonObject& payload);
     bool applyRemoveArticulation(mu::engraving::Score* score, const QJsonObject& payload);
 

@@ -80,6 +80,25 @@ void AppShellContext::resolveImports()
         ar->reg(m_applicationUiActions);
     }
 }
+
+void AppShellContext::onPreInit(const muse::IApplication::RunMode& mode)
+{
+    if (mode == IApplication::RunMode::AudioPluginRegistration) {
+        return;
+    }
+
+    m_applicationActionController->preInit();
+}
+
+void AppShellContext::onInit(const muse::IApplication::RunMode& mode)
+{
+    if (mode == IApplication::RunMode::AudioPluginRegistration) {
+        return;
+    }
+
+    m_applicationActionController->init();
+    m_applicationUiActions->init();
+}
 // [/editude]
 
 void AppShellModule::resolveImports()
@@ -105,11 +124,7 @@ void AppShellModule::registerUiTypes()
 
 void AppShellModule::onPreInit(const IApplication::RunMode& mode)
 {
-    if (mode == IApplication::RunMode::AudioPluginRegistration) {
-        return;
-    }
-
-    m_applicationActionController->preInit();
+    UNUSED(mode);
 }
 
 void AppShellModule::onInit(const IApplication::RunMode& mode)
@@ -119,8 +134,6 @@ void AppShellModule::onInit(const IApplication::RunMode& mode)
     }
 
     m_appShellConfiguration->init();
-    m_applicationActionController->init();
-    m_applicationUiActions->init();
 }
 
 void AppShellModule::onAllInited(const IApplication::RunMode& mode)

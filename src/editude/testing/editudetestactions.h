@@ -80,6 +80,8 @@ private:
     Reply actionRemoveChordSymbol(const QJsonObject& body);
 
     // Tier 3 — articulations
+    Reply actionAddFingering(const QJsonObject& body);
+    Reply actionRemoveFingering(const QJsonObject& body);
     Reply actionAddArticulation(const QJsonObject& body);
     Reply actionRemoveArticulation(const QJsonObject& body);
 
@@ -192,6 +194,7 @@ private:
                               const mu::engraving::Fraction& tick,
                               int voice, int staff);
     QJsonObject serializePartArticulations(mu::engraving::Part* part);
+    QJsonObject serializePartFingerings(mu::engraving::Part* part);
     QJsonObject serializePartTuplets(mu::engraving::Part* part);
     QJsonObject serializePartArpeggios(mu::engraving::Part* part);
     QJsonObject serializePartGraceNotes(mu::engraving::Part* part);

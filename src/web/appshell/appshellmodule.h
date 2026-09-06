@@ -55,8 +55,6 @@ public:
     void onDeinit() override;
 
 private:
-    std::shared_ptr<ApplicationActionController> m_applicationActionController;
-    std::shared_ptr<ApplicationUiActions> m_applicationUiActions;
     std::shared_ptr<AppShellConfiguration> m_appShellConfiguration;
 };
 
@@ -70,6 +68,8 @@ public:
 
     void registerExports() override;
     void resolveImports() override;
+    void onPreInit(const muse::IApplication::RunMode& mode) override;
+    void onInit(const muse::IApplication::RunMode& mode) override;
 
 private:
     std::shared_ptr<ApplicationActionController> m_applicationActionController;

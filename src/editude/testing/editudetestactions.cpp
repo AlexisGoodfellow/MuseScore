@@ -28,6 +28,7 @@
 
 #include "engraving/dom/arpeggio.h"
 #include "engraving/dom/articulation.h"
+#include "engraving/dom/fingering.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/clef.h"
 #include "engraving/dom/drumset.h"
@@ -176,6 +177,8 @@ EditudeTestActions::Reply EditudeTestActions::dispatchAction(const QJsonObject& 
     if (action == QLatin1String("add_chord_symbol"))    return actionAddChordSymbol(body);
     if (action == QLatin1String("set_chord_symbol"))    return actionSetChordSymbol(body);
     if (action == QLatin1String("remove_chord_symbol")) return actionRemoveChordSymbol(body);
+    if (action == QLatin1String("add_fingering"))       return actionAddFingering(body);
+    if (action == QLatin1String("remove_fingering"))    return actionRemoveFingering(body);
     if (action == QLatin1String("add_articulation"))    return actionAddArticulation(body);
     if (action == QLatin1String("remove_articulation")) return actionRemoveArticulation(body);
     if (action == QLatin1String("add_dynamic"))         return actionAddDynamic(body);
@@ -839,6 +842,7 @@ QJsonObject EditudeTestActions::serializePart(Part* part)
         { "clef_changes", serializePartClefChanges(part) },
         { "key_changes",  serializePartKeyChanges(part) },
         { "articulations", serializePartArticulations(part) },
+        { "fingerings", serializePartFingerings(part) },
         { "dynamics",      serializePartDynamics(part) },
         { "slurs",         serializePartSlurs(part) },
         { "hairpins",      serializePartHairpins(part) },
@@ -1181,6 +1185,57 @@ EditudeTestActions::Reply EditudeTestActions::actionSetStaffCount(const QJsonObj
 
 // articulationNameFromSymId, dynamicKindName, markerKindName are defined
 // inline in internal/editudeutils.h (shared with operationtranslator.cpp).
+
+QJsonObject EditudeTestActions::serializePartFingerings(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    int index = 0;
+    for (Measure* m = score->firstMeasure(); m; m = m->nextMeasure()) {
+        for (Segment* seg = m->first(SegmentType::ChordRest); seg;
+             seg = seg->next(SegmentType::ChordRest)) {
+            for (track_idx_t track = part->trackRange().startTrack;
+                 track < part->trackRange().endTrack; ++track) {
+                EngravingItem* el = seg->element(track);
+                if (!el || !el->isChord()) {
+                    continue;
+                }
+                Chord* chord = toChord(el);
+                const int voice = voiceFromTrack(part, track);
+                const int staff = staffFromTrack(part, track);
+                // Fingering hangs off the Note, so walk notes rather than the
+                // chord: each note carries its own mark.
+                for (Note* note : chord->notes()) {
+                    for (EngravingItem* attached : note->el()) {
+                        if (!attached || attached->type() != ElementType::FINGERING) {
+                            continue;
+                        }
+                        auto* fing = static_cast<Fingering*>(attached);
+                        QJsonObject entry;
+                        entry["beat"]  = beatJson(seg->tick());
+                        entry["voice"] = voice;
+                        entry["staff"] = staff;
+                        entry["pitch"] = pitchJson(note);
+                        entry["text"]  = fing->xmlText().toQString();
+                        switch (fing->textStyleType()) {
+                        case TextStyleType::RH_GUITAR_FINGERING:
+                            entry["fingering_type"] = QStringLiteral("rh_guitar");
+                            break;
+                        case TextStyleType::STRING_NUMBER:
+                            entry["fingering_type"] = QStringLiteral("string_number");
+                            break;
+                        default:
+                            entry["fingering_type"] = QStringLiteral("standard");
+                            break;
+                        }
+                        result[QString::number(index++)] = entry;
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
 
 QJsonObject EditudeTestActions::serializePartArticulations(Part* part)
 {
@@ -2150,6 +2205,104 @@ EditudeTestActions::Reply EditudeTestActions::actionSetNoteHead(const QJsonObjec
     score->startCmd(TranslatableString("test", "set note head"));
     note->undoChangeProperty(Pid::HEAD_GROUP, int(headGroup));
     score->endCmd();
+    return okResponse();
+}
+
+// Resolve the note a fingering action addresses, or report why not.
+static mu::engraving::Note* fingeringAnchor(mu::engraving::Score* score,
+                                            mu::engraving::Part* part,
+                                            const QJsonObject& body)
+{
+    const QJsonObject beatObj  = body["beat"].toObject();
+    const QJsonObject pitchObj = body["pitch"].toObject();
+    const mu::engraving::Fraction tick(beatObj["numerator"].toInt(),
+                                       beatObj["denominator"].toInt());
+    const int midi = ScoreApplicator::pitchToMidi(pitchObj["step"].toString(),
+                                                  pitchObj["octave"].toInt(),
+                                                  pitchObj["accidental"].toString());
+    if (midi < 0 || midi > 127) {
+        return nullptr;
+    }
+    const int voice = body.value("voice").toInt(1);
+    const int staff = body.value("staff").toInt(0);
+    return findNoteAtCoord(score, part, tick, midi, voice, staff);
+}
+
+EditudeTestActions::Reply EditudeTestActions::actionAddFingering(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    Note* note = fingeringAnchor(score, part, body);
+    if (!note) {
+        return errorResponse(404, "note not found at coordinate");
+    }
+
+    const QString kind = body.value("fingering_type").toString(QStringLiteral("standard"));
+    TextStyleType styleType = TextStyleType::FINGERING;
+    if (kind == QLatin1String("rh_guitar")) {
+        styleType = TextStyleType::RH_GUITAR_FINGERING;
+    } else if (kind == QLatin1String("string_number")) {
+        styleType = TextStyleType::STRING_NUMBER;
+    }
+
+    LOGW() << "[editude-test] actionAddFingering: note found, style=" << static_cast<int>(styleType)
+           << "text=" << body["text"].toString();
+
+    score->startCmd(TranslatableString("test", "add fingering"));
+    Fingering* fing = Factory::createFingering(note, styleType);
+    fing->setXmlText(body["text"].toString());
+    fing->setOwnershipParent(note);
+    fing->setTrack(note->track());
+    score->undoAddElement(fing);
+    score->endCmd();
+
+    int attached = 0;
+    for (EngravingItem* e : note->el()) {
+        if (e && e->type() == ElementType::FINGERING) ++attached;
+    }
+    LOGW() << "[editude-test] actionAddFingering: attached fingerings now=" << attached;
+
+    return okResponse();
+}
+
+EditudeTestActions::Reply EditudeTestActions::actionRemoveFingering(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+    Part* part = resolvePartFromBody(body, m_svc);
+    if (!part) {
+        return errorResponse(422, "part_id not found");
+    }
+
+    Note* note = fingeringAnchor(score, part, body);
+    if (!note) {
+        return errorResponse(404, "note not found at coordinate");
+    }
+
+    EngravingItem* target = nullptr;
+    for (EngravingItem* e : note->el()) {
+        if (e && e->type() == ElementType::FINGERING) {
+            target = e;
+            break;
+        }
+    }
+    if (!target) {
+        return errorResponse(404, "no fingering on note");
+    }
+
+    score->startCmd(TranslatableString("test", "remove fingering"));
+    score->undoRemoveElement(target);
+    score->endCmd();
+
     return okResponse();
 }
 

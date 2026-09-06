@@ -29,6 +29,7 @@
 #include "engraving/dom/accidental.h"
 #include "engraving/dom/arpeggio.h"
 #include "engraving/dom/articulation.h"
+#include "engraving/dom/fingering.h"
 #include "engraving/dom/breath.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
@@ -923,6 +924,15 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 }
                 break;
             }
+            case ElementType::FINGERING: {
+                auto* fing = static_cast<Fingering*>(obj);
+                Note* anchor = fing->note();
+                isSideEffect = isAnchorRemoved(anchor);
+                if (!isSideEffect && anchor && anchor->chord()) {
+                    isSideEffect = isInDeletedRange(anchor->chord()->tick());
+                }
+                break;
+            }
             case ElementType::DYNAMIC: {
                 auto* dyn = static_cast<Dynamic*>(obj);
                 isSideEffect = isInDeletedRange(dyn->tick());
@@ -1741,6 +1751,30 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 ops.append(payload);
             }
         }
+    }
+
+    // Fingerings — parented to a Note, so the note itself is the anchor.
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::FINGERING) {
+            continue;
+        }
+        if (claimed.contains(obj)) continue;
+        auto* fing = static_cast<Fingering*>(obj);
+        const bool isRemove = cmds.count(CommandType::RemoveElement) > 0;
+        if (!isRemove && !cmds.count(CommandType::AddElement)) continue;
+
+        Note* note = fing->note();
+        Chord* chord = note ? note->chord() : nullptr;
+        if (!chord) continue;
+        Part* fPart = chord->staff() ? chord->staff()->part() : nullptr;
+        if (!fPart) {
+            fPart = resolvePartFromTrack(chord->track(), m_knownPartUuids);
+        }
+        if (!fPart) continue;
+        const QString fPartUuid = resolvePartUuid(fPart, lazyAddPartOps);
+        if (fPartUuid.isEmpty()) continue;
+
+        ops.append(buildFingering(fing, fPartUuid, isRemove));
     }
 
     // Articulations
@@ -3066,6 +3100,44 @@ QJsonObject OperationTranslator::buildSetTie(Note* note, const QString& partId, 
 // ---------------------------------------------------------------------------
 // Tier 3 builders — articulations (coordinate-addressed)
 // ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildFingering(EngravingObject* fing,
+                                                 const QString& partId,
+                                                 bool remove)
+{
+    auto* f = static_cast<Fingering*>(fing);
+    Note* note = f->note();
+    Chord* chord = note ? note->chord() : nullptr;
+    Part* part = chord && chord->staff() ? chord->staff()->part() : nullptr;
+
+    QJsonObject payload;
+    payload["type"]    = remove ? QStringLiteral("RemoveFingering")
+                                : QStringLiteral("AddFingering");
+    payload["part_id"] = partId;
+    payload["beat"]    = beatJson(chord ? chord->tick() : Fraction());
+    payload["voice"]   = part && chord ? voiceFromTrack(part, chord->track()) : 1;
+    payload["staff"]   = part && chord ? staffFromTrack(part, chord->track()) : 0;
+    if (note) {
+        payload["pitch"] = pitchJsonFromNote(note);
+    }
+    if (!remove) {
+        payload["text"] = f->xmlText().toQString();
+        // The style is what distinguishes a keyboard digit from a guitar
+        // p/i/m/a or a circled string number, so it has to cross the wire.
+        switch (f->textStyleType()) {
+        case TextStyleType::RH_GUITAR_FINGERING:
+            payload["fingering_type"] = QStringLiteral("rh_guitar");
+            break;
+        case TextStyleType::STRING_NUMBER:
+            payload["fingering_type"] = QStringLiteral("string_number");
+            break;
+        default:
+            payload["fingering_type"] = QStringLiteral("standard");
+            break;
+        }
+    }
+    return payload;
+}
 
 QJsonObject OperationTranslator::buildAddArticulation(EngravingObject* art,
                                                        const QString& partId,

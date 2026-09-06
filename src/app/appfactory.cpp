@@ -326,7 +326,14 @@ std::shared_ptr<muse::IApplication> AppFactory::newGuiApp(const std::shared_ptr<
     app->addModule(new muse::accessibility::AccessibilityModule());
     app->addModule(new muse::actions::ActionsModule());
     app->addModule(new muse::rcommand::RCommandModule());
+    // [editude] Upstream registers rcontrol unconditionally, unlike every
+    // other optional module here. Its MCP server calls QTcpServer::listen at
+    // init, so the web build must leave it out — and without this guard the
+    // link fails on the module's vtable when MUSE_MODULE_RCONTROL is OFF.
+#ifdef MUSE_MODULE_RCONTROL
     app->addModule(new muse::rcontrol::RControlModule());
+#endif
+    // [/editude]
     app->addModule(new muse::audio::AudioModule());
 #ifdef MUSE_MODULE_AUDIOPLUGINS
     app->addModule(new muse::audioplugins::AudioPluginsModule());
@@ -481,7 +488,14 @@ static void addConsoleModules(std::shared_ptr<MuseScoreConsoleApp> app)
     // framework
     app->addModule(new muse::actions::ActionsModule());
     app->addModule(new muse::rcommand::RCommandModule());
+    // [editude] Upstream registers rcontrol unconditionally, unlike every
+    // other optional module here. Its MCP server calls QTcpServer::listen at
+    // init, so the web build must leave it out — and without this guard the
+    // link fails on the module's vtable when MUSE_MODULE_RCONTROL is OFF.
+#ifdef MUSE_MODULE_RCONTROL
     app->addModule(new muse::rcontrol::RControlModule());
+#endif
+    // [/editude]
     app->addModule(new muse::audio::AudioModule());
 #ifdef MUSE_MODULE_AUDIOPLUGINS
     app->addModule(new muse::audioplugins::AudioPluginsModule());

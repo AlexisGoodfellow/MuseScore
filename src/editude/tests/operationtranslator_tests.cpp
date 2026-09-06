@@ -26,6 +26,8 @@
 #include "editude/internal/operationtranslator.h"
 #include "editude/internal/scoreapplicator.h"
 #include "engraving/dom/articulation.h"
+#include "engraving/dom/fingering.h"
+#include "engraving/dom/factory.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/dynamic.h"
@@ -1373,4 +1375,52 @@ TEST_F(Editude_OperationTranslatorTests, setScoreMetadata_unmappedTag_usesTagNam
     ASSERT_EQ(ops.size(), 1);
     EXPECT_EQ(ops[0]["field"].toString(), "customProjectCode");
     EXPECT_EQ(ops[0]["value"].toString(), "PROJ-42");
+}
+
+// ---------------------------------------------------------------------------
+// Fingering (ROADMAP #50)
+// ---------------------------------------------------------------------------
+
+TEST_F(Editude_OperationTranslatorTests, addFingering_onNote_emitsAddFingering)
+{
+    MasterScore* score = ScoreRW::readScore(DATA_DIR + u"empty_measure.mscx");
+    ASSERT_TRUE(score);
+
+    ScoreApplicator applicator;
+    ASSERT_TRUE(registerTestPart(applicator, score));
+    const QString uuid = applyRemoteInsertNote(applicator, score);
+    ASSERT_FALSE(uuid.isEmpty());
+
+    Segment* seg = score->tick2segment(Fraction(0, 4), false, SegmentType::ChordRest);
+    ASSERT_TRUE(seg);
+    Note* note = toChord(seg->cr(0))->notes().front();
+    ASSERT_TRUE(note);
+
+    score->startCmd(TranslatableString("undoableAction", "Add fingering"));
+    Fingering* fing = Factory::createFingering(note, TextStyleType::FINGERING);
+    fing->setXmlText(QStringLiteral("3"));
+    fing->setOwnershipParent(note);
+    fing->setTrack(note->track());
+    score->undoAddElement(fing);
+    score->endCmd();
+
+    EXPECT_EQ(static_cast<int>(fing->type()), static_cast<int>(ElementType::FINGERING));
+    EXPECT_TRUE(fing->note() != nullptr) << "ownershipParent is not the note";
+    if (fing->note()) {
+        EXPECT_TRUE(fing->note()->chord() != nullptr);
+        EXPECT_TRUE(fing->note()->chord()->staff() != nullptr) << "no staff";
+    }
+
+    ChangedMap changed = { { fing, { CommandType::AddElement } } };
+    auto translator = makeTranslator(score);
+    const auto ops = translator.translateAll(changed, {});
+
+    ASSERT_EQ(ops.size(), 1);
+    EXPECT_EQ(ops[0]["type"].toString(), "AddFingering");
+    EXPECT_EQ(ops[0]["part_id"].toString(), PART_ID);
+    EXPECT_EQ(ops[0]["text"].toString(), "3");
+    EXPECT_EQ(ops[0]["fingering_type"].toString(), "standard");
+    EXPECT_EQ(ops[0]["pitch"].toObject()["step"].toString(), "C");
+
+    delete score;
 }

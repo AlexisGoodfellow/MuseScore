@@ -872,6 +872,20 @@ bool ProjectActionsController::closeOpenedProject(bool goToHome)
 
 IInteractive::Button ProjectActionsController::askAboutSavingScore(INotationProjectPtr project)
 {
+    // [editude] This platform has no synchronous dialogs, so the question
+    // cannot be put to the user at all. Asking anyway is worse than not
+    // asking: openStandardSync reports the failure as Button::Cancel, which
+    // the caller cannot tell from a real cancel, so the close is refused and
+    // the session strands — the next openProject returns a null score. In an
+    // editude session the server holds the authoritative score and the local
+    // .mscz is a bootstrap artifact, so proceed without saving.
+#ifndef MUSE_MODULE_INTERACTIVE_SYNC_SUPPORTED
+    LOGI() << "[editude] no synchronous dialogs on this platform; "
+              "closing without saving";
+    return IInteractive::Button::DontSave;
+#endif
+    // [/editude]
+
     std::string title = muse::qtrc("project", "Do you want to save changes to the score “%1” before closing?")
                         .arg(project->displayName()).toStdString();
 
@@ -882,6 +896,7 @@ IInteractive::Button ProjectActionsController::askAboutSavingScore(INotationProj
         IInteractive::Button::Cancel,
         IInteractive::Button::Save
     }, IInteractive::Button::Save);
+
 
     return result.standardButton();
 }

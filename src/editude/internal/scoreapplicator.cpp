@@ -39,6 +39,7 @@
 #include "engraving/dom/segment.h"
 #include "engraving/dom/staff.h"
 #include "engraving/dom/articulation.h"
+#include "engraving/dom/fingering.h"
 #include "engraving/types/propertyvalue.h"
 #include "engraving/dom/clef.h"
 #include "engraving/dom/dynamic.h"
@@ -1266,6 +1267,8 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("SetNoteHead"))        return applySetNoteHead(score, payload);
 
     // Tier 3 — articulations
+    if (type == QLatin1String("AddFingering"))       return applyAddFingering(score, payload);
+    if (type == QLatin1String("RemoveFingering"))    return applyRemoveFingering(score, payload);
     if (type == QLatin1String("AddArticulation"))    return applyAddArticulation(score, payload);
     if (type == QLatin1String("RemoveArticulation")) return applyRemoveArticulation(score, payload);
 
@@ -1444,6 +1447,107 @@ static SymId articulationSymId(const QString& name)
         return mapped;
     }
     return SymNames::symIdByName(name.toUtf8().constData());
+}
+
+// ---------------------------------------------------------------------------
+// Fingering
+// ---------------------------------------------------------------------------
+
+// MuseScore parents Fingering to a Note rather than a ChordRest, so two notes
+// of one chord carry independent marks and the pitch is part of the address.
+static mu::engraving::TextStyleType fingeringTextStyle(const QString& kind)
+{
+    using mu::engraving::TextStyleType;
+    if (kind == QLatin1String("rh_guitar")) {
+        return TextStyleType::RH_GUITAR_FINGERING;
+    }
+    if (kind == QLatin1String("string_number")) {
+        return TextStyleType::STRING_NUMBER;
+    }
+    return TextStyleType::FINGERING;
+}
+
+bool ScoreApplicator::applyAddFingering(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddFingering: unknown or missing part_id";
+        return false;
+    }
+
+    const QJsonObject beat  = op["beat"].toObject();
+    const QJsonObject pitch = op["pitch"].toObject();
+    const Fraction tick = beatToTick(beat);
+    const int midi = pitchToMidi(pitch["step"].toString(),
+                                 pitch["octave"].toInt(),
+                                 pitch["accidental"].toString());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+
+    if (midi < 0 || midi > 127) {
+        LOGW() << "[editude] applyAddFingering: invalid pitch";
+        return false;
+    }
+
+    Note* note = findNoteAtCoord(score, part, tick, midi, voice, stf);
+    if (!note) {
+        LOGW() << "[editude] applyAddFingering: note not found at coordinate";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Add fingering"));
+    Fingering* fing = Factory::createFingering(
+        note, fingeringTextStyle(op["fingering_type"].toString()));
+    fing->setXmlText(op["text"].toString());
+    // Factory parks the element on a dummy; the real parent must be set
+    // explicitly or Fingering::note() stays null and the translator emits
+    // nothing for the round trip.
+    fing->setOwnershipParent(note);
+    fing->setTrack(note->track());
+    score->undoAddElement(fing);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveFingering(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveFingering: unknown or missing part_id";
+        return false;
+    }
+
+    const QJsonObject beat  = op["beat"].toObject();
+    const QJsonObject pitch = op["pitch"].toObject();
+    const Fraction tick = beatToTick(beat);
+    const int midi = pitchToMidi(pitch["step"].toString(),
+                                 pitch["octave"].toInt(),
+                                 pitch["accidental"].toString());
+    const int voice = opVoice(op);
+    const int stf   = opStaff(op);
+
+    Note* note = findNoteAtCoord(score, part, tick, midi, voice, stf);
+    if (!note) {
+        LOGW() << "[editude] applyRemoveFingering: note not found at coordinate";
+        return false;
+    }
+
+    EngravingItem* target = nullptr;
+    for (EngravingItem* e : note->el()) {
+        if (e && e->type() == ElementType::FINGERING) {
+            target = e;
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveFingering: no fingering on note";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Remove fingering"));
+    score->undoRemoveElement(target);
+    score->endCmd();
+    return true;
 }
 
 bool ScoreApplicator::applyAddArticulation(Score* score, const QJsonObject& op)
