@@ -44,6 +44,12 @@ target_sources(editude PRIVATE
 # so editudemodule.h and editudeservice.cpp can include them by short name.
 target_include_directories(editude PRIVATE qml/Editude)
 
+# [editude] The release version the client reports when opening a session. The
+# server accepts its own major and one behind; see
+# adr/2026-09-06-release-versioning-and-upgrades.md. `just release` verifies
+# this matches shared/shared/version.py.
+target_compile_definitions(editude PRIVATE EDITUDE_VERSION="1.0.0")
+
 if(APPLE)
     target_sources(editude PRIVATE
         internal/platform/macos/appnap.h

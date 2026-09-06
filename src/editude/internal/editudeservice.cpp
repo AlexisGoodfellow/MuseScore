@@ -803,6 +803,9 @@ void EditudeService::onConnected()
     QJsonObject msg;
     msg["type"] = "auth";
     msg["token"] = m_token;
+    // The server refuses a client it cannot talk to, and cannot identify one
+    // that says nothing; see the release/versioning ADR.
+    msg["client_version"] = QStringLiteral(EDITUDE_VERSION);
     m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
 }
 
@@ -810,6 +813,18 @@ void EditudeService::onServerMessage(const QString& text)
 {
     const QJsonObject msg = QJsonDocument::fromJson(text.toUtf8()).object();
     const QString type = msg.value("type").toString();
+
+    if (type == "upgrade_required") {
+        // The server speaks a protocol this build does not. Say so loudly:
+        // the alternative is a session that looks connected while dropping
+        // edits, which is far harder to diagnose from a user report.
+        LOGE() << "[editude] server rejected this client as out of date: "
+               << msg.value("detail").toString()
+               << " (client " << QStringLiteral(EDITUDE_VERSION)
+               << ", server " << msg.value("server_version").toString() << ")";
+        m_state = State::Incompatible;
+        return;
+    }
 
     if (type == "auth_ok") {
         if (m_state == State::Live) {
@@ -1590,6 +1605,7 @@ void EditudeService::onTokenRefreshTimer()
                 QJsonObject msg;
                 msg["type"]  = "auth";
                 msg["token"] = m_token;
+                msg["client_version"] = QStringLiteral(EDITUDE_VERSION);
                 m_socket->sendTextMessage(QJsonDocument(msg).toJson(QJsonDocument::Compact));
             }
         }
@@ -1598,7 +1614,7 @@ void EditudeService::onTokenRefreshTimer()
 
 void EditudeService::onDisconnected()
 {
-    if (m_state == State::Disconnected) {
+    if (m_state == State::Disconnected || m_state == State::Incompatible) {
         return;
     }
     LOGD() << "[editude] WS disconnected; attempt" << m_reconnectAttempt;

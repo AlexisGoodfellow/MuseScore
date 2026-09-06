@@ -125,7 +125,10 @@ protected:
 
 private:
     class RemoteApplyGuard;  // RAII guard for m_applyingRemote (defined in .cpp)
-    enum class State { Disconnected, Authenticating, Joining, Live, Reconnecting };
+    // [editude] Incompatible is terminal: the server has refused this build's
+    // version, so reconnecting would spin against a server that will never
+    // accept it. See adr/2026-09-06-release-versioning-and-upgrades.md.
+    enum class State { Disconnected, Authenticating, Joining, Live, Reconnecting, Incompatible };
 
     void onConnected();
     void onServerMessage(const QString& msg);
