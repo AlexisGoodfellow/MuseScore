@@ -30,6 +30,9 @@
 #include "engraving/dom/arpeggio.h"
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/fingering.h"
+#include "engraving/dom/vibrato.h"
+#include "engraving/dom/letring.h"
+#include "engraving/dom/palmmute.h"
 #include "engraving/dom/breath.h"
 #include "engraving/dom/chord.h"
 #include "engraving/dom/chordrest.h"
@@ -909,6 +912,9 @@ QVector<QJsonObject> OperationTranslator::translateAll(
             case ElementType::HAIRPIN:
             case ElementType::PEDAL:
             case ElementType::OTTAVA:
+            case ElementType::VIBRATO:
+            case ElementType::LET_RING:
+            case ElementType::PALM_MUTE:
             case ElementType::TRILL: {
                 auto* sp = static_cast<Spanner*>(obj);
                 isSideEffect = isInDeletedRange(sp->tick())
@@ -2257,6 +2263,72 @@ QVector<QJsonObject> OperationTranslator::translateAll(
                 resolvePartUuid(bendPart, lazyAddPartOps);
             if (bendPartUuid.isEmpty()) continue;
             ops.append(buildRemoveGuitarBend(bend, bendPartUuid));
+        }
+    }
+
+    // VibratoLine
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::VIBRATO) {
+            continue;
+        }
+        if (claimed.contains(obj)) continue;
+        auto* sp = static_cast<Vibrato*>(obj);
+        Part* spPart = static_cast<EngravingItem*>(sp)->part();
+        if (!spPart) {
+            spPart = resolvePartFromTrack(sp->track(), m_knownPartUuids);
+        }
+        if (!spPart) continue;
+        const QString spPartUuid = resolvePartUuid(spPart, lazyAddPartOps);
+        if (spPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            ops.append(buildAddVibratoLine(sp, spPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            ops.append(buildRemoveVibratoLine(spPartUuid, sp->tick(), sp->tick2()));
+        }
+    }
+
+    // LetRing
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::LET_RING) {
+            continue;
+        }
+        if (claimed.contains(obj)) continue;
+        auto* sp = static_cast<LetRing*>(obj);
+        Part* spPart = static_cast<EngravingItem*>(sp)->part();
+        if (!spPart) {
+            spPart = resolvePartFromTrack(sp->track(), m_knownPartUuids);
+        }
+        if (!spPart) continue;
+        const QString spPartUuid = resolvePartUuid(spPart, lazyAddPartOps);
+        if (spPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            ops.append(buildAddLetRing(sp, spPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            ops.append(buildRemoveLetRing(spPartUuid, sp->tick(), sp->tick2()));
+        }
+    }
+
+    // PalmMute
+    for (const auto& [obj, cmds] : changedObjects) {
+        if (!obj || obj->type() != ElementType::PALM_MUTE) {
+            continue;
+        }
+        if (claimed.contains(obj)) continue;
+        auto* sp = static_cast<PalmMute*>(obj);
+        Part* spPart = static_cast<EngravingItem*>(sp)->part();
+        if (!spPart) {
+            spPart = resolvePartFromTrack(sp->track(), m_knownPartUuids);
+        }
+        if (!spPart) continue;
+        const QString spPartUuid = resolvePartUuid(spPart, lazyAddPartOps);
+        if (spPartUuid.isEmpty()) continue;
+
+        if (cmds.count(CommandType::AddElement)) {
+            ops.append(buildAddPalmMute(sp, spPartUuid));
+        } else if (cmds.count(CommandType::RemoveElement)) {
+            ops.append(buildRemovePalmMute(spPartUuid, sp->tick(), sp->tick2()));
         }
     }
 
@@ -3846,6 +3918,78 @@ QJsonObject OperationTranslator::buildRemoveGuitarBend(EngravingObject* bendObj,
 // ---------------------------------------------------------------------------
 // Advanced spanners — pedal lines (part-scoped, beat-range)
 // ---------------------------------------------------------------------------
+
+QJsonObject OperationTranslator::buildAddVibratoLine(EngravingObject* sp,
+                                                 const QString& partId)
+{
+    auto* s = static_cast<Vibrato*>(sp);
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("AddVibratoLine");
+    payload["part_id"]    = partId;
+    payload["start_beat"] = beatJson(s->tick());
+    payload["end_beat"]   = beatJson(s->tick2());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveVibratoLine(const QString& partId,
+                                                    const Fraction& startTick,
+                                                    const Fraction& endTick)
+{
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("RemoveVibratoLine");
+    payload["part_id"]    = partId;
+    payload["start_beat"] = beatJson(startTick);
+    payload["end_beat"]   = beatJson(endTick);
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildAddLetRing(EngravingObject* sp,
+                                                 const QString& partId)
+{
+    auto* s = static_cast<LetRing*>(sp);
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("AddLetRing");
+    payload["part_id"]    = partId;
+    payload["start_beat"] = beatJson(s->tick());
+    payload["end_beat"]   = beatJson(s->tick2());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemoveLetRing(const QString& partId,
+                                                    const Fraction& startTick,
+                                                    const Fraction& endTick)
+{
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("RemoveLetRing");
+    payload["part_id"]    = partId;
+    payload["start_beat"] = beatJson(startTick);
+    payload["end_beat"]   = beatJson(endTick);
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildAddPalmMute(EngravingObject* sp,
+                                                 const QString& partId)
+{
+    auto* s = static_cast<PalmMute*>(sp);
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("AddPalmMute");
+    payload["part_id"]    = partId;
+    payload["start_beat"] = beatJson(s->tick());
+    payload["end_beat"]   = beatJson(s->tick2());
+    return payload;
+}
+
+QJsonObject OperationTranslator::buildRemovePalmMute(const QString& partId,
+                                                    const Fraction& startTick,
+                                                    const Fraction& endTick)
+{
+    QJsonObject payload;
+    payload["type"]       = QStringLiteral("RemovePalmMute");
+    payload["part_id"]    = partId;
+    payload["start_beat"] = beatJson(startTick);
+    payload["end_beat"]   = beatJson(endTick);
+    return payload;
+}
 
 QJsonObject OperationTranslator::buildAddPedalLine(EngravingObject* pedal,
                                                      const QString& partId)

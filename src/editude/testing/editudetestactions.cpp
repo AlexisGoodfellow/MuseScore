@@ -29,6 +29,9 @@
 #include "engraving/dom/arpeggio.h"
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/fingering.h"
+#include "engraving/dom/vibrato.h"
+#include "engraving/dom/letring.h"
+#include "engraving/dom/palmmute.h"
 #include "engraving/dom/chordrest.h"
 #include "engraving/dom/clef.h"
 #include "engraving/dom/drumset.h"
@@ -194,6 +197,9 @@ EditudeTestActions::Reply EditudeTestActions::dispatchAction(const QJsonObject& 
     if (action == QLatin1String("remove_glissando"))     return actionRemoveGlissando(body);
     if (action == QLatin1String("add_guitar_bend"))      return actionAddGuitarBend(body);
     if (action == QLatin1String("remove_guitar_bend"))   return actionRemoveGuitarBend(body);
+    if (action == QLatin1String("add_vibrato_line"))    return actionAddVibratoLine(body);
+    if (action == QLatin1String("add_let_ring"))        return actionAddLetRing(body);
+    if (action == QLatin1String("add_palm_mute"))       return actionAddPalmMute(body);
     if (action == QLatin1String("add_pedal_line"))       return actionAddPedalLine(body);
     if (action == QLatin1String("remove_pedal_line"))    return actionRemovePedalLine(body);
     if (action == QLatin1String("add_trill_line"))       return actionAddTrillLine(body);
@@ -850,6 +856,9 @@ QJsonObject EditudeTestActions::serializePart(Part* part)
         { "glissandos",    serializePartGlissandos(part) },
         { "guitar_bends",  serializePartGuitarBends(part) },
         { "pedal_lines",   serializePartPedalLines(part) },
+        { "vibrato_lines", serializePartVibratoLines(part) },
+        { "let_rings", serializePartLetRings(part) },
+        { "palm_mutes", serializePartPalmMutes(part) },
         { "trill_lines",   serializePartTrillLines(part) },
         { "tuplets",       serializePartTuplets(part) },
         { "lyrics",        serializePartLyricsMap(part) },
@@ -1757,6 +1766,72 @@ QJsonObject EditudeTestActions::serializePartGuitarBends(Part* part)
                 }
             }
         }
+    }
+    return result;
+}
+
+QJsonObject EditudeTestActions::serializePartVibratoLines(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    int index = 0;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (sp->type() != ElementType::VIBRATO) {
+            continue;
+        }
+        if (sp->track() < part->trackRange().startTrack
+            || sp->track() >= part->trackRange().endTrack) {
+            continue;
+        }
+        result[QString::number(index++)] = QJsonObject{
+            { "start_beat", beatJson(sp->tick()) },
+            { "end_beat",   beatJson(sp->tick2()) },
+        };
+    }
+    return result;
+}
+
+QJsonObject EditudeTestActions::serializePartLetRings(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    int index = 0;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (sp->type() != ElementType::LET_RING) {
+            continue;
+        }
+        if (sp->track() < part->trackRange().startTrack
+            || sp->track() >= part->trackRange().endTrack) {
+            continue;
+        }
+        result[QString::number(index++)] = QJsonObject{
+            { "start_beat", beatJson(sp->tick()) },
+            { "end_beat",   beatJson(sp->tick2()) },
+        };
+    }
+    return result;
+}
+
+QJsonObject EditudeTestActions::serializePartPalmMutes(Part* part)
+{
+    Score* score = m_svc->scoreForTest();
+    QJsonObject result;
+    int index = 0;
+    for (auto& kv : score->spanner()) {
+        Spanner* sp = kv.second;
+        if (sp->type() != ElementType::PALM_MUTE) {
+            continue;
+        }
+        if (sp->track() < part->trackRange().startTrack
+            || sp->track() >= part->trackRange().endTrack) {
+            continue;
+        }
+        result[QString::number(index++)] = QJsonObject{
+            { "start_beat", beatJson(sp->tick()) },
+            { "end_beat",   beatJson(sp->tick2()) },
+        };
     }
     return result;
 }
@@ -3725,6 +3800,93 @@ EditudeTestActions::Reply EditudeTestActions::actionRemoveGuitarBend(const QJson
 // ---------------------------------------------------------------------------
 // Advanced spanners -- pedal lines (coordinate-addressed)
 // ---------------------------------------------------------------------------
+
+EditudeTestActions::Reply EditudeTestActions::actionAddVibratoLine(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject sb = body["start_beat"].toObject();
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+
+    score->startCmd(TranslatableString("test", "add vibrato line"));
+    Vibrato* sp = Factory::createVibrato(score->dummy());
+    sp->setTrack(part->trackRange().startTrack);
+    sp->setTick(startTick);
+    sp->setTick2(endTick);
+    score->undoAddElement(sp);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestActions::Reply EditudeTestActions::actionAddLetRing(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject sb = body["start_beat"].toObject();
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+
+    score->startCmd(TranslatableString("test", "add let ring"));
+    LetRing* sp = Factory::createLetRing(score->dummy());
+    sp->setTrack(part->trackRange().startTrack);
+    sp->setTick(startTick);
+    sp->setTick2(endTick);
+    score->undoAddElement(sp);
+    score->endCmd();
+
+    return okResponse();
+}
+
+EditudeTestActions::Reply EditudeTestActions::actionAddPalmMute(const QJsonObject& body)
+{
+    Score* score = m_svc->scoreForTest();
+    if (!score) {
+        return errorResponse(503, "score not ready");
+    }
+
+    const int partIndex = body.value("part_index").toInt(0);
+    if (partIndex < 0 || partIndex >= static_cast<int>(score->parts().size())) {
+        return errorResponse(422, "part_index out of range");
+    }
+    Part* part = score->parts().at(static_cast<size_t>(partIndex));
+
+    const QJsonObject sb = body["start_beat"].toObject();
+    const QJsonObject eb = body["end_beat"].toObject();
+    const Fraction startTick(sb["numerator"].toInt(), sb["denominator"].toInt());
+    const Fraction endTick(eb["numerator"].toInt(), eb["denominator"].toInt());
+
+    score->startCmd(TranslatableString("test", "add palm mute"));
+    PalmMute* sp = Factory::createPalmMute(score->dummy());
+    sp->setTrack(part->trackRange().startTrack);
+    sp->setTick(startTick);
+    sp->setTick2(endTick);
+    score->undoAddElement(sp);
+    score->endCmd();
+
+    return okResponse();
+}
 
 EditudeTestActions::Reply EditudeTestActions::actionAddPedalLine(const QJsonObject& body)
 {

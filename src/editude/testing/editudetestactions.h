@@ -127,6 +127,9 @@ private:
     Reply actionRemoveGuitarBend(const QJsonObject& body);
 
     // Advanced spanners — pedal lines
+    Reply actionAddVibratoLine(const QJsonObject& body);
+    Reply actionAddLetRing(const QJsonObject& body);
+    Reply actionAddPalmMute(const QJsonObject& body);
     Reply actionAddPedalLine(const QJsonObject& body);
     Reply actionRemovePedalLine(const QJsonObject& body);
 
@@ -208,6 +211,9 @@ private:
     QJsonObject serializePartGlissandos(mu::engraving::Part* part);
     QJsonObject serializePartGuitarBends(mu::engraving::Part* part);
     QJsonObject serializePartPedalLines(mu::engraving::Part* part);
+    QJsonObject serializePartVibratoLines(mu::engraving::Part* part);
+    QJsonObject serializePartLetRings(mu::engraving::Part* part);
+    QJsonObject serializePartPalmMutes(mu::engraving::Part* part);
     QJsonObject serializePartTrillLines(mu::engraving::Part* part);
     QJsonObject serializePartLyricsMap(mu::engraving::Part* part);
     QJsonArray  serializePartKeyChanges(mu::engraving::Part* part);

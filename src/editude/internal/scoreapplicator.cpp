@@ -40,6 +40,9 @@
 #include "engraving/dom/staff.h"
 #include "engraving/dom/articulation.h"
 #include "engraving/dom/fingering.h"
+#include "engraving/dom/vibrato.h"
+#include "engraving/dom/letring.h"
+#include "engraving/dom/palmmute.h"
 #include "engraving/types/propertyvalue.h"
 #include "engraving/dom/clef.h"
 #include "engraving/dom/dynamic.h"
@@ -1324,6 +1327,12 @@ bool ScoreApplicator::apply(Score* score, const QJsonObject& payload)
     if (type == QLatin1String("AddGuitarBend"))    return applyAddGuitarBend(score, payload);
     if (type == QLatin1String("RemoveGuitarBend")) return applyRemoveGuitarBend(score, payload);
     // Advanced spanners — pedal lines
+    if (type == QLatin1String("AddVibratoLine"))    return applyAddVibratoLine(score, payload);
+    if (type == QLatin1String("RemoveVibratoLine"))return applyRemoveVibratoLine(score, payload);
+    if (type == QLatin1String("AddLetRing"))        return applyAddLetRing(score, payload);
+    if (type == QLatin1String("RemoveLetRing"))return applyRemoveLetRing(score, payload);
+    if (type == QLatin1String("AddPalmMute"))       return applyAddPalmMute(score, payload);
+    if (type == QLatin1String("RemovePalmMute"))return applyRemovePalmMute(score, payload);
     if (type == QLatin1String("AddPedalLine"))    return applyAddPedalLine(score, payload);
     if (type == QLatin1String("RemovePedalLine")) return applyRemovePedalLine(score, payload);
     // Advanced spanners — trill lines
@@ -2931,6 +2940,171 @@ bool ScoreApplicator::applyRemoveGuitarBend(Score* score, const QJsonObject& op)
 // ---------------------------------------------------------------------------
 // Advanced spanners — pedal lines (beat-range + part-addressed)
 // ---------------------------------------------------------------------------
+
+bool ScoreApplicator::applyAddVibratoLine(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddVibratoLine: unknown or missing part_id";
+        return false;
+    }
+
+    const Fraction startTick = beatToTick(op["start_beat"].toObject());
+    const Fraction endTick = beatToTick(op["end_beat"].toObject());
+    const track_idx_t track = part->trackRange().startTrack;
+
+    score->startCmd(TranslatableString("undoableAction", "Add vibrato line"));
+    Vibrato* sp = Factory::createVibrato(score->dummy());
+    sp->setTrack(track);
+    sp->setTick(startTick);
+    sp->setTick2(endTick);
+    score->undoAddElement(sp);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveVibratoLine(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveVibratoLine: unknown or missing part_id";
+        return false;
+    }
+
+    const Fraction startTick = beatToTick(op["start_beat"].toObject());
+    const Fraction endTick = beatToTick(op["end_beat"].toObject());
+    const track_idx_t track = part->trackRange().startTrack;
+
+    Spanner* target = nullptr;
+    for (auto it = score->spanner().lower_bound(startTick.ticks());
+         it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+        Spanner* candidate = it->second;
+        if (candidate->type() == ElementType::VIBRATO && candidate->track() == track
+            && candidate->tick() == startTick && candidate->tick2() == endTick) {
+            target = candidate;
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveVibratoLine: spanner not found at coordinates";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Remove vibrato line"));
+    score->undoRemoveElement(target);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyAddLetRing(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddLetRing: unknown or missing part_id";
+        return false;
+    }
+
+    const Fraction startTick = beatToTick(op["start_beat"].toObject());
+    const Fraction endTick = beatToTick(op["end_beat"].toObject());
+    const track_idx_t track = part->trackRange().startTrack;
+
+    score->startCmd(TranslatableString("undoableAction", "Add let ring line"));
+    LetRing* sp = Factory::createLetRing(score->dummy());
+    sp->setTrack(track);
+    sp->setTick(startTick);
+    sp->setTick2(endTick);
+    score->undoAddElement(sp);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyRemoveLetRing(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemoveLetRing: unknown or missing part_id";
+        return false;
+    }
+
+    const Fraction startTick = beatToTick(op["start_beat"].toObject());
+    const Fraction endTick = beatToTick(op["end_beat"].toObject());
+    const track_idx_t track = part->trackRange().startTrack;
+
+    Spanner* target = nullptr;
+    for (auto it = score->spanner().lower_bound(startTick.ticks());
+         it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+        Spanner* candidate = it->second;
+        if (candidate->type() == ElementType::LET_RING && candidate->track() == track
+            && candidate->tick() == startTick && candidate->tick2() == endTick) {
+            target = candidate;
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemoveLetRing: spanner not found at coordinates";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Remove let ring line"));
+    score->undoRemoveElement(target);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyAddPalmMute(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyAddPalmMute: unknown or missing part_id";
+        return false;
+    }
+
+    const Fraction startTick = beatToTick(op["start_beat"].toObject());
+    const Fraction endTick = beatToTick(op["end_beat"].toObject());
+    const track_idx_t track = part->trackRange().startTrack;
+
+    score->startCmd(TranslatableString("undoableAction", "Add palm mute line"));
+    PalmMute* sp = Factory::createPalmMute(score->dummy());
+    sp->setTrack(track);
+    sp->setTick(startTick);
+    sp->setTick2(endTick);
+    score->undoAddElement(sp);
+    score->endCmd();
+    return true;
+}
+
+bool ScoreApplicator::applyRemovePalmMute(Score* score, const QJsonObject& op)
+{
+    Part* part = resolvePart(op);
+    if (!part) {
+        LOGW() << "[editude] applyRemovePalmMute: unknown or missing part_id";
+        return false;
+    }
+
+    const Fraction startTick = beatToTick(op["start_beat"].toObject());
+    const Fraction endTick = beatToTick(op["end_beat"].toObject());
+    const track_idx_t track = part->trackRange().startTrack;
+
+    Spanner* target = nullptr;
+    for (auto it = score->spanner().lower_bound(startTick.ticks());
+         it != score->spanner().end() && it->first == startTick.ticks(); ++it) {
+        Spanner* candidate = it->second;
+        if (candidate->type() == ElementType::PALM_MUTE && candidate->track() == track
+            && candidate->tick() == startTick && candidate->tick2() == endTick) {
+            target = candidate;
+            break;
+        }
+    }
+    if (!target) {
+        LOGW() << "[editude] applyRemovePalmMute: spanner not found at coordinates";
+        return false;
+    }
+
+    score->startCmd(TranslatableString("undoableAction", "Remove palm mute line"));
+    score->undoRemoveElement(target);
+    score->endCmd();
+    return true;
+}
 
 bool ScoreApplicator::applyAddPedalLine(Score* score, const QJsonObject& op)
 {
